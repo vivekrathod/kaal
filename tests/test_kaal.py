@@ -494,6 +494,137 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertTrue(kaal.ATTACH_DIR.exists())
         self.assertTrue(kaal.INDEX_PATH.exists())
 
+    def make_joplin_raw_export(self):
+        export_dir = self.vault / "joplin-raw"
+        resources = export_dir / "resources"
+        resources.mkdir(parents=True)
+        folder_id = "11111111111111111111111111111111"
+        note_id = "22222222222222222222222222222222"
+        sensitive_note_id = "33333333333333333333333333333333"
+        resource_id = "44444444444444444444444444444444"
+        tag_id = "55555555555555555555555555555555"
+        note_tag_id = "66666666666666666666666666666666"
+        (export_dir / f"{folder_id}.md").write_text(
+            "Personal\n\n"
+            f"id: {folder_id}\n"
+            "parent_id: \n"
+            "created_time: 2022-01-01T00:00:00.000Z\n"
+            "updated_time: 2022-01-02T00:00:00.000Z\n"
+            "type_: 2\n",
+            encoding="utf-8",
+        )
+        (export_dir / f"{note_id}.md").write_text(
+            "Trip Plan\n\n"
+            "Pack snacks and a printed itinerary.\n\n"
+            f"![receipt.jpg](:/{resource_id})\n\n"
+            f"id: {note_id}\n"
+            f"parent_id: {folder_id}\n"
+            "created_time: 2022-01-03T00:00:00.000Z\n"
+            "updated_time: 2022-01-04T00:00:00.000Z\n"
+            "type_: 1\n",
+            encoding="utf-8",
+        )
+        (export_dir / f"{sensitive_note_id}.md").write_text(
+            "Identity\n\n"
+            f"SSN: {DUMMY_SSN}\n\n"
+            f"id: {sensitive_note_id}\n"
+            f"parent_id: {folder_id}\n"
+            "created_time: 2022-01-05T00:00:00.000Z\n"
+            "updated_time: 2022-01-06T00:00:00.000Z\n"
+            "type_: 1\n",
+            encoding="utf-8",
+        )
+        (export_dir / f"{resource_id}.md").write_text(
+            "receipt.jpg\n\n"
+            f"id: {resource_id}\n"
+            "mime: image/jpeg\n"
+            "file_extension: jpg\n"
+            "size: 12\n"
+            "type_: 4\n",
+            encoding="utf-8",
+        )
+        (export_dir / f"{tag_id}.md").write_text(
+            "travel\n\n"
+            f"id: {tag_id}\n"
+            "type_: 5\n",
+            encoding="utf-8",
+        )
+        (export_dir / f"{note_tag_id}.md").write_text(
+            "\n"
+            f"id: {note_tag_id}\n"
+            f"note_id: {note_id}\n"
+            f"tag_id: {tag_id}\n"
+            "type_: 6\n",
+            encoding="utf-8",
+        )
+        (resources / f"{resource_id}.jpg").write_bytes(b"fake jpg data")
+        return export_dir
+
+    def test_parse_joplin_raw_item_splits_body_from_metadata(self):
+        item = kaal.parse_joplin_raw_item(
+            "Title\n\nBody line\n\nid: 22222222222222222222222222222222\nparent_id: 11111111111111111111111111111111\ntype_: 1\n"
+        )
+        self.assertEqual(item["title"], "Title")
+        self.assertEqual(item["body"], "Body line")
+        self.assertEqual(item["props"]["type_"], "1")
+        self.assertEqual(item["props"]["parent_id"], "11111111111111111111111111111111")
+
+    def test_import_joplin_raw_dry_run_reports_counts_without_writing_notes(self):
+        export_dir = self.make_joplin_raw_export()
+        _result, stdout, _stderr = self.capture_call(
+            kaal.import_joplin_raw,
+            SimpleNamespace(path=str(export_dir), dry_run=True, tags="", sensitivity="auto", extract=False, ocr=False),
+        )
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "dry-run")
+        self.assertEqual(payload["notes"], 2)
+        self.assertEqual(payload["folders"], 1)
+        self.assertEqual(payload["resources"], 1)
+        self.assertEqual(payload["tags"], 1)
+        self.assertEqual(payload["referenced_resources"], 1)
+        self.assertEqual(payload["likely_sensitive_notes"], 1)
+        self.assertEqual(kaal.load_index()["notes"], [])
+
+    def test_import_joplin_raw_imports_notes_tags_folders_and_resources(self):
+        export_dir = self.make_joplin_raw_export()
+        with self.with_fake_crypto():
+            _result, stdout, _stderr = self.capture_call(
+                kaal.import_joplin_raw,
+                SimpleNamespace(path=str(export_dir), dry_run=False, tags="migrated", sensitivity="auto", extract=False, ocr=False),
+            )
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "imported")
+        self.assertEqual(payload["imported_notes"], 2)
+        notes = kaal.load_index()["notes"]
+        by_title = {n["title"]: n for n in notes}
+        self.assertEqual(by_title["Trip Plan"]["storage"], "plaintext")
+        self.assertEqual(by_title["Identity"]["storage"], "encrypted")
+        self.assertIn("joplin", by_title["Trip Plan"]["tags"])
+        self.assertIn("migrated", by_title["Trip Plan"]["tags"])
+        self.assertIn("travel", by_title["Trip Plan"]["tags"])
+        self.assertIn("joplin-notebook-personal", by_title["Trip Plan"]["tags"])
+        self.assertEqual(by_title["Trip Plan"]["attachments"][0]["name"], "receipt.jpg")
+        body = kaal.plaintext_note_path(by_title["Trip Plan"]["id"]).read_text(encoding="utf-8")
+        self.assertIn("Pack snacks", body)
+        self.assertNotIn("type_: 1", body)
+
+    def test_import_joplin_raw_warns_about_unresolved_resource_links(self):
+        export_dir = self.vault / "joplin-missing-resource"
+        export_dir.mkdir()
+        (export_dir / "22222222222222222222222222222222.md").write_text(
+            "Broken\n\nMissing :/99999999999999999999999999999999\n\n"
+            "id: 22222222222222222222222222222222\n"
+            "type_: 1\n",
+            encoding="utf-8",
+        )
+        _result, stdout, _stderr = self.capture_call(
+            kaal.import_joplin_raw,
+            SimpleNamespace(path=str(export_dir), dry_run=True, tags="", sensitivity="auto", extract=False, ocr=False),
+        )
+        payload = json.loads(stdout)
+        self.assertEqual(payload["unresolved_resources"], 1)
+        self.assertIn("missing resource", payload["warnings"][0])
+
     def test_build_parser_parses_representative_commands(self):
         parser = kaal.build_parser()
         self.assertEqual(parser.parse_args(["add", "--title", "T", "--body", "B"]).func, kaal.add_note)
@@ -505,6 +636,7 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(parser.parse_args(["copy", "query", "--field", "ssn"]).func, kaal.copy_field)
         self.assertEqual(parser.parse_args(["attach", "query", "file", "--extract", "--ocr"]).func, kaal.attach_file)
         self.assertEqual(parser.parse_args(["export-attachment", "query", "att", "--force"]).func, kaal.export_attachment)
+        self.assertEqual(parser.parse_args(["import-joplin-raw", "export", "--dry-run", "--tags", "migrated", "--extract", "--ocr"]).func, kaal.import_joplin_raw)
         self.assertEqual(parser.parse_args(["delete", "query", "--yes"]).func, kaal.delete_note)
 
     def test_main_dispatches_to_parsed_command(self):

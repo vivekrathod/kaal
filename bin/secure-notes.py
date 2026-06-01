@@ -42,7 +42,7 @@ SENSITIVE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("CreditCard", re.compile(r"\b(?:\d[ -]*?){13,19}\b")),
     ("Passport", re.compile(r"\bpassport\s*(?:number|#|no\.?|:)?\s*([A-Z0-9]{6,9})\b", re.I)),
     ("DriverLicense", re.compile(r"\b(?:driver'?s?\s+license|dl)\s*(?:number|#|no\.?|:)?\s*([A-Z0-9-]{5,20})\b", re.I)),
-    ("TaxId", re.compile(r"\b(?:ein|itin|tax\s*id)\s*(?:number|#|no\.?|:)?\s*([0-9A-Z-]{5,20})\b", re.I)),
+    ("TaxId", re.compile(r"\b(?:ein|itin|tax\s*id)\b\s*(?:number|#|no\.?|:)?\s*([0-9A-Z-]{5,20})\b", re.I)),
 ]
 SENSITIVE_THRESHOLD = 5
 TEXT_ATTACHMENT_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".json", ".yaml", ".yml", ".xml", ".html", ".htm"}
@@ -224,6 +224,10 @@ def classify_text(text: str, *, context: str = "") -> dict[str, Any]:
     result is sensitive or when extraction/classification is uncertain.
     """
     haystack = f"{context}\n{text}"
+    # Joplin embeds 32-hex resource ids in Markdown links (:/<id>). Those ids
+    # can look like long payment-card numbers to the Luhn heuristic, but they
+    # are opaque local attachment references and should not make a note private.
+    haystack = JOPLIN_RESOURCE_LINK_RE.sub(":/[joplin-resource]", haystack)
     reasons: list[str] = []
     score = 0
     for name, weight, pattern in CLASSIFIER_RULES:
@@ -383,18 +387,17 @@ def redact_text(text: str) -> str:
     return redacted
 
 
-def add_note(args: argparse.Namespace) -> None:
-    init_if_needed()
-    body = read_stdin_or_arg(args.body, getattr(args, "body_file", None))
+def create_note(title: str, body: str, *, tags: list[str] | None = None, sensitivity: str = "auto") -> dict[str, Any]:
     if not body.strip():
         die("Refusing to create an empty note.")
     note_id = secrets.token_hex(6)
     ts = now_iso()
-    storage, classification = decide_storage(body, sensitivity=getattr(args, "sensitivity", "auto"), context=args.title)
+    note_tags = sorted(set(tags or []))
+    storage, classification = decide_storage(body, sensitivity=sensitivity, context=title)
     note_obj = {
         "id": note_id,
-        "title": args.title,
-        "tags": parse_tags(args.tags),
+        "title": title,
+        "tags": note_tags,
         "created": ts,
         "updated": ts,
         "body": body,
@@ -410,11 +413,10 @@ def add_note(args: argparse.Namespace) -> None:
         path = plaintext_note_path(note_id)
         path.write_text(body, encoding="utf-8")
         os.chmod(path, 0o600)
-    index = load_index()
-    index.setdefault("notes", []).append({
+    meta = {
         "id": note_id,
-        "title": args.title,
-        "tags": parse_tags(args.tags),
+        "title": title,
+        "tags": note_tags,
         "created": ts,
         "updated": ts,
         "attachments": [],
@@ -422,17 +424,26 @@ def add_note(args: argparse.Namespace) -> None:
         "sensitivity": classification["sensitivity"],
         "storage": storage,
         "classification": classification,
-    })
+    }
+    index = load_index()
+    index.setdefault("notes", []).append(meta)
     save_index(index)
+    return meta
+
+
+def add_note(args: argparse.Namespace) -> None:
+    init_if_needed()
+    body = read_stdin_or_arg(args.body, getattr(args, "body_file", None))
+    meta = create_note(args.title, body, tags=parse_tags(args.tags), sensitivity=getattr(args, "sensitivity", "auto"))
     print(json.dumps({
         "status": "created",
-        "id": note_id,
-        "title": args.title,
-        "tags": parse_tags(args.tags),
+        "id": meta["id"],
+        "title": meta["title"],
+        "tags": meta["tags"],
         "format": "markdown",
-        "sensitivity": classification["sensitivity"],
-        "storage": storage,
-        "classification_reasons": classification.get("reasons", []),
+        "sensitivity": meta["sensitivity"],
+        "storage": meta["storage"],
+        "classification_reasons": meta.get("classification", {}).get("reasons", []),
     }, indent=2, ensure_ascii=False))
 
 
@@ -579,17 +590,13 @@ def copy_field(args: argparse.Namespace) -> None:
     print(json.dumps({"status": "copied", "note": note.get("id"), "field": args.field, "characters": len(value)}, indent=2))
 
 
-def attach_file(args: argparse.Namespace) -> None:
-    init_if_needed()
-    src = Path(args.file).expanduser().resolve()
-    if not src.exists() or not src.is_file():
-        die(f"Attachment file not found: {src}")
-    meta = require_one_note(args.query)
-    nid = meta["id"]
+def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "auto", extract: bool = False, ocr: bool = False, attachment_name: str | None = None) -> dict[str, Any]:
     data = src.read_bytes()
+    stored_name = attachment_name or src.name
+    nid = meta["id"]
     att_id = secrets.token_hex(6)
-    extracted_md = extract_attachment_markdown(src, ocr=getattr(args, "ocr", False), extract=getattr(args, "extract", False))
-    storage, classification = decide_storage(extracted_md, sensitivity=getattr(args, "sensitivity", "auto"), context=f"{src.name}\n{meta.get('title','')}")
+    extracted_md = extract_attachment_markdown(src, ocr=ocr, extract=extract)
+    storage, classification = decide_storage(extracted_md, sensitivity=sensitivity, context=f"{stored_name}\n{meta.get('title','')}")
     # If the parent note is encrypted/sensitive, attachments inherit encryption.
     if meta.get("storage") == "encrypted" or meta.get("sensitivity") == "sensitive":
         storage = "encrypted"
@@ -599,7 +606,7 @@ def attach_file(args: argparse.Namespace) -> None:
     out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     attachment_meta = {
         "id": att_id,
-        "name": src.name,
+        "name": stored_name,
         "size": len(data),
         "created": now_iso(),
         "sha256": hashlib.sha256(data).hexdigest(),
@@ -609,14 +616,14 @@ def attach_file(args: argparse.Namespace) -> None:
         "extracted_markdown": bool(extracted_md),
     }
     if storage == "encrypted":
-        aad = f"{nid}:{att_id}:{src.name}".encode()
+        aad = f"{nid}:{att_id}:{stored_name}".encode()
         payload = encrypt_bytes(data, aad=aad)
-        secure_write_json(out_dir / "original.json", {"name": src.name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "encrypted": payload})
+        secure_write_json(out_dir / "original.json", {"name": stored_name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "encrypted": payload})
         if extracted_md:
             sidecar_payload = encrypt_bytes(extracted_md.encode(), aad=f"{nid}:{att_id}:extracted.md".encode())
             secure_write_json(out_dir / "extracted.md.json", {"name": "extracted.md", "encrypted": sidecar_payload})
     else:
-        original = out_dir / src.name
+        original = out_dir / stored_name
         original.write_bytes(data)
         os.chmod(original, 0o600)
         if extracted_md:
@@ -629,17 +636,34 @@ def attach_file(args: argparse.Namespace) -> None:
         if n["id"] == nid:
             n.setdefault("attachments", []).append(attachment_meta)
             n["updated"] = now_iso()
+            meta = n
     save_index(index)
+    return attachment_meta
+
+
+def attach_file(args: argparse.Namespace) -> None:
+    init_if_needed()
+    src = Path(args.file).expanduser().resolve()
+    if not src.exists() or not src.is_file():
+        die(f"Attachment file not found: {src}")
+    meta = require_one_note(args.query)
+    attachment_meta = attach_file_to_note(
+        meta,
+        src,
+        sensitivity=getattr(args, "sensitivity", "auto"),
+        extract=getattr(args, "extract", False),
+        ocr=getattr(args, "ocr", False),
+    )
     print(json.dumps({
         "status": "attached",
-        "note": nid,
-        "attachmentId": att_id,
-        "name": src.name,
-        "size": len(data),
-        "storage": storage,
-        "sensitivity": classification["sensitivity"],
-        "extracted_markdown": bool(extracted_md),
-        "classification_reasons": classification.get("reasons", []),
+        "note": meta["id"],
+        "attachmentId": attachment_meta["id"],
+        "name": attachment_meta["name"],
+        "size": attachment_meta["size"],
+        "storage": attachment_meta["storage"],
+        "sensitivity": attachment_meta["sensitivity"],
+        "extracted_markdown": attachment_meta["extracted_markdown"],
+        "classification_reasons": attachment_meta.get("classification", {}).get("reasons", []),
     }, indent=2, ensure_ascii=False))
 
 
@@ -711,6 +735,174 @@ def classify_command(args: argparse.Namespace) -> None:
     print(json.dumps(classify_text(text, context=context), indent=2, ensure_ascii=False))
 
 
+JOPLIN_RESOURCE_LINK_RE = re.compile(r":/([0-9a-fA-F]{32})")
+JOPLIN_PROP_RE = re.compile(r"^([A-Za-z0-9_]+):\s?(.*)$")
+
+
+def parse_joplin_raw_item(text: str) -> dict[str, Any]:
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    while lines and lines[-1] == "":
+        lines.pop()
+    props: dict[str, str] = {}
+    i = len(lines) - 1
+    while i >= 0:
+        match = JOPLIN_PROP_RE.match(lines[i])
+        if not match:
+            break
+        props[match.group(1)] = match.group(2)
+        i -= 1
+    if i >= 0 and lines[i] == "" and props:
+        content_lines = lines[:i]
+    elif props:
+        content_lines = lines[: i + 1]
+    else:
+        content_lines = lines
+    title = content_lines[0].strip() if content_lines else ""
+    body_lines = content_lines[1:]
+    if body_lines and body_lines[0] == "":
+        body_lines = body_lines[1:]
+    return {"title": title, "body": "\n".join(body_lines).strip("\n"), "props": props}
+
+
+def slug_tag(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "untitled"
+
+
+def joplin_notebook_path(folder_id: str, folders: dict[str, dict[str, Any]]) -> list[str]:
+    path: list[str] = []
+    seen: set[str] = set()
+    current = folder_id
+    while current and current in folders and current not in seen:
+        seen.add(current)
+        folder = folders[current]
+        if folder.get("title"):
+            path.append(folder["title"])
+        current = folder.get("props", {}).get("parent_id", "")
+    return list(reversed(path))
+
+
+def joplin_resource_blob(export_dir: Path, resource: dict[str, Any]) -> Path | None:
+    rid = resource.get("props", {}).get("id", "")
+    ext = resource.get("props", {}).get("file_extension", "").strip().lstrip(".")
+    resources_dir = export_dir / "resources"
+    candidates = []
+    if ext:
+        candidates.append(resources_dir / f"{rid}.{ext}")
+    candidates.extend(resources_dir.glob(f"{rid}.*") if resources_dir.exists() else [])
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def load_joplin_raw_export(export_dir: Path) -> dict[str, Any]:
+    if not export_dir.exists() or not export_dir.is_dir():
+        die(f"Joplin RAW export directory not found: {export_dir}")
+    items: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for path in sorted(p for p in export_dir.glob("*.md") if p.is_file()):
+        try:
+            item = parse_joplin_raw_item(safe_read_text(path))
+        except Exception as e:
+            warnings.append(f"could not parse {path.name}: {e}")
+            continue
+        item["path"] = str(path)
+        props = item.get("props", {})
+        if not props.get("id"):
+            warnings.append(f"skipping {path.name}: missing Joplin id")
+            continue
+        items.append(item)
+    by_type: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        by_type.setdefault(item.get("props", {}).get("type_", ""), []).append(item)
+    folders = {i["props"]["id"]: i for i in by_type.get("2", [])}
+    notes = by_type.get("1", [])
+    resources = {i["props"]["id"]: i for i in by_type.get("4", [])}
+    tags = {i["props"]["id"]: i for i in by_type.get("5", [])}
+    note_tags: dict[str, list[str]] = {}
+    for rel in by_type.get("6", []):
+        note_id = rel.get("props", {}).get("note_id", "")
+        tag_id = rel.get("props", {}).get("tag_id", "")
+        if note_id and tag_id in tags:
+            note_tags.setdefault(note_id, []).append(tags[tag_id].get("title", tag_id))
+    referenced: dict[str, list[str]] = {}
+    unresolved = 0
+    for note in notes:
+        note_id = note["props"]["id"]
+        ids = sorted(set(JOPLIN_RESOURCE_LINK_RE.findall(note.get("body", ""))))
+        referenced[note_id] = ids
+        for rid in ids:
+            blob = joplin_resource_blob(export_dir, resources[rid]) if rid in resources else None
+            if not blob:
+                unresolved += 1
+                warnings.append(f"missing resource {rid} referenced by note {note_id}")
+    likely_sensitive = sum(1 for note in notes if classify_text(note.get("body", ""), context=note.get("title", ""))["sensitivity"] == "sensitive")
+    return {
+        "notes": notes,
+        "folders": folders,
+        "resources": resources,
+        "tags": tags,
+        "note_tags": note_tags,
+        "referenced": referenced,
+        "unresolved_resources": unresolved,
+        "likely_sensitive_notes": likely_sensitive,
+        "warnings": warnings,
+    }
+
+
+def import_joplin_raw(args: argparse.Namespace) -> None:
+    init_if_needed()
+    export_dir = Path(args.path).expanduser().resolve()
+    parsed = load_joplin_raw_export(export_dir)
+    referenced_count = sum(len(ids) for ids in parsed["referenced"].values())
+    summary = {
+        "status": "dry-run" if args.dry_run else "imported",
+        "notes": len(parsed["notes"]),
+        "folders": len(parsed["folders"]),
+        "resources": len(parsed["resources"]),
+        "tags": len(parsed["tags"]),
+        "referenced_resources": referenced_count,
+        "unresolved_resources": parsed["unresolved_resources"],
+        "likely_sensitive_notes": parsed["likely_sensitive_notes"],
+        "warnings": parsed["warnings"],
+    }
+    if args.dry_run:
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        return
+
+    imported_notes = 0
+    imported_attachments = 0
+    extra_tags = parse_tags(getattr(args, "tags", ""))
+    for note in parsed["notes"]:
+        props = note["props"]
+        note_id = props["id"]
+        notebook_path = joplin_notebook_path(props.get("parent_id", ""), parsed["folders"])
+        tags = {"imported", "joplin", *extra_tags}
+        tags.update(slug_tag(t) for t in parsed["note_tags"].get(note_id, []))
+        tags.update(f"joplin-notebook-{slug_tag(part)}" for part in notebook_path)
+        body = note.get("body", "") or "<!-- Imported empty Joplin note body -->\n"
+        meta = create_note(note.get("title") or "Untitled Joplin Note", body, tags=sorted(tags), sensitivity=getattr(args, "sensitivity", "auto"))
+        imported_notes += 1
+        for rid in parsed["referenced"].get(note_id, []):
+            resource = parsed["resources"].get(rid)
+            blob = joplin_resource_blob(export_dir, resource) if resource else None
+            if not blob:
+                continue
+            attach_file_to_note(
+                meta,
+                blob,
+                sensitivity=getattr(args, "sensitivity", "auto"),
+                extract=getattr(args, "extract", False),
+                ocr=getattr(args, "ocr", False),
+                attachment_name=resource.get("title") or blob.name,
+            )
+            imported_attachments += 1
+    summary["imported_notes"] = imported_notes
+    summary["imported_attachments"] = imported_attachments
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+
+
 def build_parser() -> argparse.ArgumentParser:
     prog = os.environ.get("KAAL_CLI_NAME", Path(sys.argv[0]).name)
     description = "Kaal: tiny local encrypted notes vault for sensitive data" if prog == "kaal" else "Tiny local encrypted notes vault for sensitive data"
@@ -774,6 +966,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--output", default="")
     sp.add_argument("--force", action="store_true")
     sp.set_defaults(func=export_attachment)
+
+    sp = sub.add_parser("import-joplin-raw", help="Import notes and referenced resources from a Joplin RAW export directory")
+    sp.add_argument("path", help="Joplin RAW export directory")
+    sp.add_argument("--dry-run", action="store_true", help="Scan and report counts without writing to the Kaal vault")
+    sp.add_argument("--tags", default="", help="Comma-separated extra tags for imported notes")
+    sp.add_argument("--sensitivity", default="auto", choices=["auto", "sensitive", "public", "encrypted", "plaintext", "encrypt", "plain"], help="Classification override for imported notes/resources")
+    sp.add_argument("--extract", action="store_true", help="Extract text/Markdown from attached resources when supported")
+    sp.add_argument("--ocr", action="store_true", help="OCR image resources with Tesseract when available")
+    sp.set_defaults(func=import_joplin_raw)
 
     sp = sub.add_parser("delete", help="Delete note and attachments")
     sp.add_argument("query")
