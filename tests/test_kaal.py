@@ -437,8 +437,8 @@ class KaalFeatureTests(unittest.TestCase):
         src_b = self.vault / "same-b.txt"
         src_a.write_text("A", encoding="utf-8")
         src_b.write_text("B", encoding="utf-8")
-        self.call_silently(kaal.attach_file, SimpleNamespace(query=meta["id"], file=str(src_a), sensitivity="public", extract=False, ocr=False))
-        self.call_silently(kaal.attach_file, SimpleNamespace(query=meta["id"], file=str(src_b), sensitivity="public", extract=False, ocr=False))
+        self.call_silently(kaal.attach_file, SimpleNamespace(query=meta["id"], file=str(src_a), sensitivity="public", no_extract=True, no_ocr=True))
+        self.call_silently(kaal.attach_file, SimpleNamespace(query=meta["id"], file=str(src_b), sensitivity="public", no_extract=True, no_ocr=True))
         updated = kaal.load_index()["notes"][0]
 
         code, _stdout, stderr = self.assert_dies(kaal.export_attachment, SimpleNamespace(query=meta["id"], attachment="missing", output="", force=False))
@@ -457,7 +457,7 @@ class KaalFeatureTests(unittest.TestCase):
 
     def test_attach_file_dies_when_source_missing(self):
         meta = self.add_note(title="Public", body="# Public")
-        code, _stdout, stderr = self.assert_dies(kaal.attach_file, SimpleNamespace(query=meta["id"], file=str(self.vault / "missing.txt"), sensitivity="auto", extract=False, ocr=False))
+        code, _stdout, stderr = self.assert_dies(kaal.attach_file, SimpleNamespace(query=meta["id"], file=str(self.vault / "missing.txt"), sensitivity="auto", no_extract=True, no_ocr=True))
         self.assertEqual(code, 1)
         self.assertIn("Attachment file not found", stderr)
 
@@ -589,7 +589,7 @@ class KaalFeatureTests(unittest.TestCase):
         export_dir = self.make_joplin_raw_export()
         _result, stdout, _stderr = self.capture_call(
             kaal.import_joplin_raw,
-            SimpleNamespace(path=str(export_dir), dry_run=True, tags="", sensitivity="auto", extract=False, ocr=False),
+            SimpleNamespace(path=str(export_dir), dry_run=True, tags="", sensitivity="auto", no_extract=True, no_ocr=True),
         )
         payload = json.loads(stdout)
         self.assertEqual(payload["status"], "dry-run")
@@ -606,7 +606,7 @@ class KaalFeatureTests(unittest.TestCase):
         (export_dir / "._22222222222222222222222222222222.md").write_bytes(b"\x00\x05AppleDouble metadata")
         _result, stdout, _stderr = self.capture_call(
             kaal.import_joplin_raw,
-            SimpleNamespace(path=str(export_dir), dry_run=True, tags="", sensitivity="auto", extract=False, ocr=False),
+            SimpleNamespace(path=str(export_dir), dry_run=True, tags="", sensitivity="auto", no_extract=True, no_ocr=True),
         )
         payload = json.loads(stdout)
         self.assertEqual(payload["notes"], 2)
@@ -638,7 +638,7 @@ class KaalFeatureTests(unittest.TestCase):
         (export_dir / "resources" / f"{large_resource_id}.pdf").write_bytes(b"fake pdf")
         _result, stdout, _stderr = self.capture_call(
             kaal.import_joplin_raw,
-            SimpleNamespace(path=str(export_dir), dry_run=True, tags="", sensitivity="auto", extract=False, ocr=False),
+            SimpleNamespace(path=str(export_dir), dry_run=True, tags="", sensitivity="auto", no_extract=True, no_ocr=True),
         )
         payload = json.loads(stdout)
         self.assertEqual(payload["notes"], 3)
@@ -652,7 +652,7 @@ class KaalFeatureTests(unittest.TestCase):
         with self.with_fake_crypto():
             _result, stdout, _stderr = self.capture_call(
                 kaal.import_joplin_raw,
-                SimpleNamespace(path=str(export_dir), dry_run=False, incremental=False, tags="migrated", sensitivity="auto", extract=False, ocr=False),
+                SimpleNamespace(path=str(export_dir), dry_run=False, incremental=False, tags="migrated", sensitivity="auto", no_extract=True, no_ocr=True),
             )
         payload = json.loads(stdout)
         self.assertEqual(payload["status"], "imported")
@@ -672,6 +672,47 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertIn("Pack snacks", body)
         self.assertNotIn("type_: 1", body)
 
+    def test_import_joplin_raw_ocr_extracts_image_resources_by_default(self):
+        export_dir = self.make_joplin_raw_export()
+        original = kaal.run_tesseract
+        try:
+            kaal.run_tesseract = lambda path: "receipt OCR text"
+            with self.with_fake_crypto():
+                _result, stdout, _stderr = self.capture_call(
+                    kaal.import_joplin_raw,
+                    SimpleNamespace(path=str(export_dir), dry_run=False, incremental=False, tags="", sensitivity="auto"),
+                )
+        finally:
+            kaal.run_tesseract = original
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "imported")
+        trip = {n["title"]: n for n in kaal.load_index()["notes"]}["Trip Plan"]
+        att = trip["attachments"][0]
+        self.assertTrue(att["extracted_markdown"])
+        sidecar = kaal.attachment_note_dir(trip["id"]) / att["id"] / "extracted.md"
+        self.assertIn("receipt OCR text", sidecar.read_text(encoding="utf-8"))
+
+    def test_ocr_attachments_updates_existing_attachment_sidecars_separately(self):
+        meta = self.add_note(title="Public", body="# Public")
+        src = self.vault / "scan.jpg"
+        src.write_bytes(b"fake jpg data")
+        self.call_silently(kaal.attach_file, SimpleNamespace(query=meta["id"], file=str(src), sensitivity="public", extract=False, ocr=False))
+        original = kaal.run_tesseract
+        try:
+            kaal.run_tesseract = lambda path: "Driver License: D1234567"
+            _result, stdout, _stderr = self.capture_call(kaal.ocr_attachments, SimpleNamespace(query="", dry_run=False, force=False, limit=0, no_extract=False, no_ocr=False))
+        finally:
+            kaal.run_tesseract = original
+        payload = json.loads(stdout)
+        self.assertEqual(payload["extracted_attachments"], 1)
+        updated = kaal.load_index()["notes"][0]
+        att = updated["attachments"][0]
+        self.assertTrue(att["extracted_markdown"])
+        sidecar = kaal.attachment_note_dir(updated["id"]) / att["id"] / "extracted.md"
+        self.assertTrue(sidecar.exists())
+        self.assertIn("Driver License: D1234567", sidecar.read_text(encoding="utf-8"))
+        self.assertTrue((kaal.attachment_note_dir(updated["id"]) / att["id"] / "scan.jpg").exists())
+
     def test_import_joplin_raw_incremental_repairs_legacy_import_without_duplicates(self):
         export_dir = self.make_joplin_raw_export()
         legacy = kaal.create_note(
@@ -683,7 +724,7 @@ class KaalFeatureTests(unittest.TestCase):
         with self.with_fake_crypto():
             _result, stdout, _stderr = self.capture_call(
                 kaal.import_joplin_raw,
-                SimpleNamespace(path=str(export_dir), dry_run=False, incremental=True, tags="", sensitivity="auto", extract=False, ocr=False),
+                SimpleNamespace(path=str(export_dir), dry_run=False, incremental=True, tags="", sensitivity="auto", no_extract=True, no_ocr=True),
             )
         payload = json.loads(stdout)
         self.assertEqual(payload["mode"], "incremental")
@@ -709,7 +750,7 @@ class KaalFeatureTests(unittest.TestCase):
         )
         _result, stdout, _stderr = self.capture_call(
             kaal.import_joplin_raw,
-            SimpleNamespace(path=str(export_dir), dry_run=True, tags="", sensitivity="auto", extract=False, ocr=False),
+            SimpleNamespace(path=str(export_dir), dry_run=True, tags="", sensitivity="auto", no_extract=True, no_ocr=True),
         )
         payload = json.loads(stdout)
         self.assertEqual(payload["unresolved_resources"], 1)
@@ -726,7 +767,8 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(parser.parse_args(["copy", "query", "--field", "ssn"]).func, kaal.copy_field)
         self.assertEqual(parser.parse_args(["attach", "query", "file", "--extract", "--ocr"]).func, kaal.attach_file)
         self.assertEqual(parser.parse_args(["export-attachment", "query", "att", "--force"]).func, kaal.export_attachment)
-        self.assertEqual(parser.parse_args(["import-joplin-raw", "export", "--dry-run", "--tags", "migrated", "--extract", "--ocr"]).func, kaal.import_joplin_raw)
+        self.assertEqual(parser.parse_args(["ocr-attachments", "--dry-run", "--limit", "5"]).func, kaal.ocr_attachments)
+        self.assertEqual(parser.parse_args(["import-joplin-raw", "export", "--dry-run", "--tags", "migrated", "--no-extract", "--no-ocr"]).func, kaal.import_joplin_raw)
         self.assertEqual(parser.parse_args(["delete", "query", "--yes"]).func, kaal.delete_note)
 
     def test_main_dispatches_to_parsed_command(self):

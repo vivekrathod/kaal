@@ -313,6 +313,41 @@ def extract_attachment_markdown(path: Path, *, ocr: bool = False, extract: bool 
     return f"# Extracted text: {path.name}\n\nMethod: {method}\n\n```text\n{text.strip()}\n```\n"
 
 
+def attachment_original_bytes(note_meta: dict[str, Any], attachment_meta: dict[str, Any]) -> bytes:
+    nid = note_meta["id"]
+    att_dir = attachment_note_dir(nid) / attachment_meta["id"]
+    if attachment_meta.get("storage", "encrypted") == "plaintext":
+        return (att_dir / attachment_meta.get("stored_name", attachment_meta["name"])).read_bytes()
+    payload_path = att_dir / "original.json"
+    if not payload_path.exists():
+        payload_path = attachment_note_dir(nid) / f"{attachment_meta['id']}.json"
+    data = json.loads(payload_path.read_text())
+    data_name = data["name"]
+    aad = f"{nid}:{attachment_meta['id']}:{data_name}".encode()
+    return decrypt_payload(data["encrypted"], aad=aad)
+
+
+def attachment_extracted_sidecar_exists(note_meta: dict[str, Any], attachment_meta: dict[str, Any]) -> bool:
+    att_dir = attachment_note_dir(note_meta["id"]) / attachment_meta["id"]
+    return (att_dir / "extracted.md").exists() or (att_dir / "extracted.md.json").exists()
+
+
+def write_attachment_extracted_sidecar(note_meta: dict[str, Any], attachment_meta: dict[str, Any], extracted_md: str) -> None:
+    nid = note_meta["id"]
+    att_id = attachment_meta["id"]
+    att_dir = attachment_note_dir(nid) / att_id
+    att_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if attachment_meta.get("storage", "encrypted") == "encrypted":
+        sidecar_payload = encrypt_bytes(extracted_md.encode(), aad=f"{nid}:{att_id}:extracted.md".encode())
+        secure_write_json(att_dir / "extracted.md.json", {"name": "extracted.md", "encrypted": sidecar_payload})
+        (att_dir / "extracted.md").unlink(missing_ok=True)
+    else:
+        sidecar = att_dir / "extracted.md"
+        sidecar.write_text(extracted_md, encoding="utf-8")
+        os.chmod(sidecar, 0o600)
+        (att_dir / "extracted.md.json").unlink(missing_ok=True)
+
+
 def read_stdin_or_arg(value: str | None, body_file: str | None = None) -> str:
     if body_file:
         return safe_read_text(Path(body_file).expanduser().resolve())
@@ -653,17 +688,12 @@ def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "
         aad = f"{nid}:{att_id}:{stored_name}".encode()
         payload = encrypt_bytes(data, aad=aad)
         secure_write_json(out_dir / "original.json", {"name": stored_name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "encrypted": payload})
-        if extracted_md:
-            sidecar_payload = encrypt_bytes(extracted_md.encode(), aad=f"{nid}:{att_id}:extracted.md".encode())
-            secure_write_json(out_dir / "extracted.md.json", {"name": "extracted.md", "encrypted": sidecar_payload})
     else:
         original = out_dir / disk_name
         original.write_bytes(data)
         os.chmod(original, 0o600)
-        if extracted_md:
-            sidecar = out_dir / "extracted.md"
-            sidecar.write_text(extracted_md, encoding="utf-8")
-            os.chmod(sidecar, 0o600)
+    if extracted_md:
+        write_attachment_extracted_sidecar(meta, attachment_meta, extracted_md)
     secure_write_json(out_dir / "metadata.json", attachment_meta)
     index = load_index()
     for n in index.get("notes", []):
@@ -712,25 +742,85 @@ def export_attachment(args: argparse.Namespace) -> None:
     if len(matches) > 1:
         die("Multiple attachments match; use attachment id.")
     att = matches[0]
-    att_dir = attachment_note_dir(nid) / att["id"]
-    if att.get("storage", "encrypted") == "plaintext":
-        data_name = att["name"]
-        plaintext = (att_dir / att.get("stored_name", data_name)).read_bytes()
-    else:
-        payload_path = att_dir / "original.json"
-        if not payload_path.exists():
-            # Backward compatibility with the old single-json attachment layout.
-            payload_path = attachment_note_dir(nid) / f"{att['id']}.json"
-        data = json.loads(payload_path.read_text())
-        data_name = data["name"]
-        aad = f"{nid}:{att['id']}:{data_name}".encode()
-        plaintext = decrypt_payload(data["encrypted"], aad=aad)
-    out = Path(args.output).expanduser().resolve() if args.output else Path.cwd() / data_name
+    plaintext = attachment_original_bytes(meta, att)
+    out = Path(args.output).expanduser().resolve() if args.output else Path.cwd() / att.get("name", "attachment")
     if out.exists() and not args.force:
         die(f"Output exists: {out}; pass --force to overwrite.")
     out.write_bytes(plaintext)
     os.chmod(out, 0o600)
     print(json.dumps({"status": "exported", "path": str(out), "bytes": len(plaintext), "sha256": hashlib.sha256(plaintext).hexdigest()}, indent=2))
+
+
+def ocr_attachments(args: argparse.Namespace) -> None:
+    init_if_needed()
+    index = load_index()
+    query = getattr(args, "query", "") or ""
+    force = getattr(args, "force", False)
+    dry_run = getattr(args, "dry_run", False)
+    extract = not getattr(args, "no_extract", False)
+    ocr = not getattr(args, "no_ocr", False)
+    limit = getattr(args, "limit", 0) or 0
+    notes = index.get("notes", [])
+    if query:
+        q = query.lower()
+        notes = [n for n in notes if n.get("id") == query or q in n.get("title", "").lower()]
+    scanned = 0
+    eligible = 0
+    skipped_existing = 0
+    skipped_unsupported = 0
+    extracted = 0
+    no_text = 0
+    errors: list[dict[str, str]] = []
+    for note in notes:
+        for att in note.get("attachments", []):
+            scanned += 1
+            suffix = Path(att.get("name", "")).suffix.lower()
+            supported = (extract and suffix in TEXT_ATTACHMENT_SUFFIXES | PDF_ATTACHMENT_SUFFIXES) or (ocr and suffix in IMAGE_ATTACHMENT_SUFFIXES)
+            if not supported:
+                skipped_unsupported += 1
+                continue
+            if not force and (att.get("extracted_markdown") or attachment_extracted_sidecar_exists(note, att)):
+                if not dry_run and attachment_extracted_sidecar_exists(note, att) and not att.get("extracted_markdown"):
+                    att["extracted_markdown"] = True
+                    secure_write_json(attachment_note_dir(note["id"]) / att["id"] / "metadata.json", att)
+                skipped_existing += 1
+                continue
+            if limit and eligible >= limit:
+                continue
+            eligible += 1
+            if dry_run:
+                continue
+            try:
+                with tempfile.TemporaryDirectory(prefix="kaal-ocr-") as td:
+                    os.chmod(td, 0o700)
+                    tmp = Path(td) / (att.get("stored_name") or att.get("name") or f"attachment-{att['id']}")
+                    tmp.write_bytes(attachment_original_bytes(note, att))
+                    os.chmod(tmp, 0o600)
+                    extracted_md = extract_attachment_markdown(tmp, ocr=ocr, extract=extract)
+                if extracted_md:
+                    write_attachment_extracted_sidecar(note, att, extracted_md)
+                    att["extracted_markdown"] = True
+                    att["extracted_at"] = now_iso()
+                    extracted += 1
+                else:
+                    att["extracted_markdown"] = False
+                    att["extraction_attempted_at"] = now_iso()
+                    no_text += 1
+                secure_write_json(attachment_note_dir(note["id"]) / att["id"] / "metadata.json", att)
+            except Exception as e:
+                errors.append({"note_id": note.get("id", ""), "attachment_id": att.get("id", ""), "name": att.get("name", ""), "error": str(e)})
+    if not dry_run and (extracted or no_text or skipped_existing):
+        save_index(index)
+    print(json.dumps({
+        "status": "dry-run" if dry_run else "updated",
+        "scanned_attachments": scanned,
+        "eligible_attachments": eligible,
+        "extracted_attachments": extracted,
+        "no_text_attachments": no_text,
+        "skipped_existing": skipped_existing,
+        "skipped_unsupported": skipped_unsupported,
+        "errors": errors,
+    }, indent=2, ensure_ascii=False))
 
 
 def delete_note(args: argparse.Namespace) -> None:
@@ -1030,8 +1120,8 @@ def import_joplin_raw(args: argparse.Namespace) -> None:
                 meta,
                 blob,
                 sensitivity=getattr(args, "sensitivity", "auto"),
-                extract=getattr(args, "extract", False),
-                ocr=getattr(args, "ocr", False),
+                extract=not getattr(args, "no_extract", False),
+                ocr=not getattr(args, "no_ocr", False),
                 attachment_name=resource.get("title") or blob.name,
                 source={"type": "joplin", "note_id": note_id, "resource_id": rid},
             )
@@ -1108,14 +1198,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--force", action="store_true")
     sp.set_defaults(func=export_attachment)
 
+    sp = sub.add_parser("ocr-attachments", help="Extract/OCR text from existing attachments into separate sidecars")
+    sp.add_argument("--query", default="", help="Optional note id or title substring to limit processing")
+    sp.add_argument("--dry-run", action="store_true", help="Report eligible attachments without writing OCR sidecars")
+    sp.add_argument("--force", action="store_true", help="Reprocess attachments that already have extracted Markdown")
+    sp.add_argument("--limit", type=int, default=0, help="Maximum eligible attachments to process")
+    sp.add_argument("--no-extract", action="store_true", help="Do not extract text/PDF attachments")
+    sp.add_argument("--no-ocr", action="store_true", help="Do not OCR image attachments")
+    sp.set_defaults(func=ocr_attachments)
+
     sp = sub.add_parser("import-joplin-raw", help="Import notes and referenced resources from a Joplin RAW export directory")
     sp.add_argument("path", help="Joplin RAW export directory")
     sp.add_argument("--dry-run", action="store_true", help="Scan and report counts without writing to the Kaal vault")
     sp.add_argument("--incremental", "--repair", action="store_true", help="Repair/import only missing Joplin notes and attachments; skip existing imported notes")
     sp.add_argument("--tags", default="", help="Comma-separated extra tags for imported notes")
     sp.add_argument("--sensitivity", default="auto", choices=["auto", "sensitive", "public", "encrypted", "plaintext", "encrypt", "plain"], help="Classification override for imported notes/resources")
-    sp.add_argument("--extract", action="store_true", help="Extract text/Markdown from attached resources when supported")
-    sp.add_argument("--ocr", action="store_true", help="OCR image resources with Tesseract when available")
+    sp.add_argument("--no-extract", action="store_true", help="Do not extract text/Markdown from text/PDF resources; extraction is on by default")
+    sp.add_argument("--no-ocr", action="store_true", help="Do not OCR image resources; OCR is on by default")
     sp.set_defaults(func=import_joplin_raw)
 
     sp = sub.add_parser("delete", help="Delete note and attachments")
