@@ -612,12 +612,47 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["notes"], 2)
         self.assertFalse(any("._" in warning for warning in payload["warnings"]))
 
+    def test_import_joplin_raw_dry_run_reads_large_items_before_metadata(self):
+        export_dir = self.make_joplin_raw_export()
+        large_note_id = "77777777777777777777777777777777"
+        large_resource_id = "88888888888888888888888888888888"
+        (export_dir / f"{large_note_id}.md").write_text(
+            "Large clipped page\n\n"
+            + ("Long body line\n" * 90000)
+            + f"\n:/ {large_resource_id}\n".replace(":/ ", ":/")
+            + f"\nid: {large_note_id}\n"
+            "parent_id: 11111111111111111111111111111111\n"
+            "type_: 1\n",
+            encoding="utf-8",
+        )
+        (export_dir / f"{large_resource_id}.md").write_text(
+            "large.pdf\n\n"
+            + ("ocr text line\n" * 90000)
+            + f"\nid: {large_resource_id}\n"
+            "mime: application/pdf\n"
+            "file_extension: pdf\n"
+            "size: 9\n"
+            "type_: 4\n",
+            encoding="utf-8",
+        )
+        (export_dir / "resources" / f"{large_resource_id}.pdf").write_bytes(b"fake pdf")
+        _result, stdout, _stderr = self.capture_call(
+            kaal.import_joplin_raw,
+            SimpleNamespace(path=str(export_dir), dry_run=True, tags="", sensitivity="auto", extract=False, ocr=False),
+        )
+        payload = json.loads(stdout)
+        self.assertEqual(payload["notes"], 3)
+        self.assertEqual(payload["resources"], 2)
+        self.assertEqual(payload["referenced_resources"], 2)
+        self.assertEqual(payload["unresolved_resources"], 0)
+        self.assertEqual(payload["warnings"], [])
+
     def test_import_joplin_raw_imports_notes_tags_folders_and_resources(self):
         export_dir = self.make_joplin_raw_export()
         with self.with_fake_crypto():
             _result, stdout, _stderr = self.capture_call(
                 kaal.import_joplin_raw,
-                SimpleNamespace(path=str(export_dir), dry_run=False, tags="migrated", sensitivity="auto", extract=False, ocr=False),
+                SimpleNamespace(path=str(export_dir), dry_run=False, incremental=False, tags="migrated", sensitivity="auto", extract=False, ocr=False),
             )
         payload = json.loads(stdout)
         self.assertEqual(payload["status"], "imported")
@@ -626,14 +661,42 @@ class KaalFeatureTests(unittest.TestCase):
         by_title = {n["title"]: n for n in notes}
         self.assertEqual(by_title["Trip Plan"]["storage"], "plaintext")
         self.assertEqual(by_title["Identity"]["storage"], "encrypted")
+        self.assertEqual(by_title["Trip Plan"]["source"], {"type": "joplin", "id": "22222222222222222222222222222222"})
         self.assertIn("joplin", by_title["Trip Plan"]["tags"])
         self.assertIn("migrated", by_title["Trip Plan"]["tags"])
         self.assertIn("travel", by_title["Trip Plan"]["tags"])
         self.assertIn("joplin-notebook-personal", by_title["Trip Plan"]["tags"])
         self.assertEqual(by_title["Trip Plan"]["attachments"][0]["name"], "receipt.jpg")
+        self.assertEqual(by_title["Trip Plan"]["attachments"][0]["source"], {"type": "joplin", "note_id": "22222222222222222222222222222222", "resource_id": "44444444444444444444444444444444"})
         body = kaal.plaintext_note_path(by_title["Trip Plan"]["id"]).read_text(encoding="utf-8")
         self.assertIn("Pack snacks", body)
         self.assertNotIn("type_: 1", body)
+
+    def test_import_joplin_raw_incremental_repairs_legacy_import_without_duplicates(self):
+        export_dir = self.make_joplin_raw_export()
+        legacy = kaal.create_note(
+            "Trip Plan",
+            "Pack snacks and a printed itinerary.",
+            tags=["imported", "joplin", "travel", "joplin-notebook-personal"],
+            sensitivity="public",
+        )
+        with self.with_fake_crypto():
+            _result, stdout, _stderr = self.capture_call(
+                kaal.import_joplin_raw,
+                SimpleNamespace(path=str(export_dir), dry_run=False, incremental=True, tags="", sensitivity="auto", extract=False, ocr=False),
+            )
+        payload = json.loads(stdout)
+        self.assertEqual(payload["mode"], "incremental")
+        self.assertEqual(payload["imported_notes"], 1)
+        self.assertEqual(payload["skipped_existing_notes"], 1)
+        self.assertEqual(payload["imported_attachments"], 1)
+        notes = kaal.load_index()["notes"]
+        self.assertEqual(len([n for n in notes if n["title"] == "Trip Plan"]), 1)
+        repaired = next(n for n in notes if n["id"] == legacy["id"])
+        self.assertEqual(len(repaired["attachments"]), 1)
+        self.assertEqual(repaired["attachments"][0]["source"]["resource_id"], "44444444444444444444444444444444")
+        identity = next(n for n in notes if n["title"] == "Identity")
+        self.assertEqual(identity["source"], {"type": "joplin", "id": "33333333333333333333333333333333"})
 
     def test_import_joplin_raw_warns_about_unresolved_resource_links(self):
         export_dir = self.vault / "joplin-missing-resource"

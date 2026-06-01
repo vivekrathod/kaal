@@ -387,7 +387,7 @@ def redact_text(text: str) -> str:
     return redacted
 
 
-def create_note(title: str, body: str, *, tags: list[str] | None = None, sensitivity: str = "auto") -> dict[str, Any]:
+def create_note(title: str, body: str, *, tags: list[str] | None = None, sensitivity: str = "auto", source: dict[str, Any] | None = None) -> dict[str, Any]:
     if not body.strip():
         die("Refusing to create an empty note.")
     note_id = secrets.token_hex(6)
@@ -406,6 +406,8 @@ def create_note(title: str, body: str, *, tags: list[str] | None = None, sensiti
         "storage": storage,
         "classification": classification,
     }
+    if source:
+        note_obj["source"] = source
     if storage == "encrypted":
         payload = encrypt_bytes(json.dumps(note_obj, ensure_ascii=False).encode(), aad=note_id.encode())
         secure_write_json(encrypted_note_path(note_id), payload)
@@ -425,6 +427,8 @@ def create_note(title: str, body: str, *, tags: list[str] | None = None, sensiti
         "storage": storage,
         "classification": classification,
     }
+    if source:
+        meta["source"] = source
     index = load_index()
     index.setdefault("notes", []).append(meta)
     save_index(index)
@@ -616,7 +620,7 @@ def safe_attachment_filename(name: str, att_id: str, *, max_bytes: int = 180) ->
     return f"{out or 'attachment'}-{digest}{suffix}"
 
 
-def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "auto", extract: bool = False, ocr: bool = False, attachment_name: str | None = None) -> dict[str, Any]:
+def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "auto", extract: bool = False, ocr: bool = False, attachment_name: str | None = None, source: dict[str, Any] | None = None) -> dict[str, Any]:
     data = src.read_bytes()
     stored_name = attachment_name or src.name
     nid = meta["id"]
@@ -643,6 +647,8 @@ def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "
         "classification": classification,
         "extracted_markdown": bool(extracted_md),
     }
+    if source:
+        attachment_meta["source"] = source
     if storage == "encrypted":
         aad = f"{nid}:{att_id}:{stored_name}".encode()
         payload = encrypt_bytes(data, aad=aad)
@@ -831,7 +837,7 @@ def load_joplin_raw_export(export_dir: Path) -> dict[str, Any]:
     warnings: list[str] = []
     for path in sorted(p for p in export_dir.glob("*.md") if p.is_file() and not p.name.startswith("._")):
         try:
-            item = parse_joplin_raw_item(safe_read_text(path))
+            item = parse_joplin_raw_item(path.read_text(encoding="utf-8", errors="replace"))
         except Exception as e:
             warnings.append(f"could not parse {path.name}: {e}")
             continue
@@ -879,13 +885,99 @@ def load_joplin_raw_export(export_dir: Path) -> dict[str, Any]:
     }
 
 
+def joplin_import_tags(note: dict[str, Any], parsed: dict[str, Any], extra_tags: list[str]) -> list[str]:
+    props = note["props"]
+    notebook_path = joplin_notebook_path(props.get("parent_id", ""), parsed["folders"])
+    tags = {"imported", "joplin", *extra_tags}
+    tags.update(slug_tag(t) for t in parsed["note_tags"].get(props["id"], []))
+    tags.update(f"joplin-notebook-{slug_tag(part)}" for part in notebook_path)
+    return sorted(tags)
+
+
+def find_existing_joplin_note(index: dict[str, Any], note: dict[str, Any], expected_tags: list[str], used_ids: set[str] | None = None) -> dict[str, Any] | None:
+    used_ids = used_ids or set()
+    joplin_id = note["props"]["id"]
+    source_matches = [
+        n for n in index.get("notes", [])
+        if n.get("id") not in used_ids and n.get("source", {}).get("type") == "joplin" and n.get("source", {}).get("id") == joplin_id
+    ]
+    if len(source_matches) == 1:
+        return source_matches[0]
+    title = note.get("title") or "Untitled Joplin Note"
+    expected = set(expected_tags)
+    legacy_matches = [
+        n for n in index.get("notes", [])
+        if n.get("id") not in used_ids and n.get("title") == title and {"imported", "joplin"}.issubset(set(n.get("tags", []))) and expected.issubset(set(n.get("tags", [])))
+    ]
+    if len(legacy_matches) == 1:
+        return legacy_matches[0]
+    fallback_matches = [
+        n for n in index.get("notes", [])
+        if n.get("id") not in used_ids and n.get("title") == title and {"imported", "joplin"}.issubset(set(n.get("tags", [])))
+    ]
+    if len(fallback_matches) == 1:
+        return fallback_matches[0]
+    expected_body_hash = hashlib.sha256((note.get("body", "") or "<!-- Imported empty Joplin note body -->\n").encode("utf-8")).hexdigest()
+    body_matches = []
+    for candidate in fallback_matches or legacy_matches:
+        try:
+            candidate_body = load_note(candidate).get("body", "")
+        except Exception:
+            continue
+        if hashlib.sha256(candidate_body.encode("utf-8")).hexdigest() == expected_body_hash:
+            body_matches.append(candidate)
+    if body_matches:
+        return sorted(body_matches, key=lambda n: n.get("id", ""))[0]
+    return None
+
+
+def note_has_resource_attachment(note_meta: dict[str, Any], rid: str, blob: Path) -> bool:
+    blob_hash = hashlib.sha256(blob.read_bytes()).hexdigest()
+    for attachment in note_meta.get("attachments", []):
+        source = attachment.get("source", {})
+        if source.get("type") == "joplin" and source.get("resource_id") == rid:
+            return True
+        if attachment.get("sha256") == blob_hash:
+            return True
+    return False
+
+
 def import_joplin_raw(args: argparse.Namespace) -> None:
     init_if_needed()
     export_dir = Path(args.path).expanduser().resolve()
     parsed = load_joplin_raw_export(export_dir)
     referenced_count = sum(len(ids) for ids in parsed["referenced"].values())
+    incremental = getattr(args, "incremental", False)
+    extra_tags = parse_tags(getattr(args, "tags", ""))
+    index = load_index()
+    planned_notes = 0
+    planned_attachments = 0
+    skipped_existing_notes = 0
+    skipped_existing_attachments = 0
+    plan: list[tuple[dict[str, Any], dict[str, Any] | None, list[str]]] = []
+    used_existing_note_ids: set[str] = set()
+    for note in parsed["notes"]:
+        tags = joplin_import_tags(note, parsed, extra_tags)
+        existing = find_existing_joplin_note(index, note, tags, used_existing_note_ids) if incremental else None
+        if existing:
+            used_existing_note_ids.add(existing["id"])
+            skipped_existing_notes += 1
+        else:
+            planned_notes += 1
+        plan.append((note, existing, tags))
+        note_id = note["props"]["id"]
+        for rid in parsed["referenced"].get(note_id, []):
+            resource = parsed["resources"].get(rid)
+            blob = joplin_resource_blob(export_dir, resource) if resource else None
+            if not blob:
+                continue
+            if existing and note_has_resource_attachment(existing, rid, blob):
+                skipped_existing_attachments += 1
+            else:
+                planned_attachments += 1
     summary = {
         "status": "dry-run" if args.dry_run else "imported",
+        "mode": "incremental" if incremental else "full",
         "notes": len(parsed["notes"]),
         "folders": len(parsed["folders"]),
         "resources": len(parsed["resources"]),
@@ -895,27 +987,44 @@ def import_joplin_raw(args: argparse.Namespace) -> None:
         "likely_sensitive_notes": parsed["likely_sensitive_notes"],
         "warnings": parsed["warnings"],
     }
+    if incremental:
+        summary.update({
+            "existing_notes": skipped_existing_notes,
+            "pending_notes": planned_notes,
+            "existing_attachments": skipped_existing_attachments,
+            "pending_attachments": planned_attachments,
+        })
     if args.dry_run:
         print(json.dumps(summary, indent=2, ensure_ascii=False))
         return
 
     imported_notes = 0
     imported_attachments = 0
-    extra_tags = parse_tags(getattr(args, "tags", ""))
-    for note in parsed["notes"]:
+    skipped_notes = 0
+    skipped_attachments = 0
+    for note, existing, tags in plan:
         props = note["props"]
         note_id = props["id"]
-        notebook_path = joplin_notebook_path(props.get("parent_id", ""), parsed["folders"])
-        tags = {"imported", "joplin", *extra_tags}
-        tags.update(slug_tag(t) for t in parsed["note_tags"].get(note_id, []))
-        tags.update(f"joplin-notebook-{slug_tag(part)}" for part in notebook_path)
-        body = note.get("body", "") or "<!-- Imported empty Joplin note body -->\n"
-        meta = create_note(note.get("title") or "Untitled Joplin Note", body, tags=sorted(tags), sensitivity=getattr(args, "sensitivity", "auto"))
-        imported_notes += 1
+        if existing:
+            meta = existing
+            skipped_notes += 1
+        else:
+            body = note.get("body", "") or "<!-- Imported empty Joplin note body -->\n"
+            meta = create_note(
+                note.get("title") or "Untitled Joplin Note",
+                body,
+                tags=tags,
+                sensitivity=getattr(args, "sensitivity", "auto"),
+                source={"type": "joplin", "id": note_id},
+            )
+            imported_notes += 1
         for rid in parsed["referenced"].get(note_id, []):
             resource = parsed["resources"].get(rid)
             blob = joplin_resource_blob(export_dir, resource) if resource else None
             if not blob:
+                continue
+            if incremental and existing and note_has_resource_attachment(meta, rid, blob):
+                skipped_attachments += 1
                 continue
             attach_file_to_note(
                 meta,
@@ -924,10 +1033,14 @@ def import_joplin_raw(args: argparse.Namespace) -> None:
                 extract=getattr(args, "extract", False),
                 ocr=getattr(args, "ocr", False),
                 attachment_name=resource.get("title") or blob.name,
+                source={"type": "joplin", "note_id": note_id, "resource_id": rid},
             )
             imported_attachments += 1
     summary["imported_notes"] = imported_notes
     summary["imported_attachments"] = imported_attachments
+    if incremental:
+        summary["skipped_existing_notes"] = skipped_notes
+        summary["skipped_existing_attachments"] = skipped_attachments
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
 
@@ -998,6 +1111,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("import-joplin-raw", help="Import notes and referenced resources from a Joplin RAW export directory")
     sp.add_argument("path", help="Joplin RAW export directory")
     sp.add_argument("--dry-run", action="store_true", help="Scan and report counts without writing to the Kaal vault")
+    sp.add_argument("--incremental", "--repair", action="store_true", help="Repair/import only missing Joplin notes and attachments; skip existing imported notes")
     sp.add_argument("--tags", default="", help="Comma-separated extra tags for imported notes")
     sp.add_argument("--sensitivity", default="auto", choices=["auto", "sensitive", "public", "encrypted", "plaintext", "encrypt", "plain"], help="Classification override for imported notes/resources")
     sp.add_argument("--extract", action="store_true", help="Extract text/Markdown from attached resources when supported")
