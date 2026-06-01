@@ -590,11 +590,38 @@ def copy_field(args: argparse.Namespace) -> None:
     print(json.dumps({"status": "copied", "note": note.get("id"), "field": args.field, "characters": len(value)}, indent=2))
 
 
+def safe_attachment_filename(name: str, att_id: str, *, max_bytes: int = 180) -> str:
+    """Return a filesystem-safe storage filename while preserving the display name in metadata."""
+    fallback = f"attachment-{att_id}"
+    cleaned = Path(name).name.strip().replace("/", "_").replace(":", "_") or fallback
+    cleaned = re.sub(r"[\x00-\x1f]", "_", cleaned)
+    if cleaned in {".", ".."}:
+        cleaned = fallback
+    if len(cleaned.encode("utf-8")) <= max_bytes:
+        return cleaned
+    suffix = Path(cleaned).suffix
+    if len(suffix.encode("utf-8")) > 20:
+        suffix = ""
+    digest = hashlib.sha256(name.encode("utf-8", errors="replace")).hexdigest()[:12]
+    stem_budget = max_bytes - len(suffix.encode("utf-8")) - len(digest) - 2
+    stem = Path(cleaned).stem
+    out = ""
+    used = 0
+    for ch in stem:
+        b = len(ch.encode("utf-8"))
+        if used + b > max(1, stem_budget):
+            break
+        out += ch
+        used += b
+    return f"{out or 'attachment'}-{digest}{suffix}"
+
+
 def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "auto", extract: bool = False, ocr: bool = False, attachment_name: str | None = None) -> dict[str, Any]:
     data = src.read_bytes()
     stored_name = attachment_name or src.name
     nid = meta["id"]
     att_id = secrets.token_hex(6)
+    disk_name = safe_attachment_filename(stored_name, att_id)
     extracted_md = extract_attachment_markdown(src, ocr=ocr, extract=extract)
     storage, classification = decide_storage(extracted_md, sensitivity=sensitivity, context=f"{stored_name}\n{meta.get('title','')}")
     # If the parent note is encrypted/sensitive, attachments inherit encryption.
@@ -607,6 +634,7 @@ def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "
     attachment_meta = {
         "id": att_id,
         "name": stored_name,
+        "stored_name": disk_name,
         "size": len(data),
         "created": now_iso(),
         "sha256": hashlib.sha256(data).hexdigest(),
@@ -623,7 +651,7 @@ def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "
             sidecar_payload = encrypt_bytes(extracted_md.encode(), aad=f"{nid}:{att_id}:extracted.md".encode())
             secure_write_json(out_dir / "extracted.md.json", {"name": "extracted.md", "encrypted": sidecar_payload})
     else:
-        original = out_dir / stored_name
+        original = out_dir / disk_name
         original.write_bytes(data)
         os.chmod(original, 0o600)
         if extracted_md:
@@ -681,7 +709,7 @@ def export_attachment(args: argparse.Namespace) -> None:
     att_dir = attachment_note_dir(nid) / att["id"]
     if att.get("storage", "encrypted") == "plaintext":
         data_name = att["name"]
-        plaintext = (att_dir / data_name).read_bytes()
+        plaintext = (att_dir / att.get("stored_name", data_name)).read_bytes()
     else:
         payload_path = att_dir / "original.json"
         if not payload_path.exists():
@@ -801,7 +829,7 @@ def load_joplin_raw_export(export_dir: Path) -> dict[str, Any]:
         die(f"Joplin RAW export directory not found: {export_dir}")
     items: list[dict[str, Any]] = []
     warnings: list[str] = []
-    for path in sorted(p for p in export_dir.glob("*.md") if p.is_file()):
+    for path in sorted(p for p in export_dir.glob("*.md") if p.is_file() and not p.name.startswith("._")):
         try:
             item = parse_joplin_raw_item(safe_read_text(path))
         except Exception as e:
