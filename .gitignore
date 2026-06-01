@@ -1,0 +1,15 @@
+# Kaal vault data: do not commit encrypted user notes or attachments by default.
+# Even encrypted sensitive data should stay local unless explicitly backed up.
+/index.json
+/notes/
+/attachments/
+
+# Local Python runtime/dependencies
+/.venv/
+__pycache__/
+*.py[cod]
+
+# Local/editor noise
+.DS_Store
+*.tmp
+*.log

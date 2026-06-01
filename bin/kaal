@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PYTHON="$SCRIPT_DIR/../.venv/bin/python"
+if [ ! -x "$PYTHON" ]; then
+  PYTHON=$(command -v python3 || command -v python)
+fi
+KAAL_CLI_NAME=kaal exec "$PYTHON" "$SCRIPT_DIR/secure-notes.py" "$@"
