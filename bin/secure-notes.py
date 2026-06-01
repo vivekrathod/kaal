@@ -44,6 +44,26 @@ SENSITIVE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("DriverLicense", re.compile(r"\b(?:driver'?s?\s+license|dl)\s*(?:number|#|no\.?|:)?\s*([A-Z0-9-]{5,20})\b", re.I)),
     ("TaxId", re.compile(r"\b(?:ein|itin|tax\s*id)\s*(?:number|#|no\.?|:)?\s*([0-9A-Z-]{5,20})\b", re.I)),
 ]
+SENSITIVE_THRESHOLD = 5
+TEXT_ATTACHMENT_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".json", ".yaml", ".yml", ".xml", ".html", ".htm"}
+IMAGE_ATTACHMENT_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif", ".webp"}
+PDF_ATTACHMENT_SUFFIXES = {".pdf"}
+
+CLASSIFIER_RULES: list[tuple[str, int, re.Pattern[str]]] = [
+    ("SSN", 8, SENSITIVE_PATTERNS[0][1]),
+    ("Passport", 6, SENSITIVE_PATTERNS[2][1]),
+    ("DriverLicense", 6, SENSITIVE_PATTERNS[3][1]),
+    ("TaxId", 6, SENSITIVE_PATTERNS[4][1]),
+    ("DOB", 4, re.compile(r"\b(?:dob|date of birth|birthdate)\s*[:=]\s*\d{1,4}[-/ ]\d{1,2}[-/ ]\d{1,4}\b", re.I)),
+    ("BankRouting", 6, re.compile(r"\b(?:routing|aba)\s*(?:number|#|no\.?|:)?\s*\d{9}\b", re.I)),
+    ("BankAccount", 5, re.compile(r"\b(?:account|acct)\s*(?:number|#|no\.?|:)?\s*\d{6,17}\b", re.I)),
+    ("Credential", 7, re.compile(r"\b(?:password|passcode|api[_ -]?key|secret|recovery code|private key|access token|refresh token)\b", re.I)),
+    ("TaxDocument", 5, re.compile(r"\b(?:w-?2|1099|irs|tax return|agi|form 1040)\b", re.I)),
+    ("Medical", 4, re.compile(r"\b(?:medical record|patient id|health insurance|member id|medicare|medicaid)\b", re.I)),
+    ("Email", 1, re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)),
+    ("Phone", 1, re.compile(r"(?:\+?1[-. ]?)?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}")),
+    ("AddressHint", 2, re.compile(r"\b\d{1,6}\s+[A-Za-z0-9 .'-]+\s+(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|court|ct|blvd|boulevard)\b", re.I)),
+]
 
 
 def die(msg: str, code: int = 1) -> None:
@@ -182,7 +202,116 @@ def parse_tags(raw: str) -> list[str]:
     return sorted({t.strip().lstrip("#") for t in raw.split(",") if t.strip()})
 
 
-def read_stdin_or_arg(value: str | None) -> str:
+def luhn_valid(number: str) -> bool:
+    digits = [int(d) for d in re.sub(r"\D", "", number)]
+    if not 13 <= len(digits) <= 19:
+        return False
+    checksum = 0
+    parity = len(digits) % 2
+    for i, digit in enumerate(digits):
+        if i % 2 == parity:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        checksum += digit
+    return checksum % 10 == 0
+
+
+def classify_text(text: str, *, context: str = "") -> dict[str, Any]:
+    """Best-effort local sensitivity classifier.
+
+    False negatives are the dangerous case, so callers should encrypt when the
+    result is sensitive or when extraction/classification is uncertain.
+    """
+    haystack = f"{context}\n{text}"
+    reasons: list[str] = []
+    score = 0
+    for name, weight, pattern in CLASSIFIER_RULES:
+        if pattern.search(haystack):
+            score += weight
+            reasons.append(f"matched {name}")
+    for match in SENSITIVE_PATTERNS[1][1].finditer(haystack):
+        candidate = match.group(0)
+        if luhn_valid(candidate):
+            score += 7
+            reasons.append("matched CreditCard with valid Luhn checksum")
+            break
+    sensitivity = "sensitive" if score >= SENSITIVE_THRESHOLD else "public"
+    return {"sensitivity": sensitivity, "score": score, "threshold": SENSITIVE_THRESHOLD, "reasons": reasons}
+
+
+def decide_storage(text: str, *, sensitivity: str = "auto", context: str = "") -> tuple[str, dict[str, Any]]:
+    requested = (sensitivity or "auto").lower().strip()
+    if requested in {"sensitive", "encrypted", "encrypt"}:
+        result = classify_text(text, context=context)
+        result["sensitivity"] = "sensitive"
+        result["reasons"] = ["forced sensitive"] + result.get("reasons", [])
+        return "encrypted", result
+    if requested in {"public", "plaintext", "plain"}:
+        result = classify_text(text, context=context)
+        result["sensitivity"] = "public"
+        result["reasons"] = ["forced public"] + result.get("reasons", [])
+        return "plaintext", result
+    if requested != "auto":
+        die("sensitivity must be one of: auto, sensitive, public")
+    result = classify_text(text, context=context)
+    return ("encrypted" if result["sensitivity"] == "sensitive" else "plaintext"), result
+
+
+def safe_read_text(path: Path, limit: int = 1_000_000) -> str:
+    data = path.read_bytes()[:limit]
+    for enc in ("utf-8", "utf-16", "latin-1"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def run_markitdown(path: Path) -> str:
+    try:
+        from markitdown import MarkItDown  # type: ignore
+        result = MarkItDown().convert(str(path))
+        return getattr(result, "text_content", "") or ""
+    except Exception:
+        cli = shutil.which("markitdown")
+        if not cli:
+            return ""
+        proc = subprocess.run([cli, str(path)], text=True, capture_output=True)
+        return proc.stdout if proc.returncode == 0 else ""
+
+
+def run_tesseract(path: Path) -> str:
+    tesseract = shutil.which("tesseract")
+    if not tesseract:
+        return ""
+    proc = subprocess.run([tesseract, str(path), "stdout"], text=True, capture_output=True)
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def extract_attachment_markdown(path: Path, *, ocr: bool = False, extract: bool = True) -> str:
+    if not extract and not ocr:
+        return ""
+    suffix = path.suffix.lower()
+    text = ""
+    method = ""
+    if extract and suffix in TEXT_ATTACHMENT_SUFFIXES:
+        text = safe_read_text(path)
+        method = "text"
+    elif extract and suffix in PDF_ATTACHMENT_SUFFIXES:
+        text = run_markitdown(path)
+        method = "markitdown"
+    elif ocr and suffix in IMAGE_ATTACHMENT_SUFFIXES:
+        text = run_tesseract(path)
+        method = "tesseract"
+    if not text.strip():
+        return ""
+    return f"# Extracted text: {path.name}\n\nMethod: {method}\n\n```text\n{text.strip()}\n```\n"
+
+
+def read_stdin_or_arg(value: str | None, body_file: str | None = None) -> str:
+    if body_file:
+        return safe_read_text(Path(body_file).expanduser().resolve())
     if value is not None:
         return value
     if not sys.stdin.isatty():
@@ -192,7 +321,18 @@ def read_stdin_or_arg(value: str | None) -> str:
 
 
 def note_path(note_id: str) -> Path:
+    md = NOTES_DIR / f"{note_id}.md"
+    if md.exists():
+        return md
     return NOTES_DIR / f"{note_id}.json"
+
+
+def encrypted_note_path(note_id: str) -> Path:
+    return NOTES_DIR / f"{note_id}.json"
+
+
+def plaintext_note_path(note_id: str) -> Path:
+    return NOTES_DIR / f"{note_id}.md"
 
 
 def attachment_note_dir(note_id: str) -> Path:
@@ -245,18 +385,55 @@ def redact_text(text: str) -> str:
 
 def add_note(args: argparse.Namespace) -> None:
     init_if_needed()
-    body = read_stdin_or_arg(args.body)
+    body = read_stdin_or_arg(args.body, getattr(args, "body_file", None))
     if not body.strip():
         die("Refusing to create an empty note.")
     note_id = secrets.token_hex(6)
     ts = now_iso()
-    note_obj = {"id": note_id, "title": args.title, "tags": parse_tags(args.tags), "created": ts, "updated": ts, "body": body}
-    payload = encrypt_bytes(json.dumps(note_obj, ensure_ascii=False).encode(), aad=note_id.encode())
-    secure_write_json(note_path(note_id), payload)
+    storage, classification = decide_storage(body, sensitivity=getattr(args, "sensitivity", "auto"), context=args.title)
+    note_obj = {
+        "id": note_id,
+        "title": args.title,
+        "tags": parse_tags(args.tags),
+        "created": ts,
+        "updated": ts,
+        "body": body,
+        "format": "markdown",
+        "sensitivity": classification["sensitivity"],
+        "storage": storage,
+        "classification": classification,
+    }
+    if storage == "encrypted":
+        payload = encrypt_bytes(json.dumps(note_obj, ensure_ascii=False).encode(), aad=note_id.encode())
+        secure_write_json(encrypted_note_path(note_id), payload)
+    else:
+        path = plaintext_note_path(note_id)
+        path.write_text(body, encoding="utf-8")
+        os.chmod(path, 0o600)
     index = load_index()
-    index.setdefault("notes", []).append({"id": note_id, "title": args.title, "tags": parse_tags(args.tags), "created": ts, "updated": ts, "attachments": []})
+    index.setdefault("notes", []).append({
+        "id": note_id,
+        "title": args.title,
+        "tags": parse_tags(args.tags),
+        "created": ts,
+        "updated": ts,
+        "attachments": [],
+        "format": "markdown",
+        "sensitivity": classification["sensitivity"],
+        "storage": storage,
+        "classification": classification,
+    })
     save_index(index)
-    print(json.dumps({"status": "created", "id": note_id, "title": args.title, "tags": parse_tags(args.tags)}, indent=2, ensure_ascii=False))
+    print(json.dumps({
+        "status": "created",
+        "id": note_id,
+        "title": args.title,
+        "tags": parse_tags(args.tags),
+        "format": "markdown",
+        "sensitivity": classification["sensitivity"],
+        "storage": storage,
+        "classification_reasons": classification.get("reasons", []),
+    }, indent=2, ensure_ascii=False))
 
 
 def init_if_needed() -> None:
@@ -266,7 +443,23 @@ def init_if_needed() -> None:
 
 def load_note(note_meta: dict[str, Any]) -> dict[str, Any]:
     nid = note_meta["id"]
-    path = note_path(nid)
+    storage = note_meta.get("storage", "encrypted")
+    if storage == "plaintext":
+        path = plaintext_note_path(nid)
+        if not path.exists():
+            die(f"Plaintext note file missing: {path}")
+        return {
+            "id": nid,
+            "title": note_meta.get("title", ""),
+            "tags": note_meta.get("tags", []),
+            "created": note_meta.get("created", ""),
+            "updated": note_meta.get("updated", ""),
+            "body": path.read_text(encoding="utf-8"),
+            "format": note_meta.get("format", "markdown"),
+            "sensitivity": note_meta.get("sensitivity", "public"),
+            "storage": "plaintext",
+        }
+    path = encrypted_note_path(nid)
     if not path.exists():
         die(f"Encrypted note file missing: {path}")
     payload = json.loads(path.read_text())
@@ -326,14 +519,32 @@ def append_note(args: argparse.Namespace) -> None:
         die("No append text provided.")
     note["body"] = note.get("body", "").rstrip() + "\n\n" + extra.strip() + "\n"
     note["updated"] = now_iso()
-    payload = encrypt_bytes(json.dumps(note, ensure_ascii=False).encode(), aad=note["id"].encode())
-    secure_write_json(note_path(note["id"]), payload)
+    storage, classification = decide_storage(note["body"], sensitivity=meta.get("sensitivity", "auto"), context=note.get("title", ""))
+    # Once encrypted, do not downgrade automatically on append.
+    if meta.get("storage") == "encrypted":
+        storage = "encrypted"
+        classification["sensitivity"] = "sensitive"
+    note["storage"] = storage
+    note["sensitivity"] = classification["sensitivity"]
+    note["classification"] = classification
+    if storage == "encrypted":
+        old_plain = plaintext_note_path(note["id"])
+        if old_plain.exists():
+            old_plain.unlink()
+        payload = encrypt_bytes(json.dumps(note, ensure_ascii=False).encode(), aad=note["id"].encode())
+        secure_write_json(encrypted_note_path(note["id"]), payload)
+    else:
+        plaintext_note_path(note["id"]).write_text(note["body"], encoding="utf-8")
+        os.chmod(plaintext_note_path(note["id"]), 0o600)
     index = load_index()
     for n in index.get("notes", []):
         if n["id"] == note["id"]:
             n["updated"] = note["updated"]
+            n["storage"] = storage
+            n["sensitivity"] = classification["sensitivity"]
+            n["classification"] = classification
     save_index(index)
-    print(json.dumps({"status": "appended", "id": note["id"], "title": note.get("title", "")}, indent=2, ensure_ascii=False))
+    print(json.dumps({"status": "appended", "id": note["id"], "title": note.get("title", ""), "storage": storage, "sensitivity": classification["sensitivity"]}, indent=2, ensure_ascii=False))
 
 
 def extract_field(body: str, field: str) -> str:
@@ -375,19 +586,59 @@ def attach_file(args: argparse.Namespace) -> None:
     nid = meta["id"]
     data = src.read_bytes()
     att_id = secrets.token_hex(6)
-    aad = f"{nid}:{att_id}:{src.name}".encode()
-    payload = encrypt_bytes(data, aad=aad)
-    out_dir = attachment_note_dir(nid)
+    extracted_md = extract_attachment_markdown(src, ocr=getattr(args, "ocr", False), extract=getattr(args, "extract", False))
+    storage, classification = decide_storage(extracted_md, sensitivity=getattr(args, "sensitivity", "auto"), context=f"{src.name}\n{meta.get('title','')}")
+    # If the parent note is encrypted/sensitive, attachments inherit encryption.
+    if meta.get("storage") == "encrypted" or meta.get("sensitivity") == "sensitive":
+        storage = "encrypted"
+        classification["sensitivity"] = "sensitive"
+        classification.setdefault("reasons", []).insert(0, "parent note is sensitive")
+    out_dir = attachment_note_dir(nid) / att_id
     out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    out_path = out_dir / f"{att_id}.json"
-    secure_write_json(out_path, {"name": src.name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "encrypted": payload})
+    attachment_meta = {
+        "id": att_id,
+        "name": src.name,
+        "size": len(data),
+        "created": now_iso(),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "storage": storage,
+        "sensitivity": classification["sensitivity"],
+        "classification": classification,
+        "extracted_markdown": bool(extracted_md),
+    }
+    if storage == "encrypted":
+        aad = f"{nid}:{att_id}:{src.name}".encode()
+        payload = encrypt_bytes(data, aad=aad)
+        secure_write_json(out_dir / "original.json", {"name": src.name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "encrypted": payload})
+        if extracted_md:
+            sidecar_payload = encrypt_bytes(extracted_md.encode(), aad=f"{nid}:{att_id}:extracted.md".encode())
+            secure_write_json(out_dir / "extracted.md.json", {"name": "extracted.md", "encrypted": sidecar_payload})
+    else:
+        original = out_dir / src.name
+        original.write_bytes(data)
+        os.chmod(original, 0o600)
+        if extracted_md:
+            sidecar = out_dir / "extracted.md"
+            sidecar.write_text(extracted_md, encoding="utf-8")
+            os.chmod(sidecar, 0o600)
+    secure_write_json(out_dir / "metadata.json", attachment_meta)
     index = load_index()
     for n in index.get("notes", []):
         if n["id"] == nid:
-            n.setdefault("attachments", []).append({"id": att_id, "name": src.name, "size": len(data), "created": now_iso(), "sha256": hashlib.sha256(data).hexdigest()})
+            n.setdefault("attachments", []).append(attachment_meta)
             n["updated"] = now_iso()
     save_index(index)
-    print(json.dumps({"status": "attached", "note": nid, "attachmentId": att_id, "name": src.name, "size": len(data)}, indent=2, ensure_ascii=False))
+    print(json.dumps({
+        "status": "attached",
+        "note": nid,
+        "attachmentId": att_id,
+        "name": src.name,
+        "size": len(data),
+        "storage": storage,
+        "sensitivity": classification["sensitivity"],
+        "extracted_markdown": bool(extracted_md),
+        "classification_reasons": classification.get("reasons", []),
+    }, indent=2, ensure_ascii=False))
 
 
 def export_attachment(args: argparse.Namespace) -> None:
@@ -401,11 +652,20 @@ def export_attachment(args: argparse.Namespace) -> None:
     if len(matches) > 1:
         die("Multiple attachments match; use attachment id.")
     att = matches[0]
-    payload_path = attachment_note_dir(nid) / f"{att['id']}.json"
-    data = json.loads(payload_path.read_text())
-    aad = f"{nid}:{att['id']}:{data['name']}".encode()
-    plaintext = decrypt_payload(data["encrypted"], aad=aad)
-    out = Path(args.output).expanduser().resolve() if args.output else Path.cwd() / data["name"]
+    att_dir = attachment_note_dir(nid) / att["id"]
+    if att.get("storage", "encrypted") == "plaintext":
+        data_name = att["name"]
+        plaintext = (att_dir / data_name).read_bytes()
+    else:
+        payload_path = att_dir / "original.json"
+        if not payload_path.exists():
+            # Backward compatibility with the old single-json attachment layout.
+            payload_path = attachment_note_dir(nid) / f"{att['id']}.json"
+        data = json.loads(payload_path.read_text())
+        data_name = data["name"]
+        aad = f"{nid}:{att['id']}:{data_name}".encode()
+        plaintext = decrypt_payload(data["encrypted"], aad=aad)
+    out = Path(args.output).expanduser().resolve() if args.output else Path.cwd() / data_name
     if out.exists() and not args.force:
         die(f"Output exists: {out}; pass --force to overwrite.")
     out.write_bytes(plaintext)
@@ -439,6 +699,16 @@ def status(args: argparse.Namespace) -> None:
     }, indent=2))
 
 
+def classify_command(args: argparse.Namespace) -> None:
+    if args.file:
+        text = safe_read_text(Path(args.file).expanduser().resolve())
+        context = Path(args.file).name
+    else:
+        text = read_stdin_or_arg(None)
+        context = ""
+    print(json.dumps(classify_text(text, context=context), indent=2, ensure_ascii=False))
+
+
 def build_parser() -> argparse.ArgumentParser:
     prog = os.environ.get("KAAL_CLI_NAME", Path(sys.argv[0]).name)
     description = "Kaal: tiny local encrypted notes vault for sensitive data" if prog == "kaal" else "Tiny local encrypted notes vault for sensitive data"
@@ -451,11 +721,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("status", help="Show vault status")
     sp.set_defaults(func=status)
 
-    sp = sub.add_parser("add", help="Add encrypted note")
+    sp = sub.add_parser("add", help="Add Markdown note; auto-encrypts when sensitive")
     sp.add_argument("--title", required=True)
     sp.add_argument("--tags", default="", help="Comma-separated tags")
     sp.add_argument("--body", help="Note body; omit to read stdin")
+    sp.add_argument("--body-file", help="Markdown/text file to use as the note body")
+    sp.add_argument("--sensitivity", default="auto", choices=["auto", "sensitive", "public", "encrypted", "plaintext", "encrypt", "plain"], help="Classification override; default auto")
     sp.set_defaults(func=add_note)
+
+    sp = sub.add_parser("classify", help="Classify text as public or sensitive without saving")
+    sp.add_argument("file", nargs="?", help="File to classify; omit to read stdin")
+    sp.set_defaults(func=classify_command)
 
     sp = sub.add_parser("list", help="List note metadata only")
     sp.add_argument("--tag", default="")
@@ -482,9 +758,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--field", required=True, help="Field name, e.g. ssn, passport, dob")
     sp.set_defaults(func=copy_field)
 
-    sp = sub.add_parser("attach", help="Encrypt and attach a local file to a note")
+    sp = sub.add_parser("attach", help="Attach a local file; preserves original and can extract/OCR Markdown")
     sp.add_argument("query")
     sp.add_argument("file")
+    sp.add_argument("--sensitivity", default="auto", choices=["auto", "sensitive", "public", "encrypted", "plaintext", "encrypt", "plain"], help="Classification override; default auto")
+    sp.add_argument("--extract", action="store_true", help="Extract text/Markdown when supported, e.g. text files and PDFs via MarkItDown")
+    sp.add_argument("--ocr", action="store_true", help="OCR image attachments with Tesseract when available")
     sp.set_defaults(func=attach_file)
 
     sp = sub.add_parser("export-attachment", help="Decrypt attachment to an output path")
