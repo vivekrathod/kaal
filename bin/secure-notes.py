@@ -519,7 +519,9 @@ def append_note(args: argparse.Namespace) -> None:
         die("No append text provided.")
     note["body"] = note.get("body", "").rstrip() + "\n\n" + extra.strip() + "\n"
     note["updated"] = now_iso()
-    storage, classification = decide_storage(note["body"], sensitivity=meta.get("sensitivity", "auto"), context=note.get("title", ""))
+    # Re-classify appended content in auto mode. A note that was previously public
+    # must be upgraded if the appended text introduces sensitive data.
+    storage, classification = decide_storage(note["body"], sensitivity="auto", context=note.get("title", ""))
     # Once encrypted, do not downgrade automatically on append.
     if meta.get("storage") == "encrypted":
         storage = "encrypted"
