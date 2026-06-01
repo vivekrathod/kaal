@@ -252,6 +252,22 @@ class KaalFeatureTests(unittest.TestCase):
 
         self.assertEqual(out.read_text(), "Harmless project note")
 
+    def test_plaintext_attachment_with_overlong_display_name_uses_safe_stored_name(self):
+        meta = self.add_note(title="Public", body="# Public")
+        src = self.vault / "resource.bin"
+        src.write_bytes(b"resource bytes")
+        display_name = "?ui=2&" + "saddbat=" + ("x" * 340) + ".1&permmsgid=" + ("y" * 120)
+
+        att = kaal.attach_file_to_note(meta, src, sensitivity="public", attachment_name=display_name)
+
+        self.assertEqual(att["name"], display_name)
+        self.assertLessEqual(len(att["stored_name"].encode("utf-8")), 180)
+        self.assertNotEqual(att["stored_name"], display_name)
+        self.assertTrue((kaal.attachment_note_dir(meta["id"]) / att["id"] / att["stored_name"]).exists())
+        out = self.vault / "exported-long-name.bin"
+        self.call_silently(kaal.export_attachment, SimpleNamespace(query=meta["id"], attachment=att["id"], output=str(out), force=False))
+        self.assertEqual(out.read_bytes(), b"resource bytes")
+
     def test_invalid_sensitivity_dies(self):
         code, _stdout, stderr = self.assert_dies(kaal.decide_storage, "body", sensitivity="mystery")
         self.assertEqual(code, 1)
@@ -584,6 +600,17 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["referenced_resources"], 1)
         self.assertEqual(payload["likely_sensitive_notes"], 1)
         self.assertEqual(kaal.load_index()["notes"], [])
+
+    def test_import_joplin_raw_dry_run_ignores_appledouble_sidecars(self):
+        export_dir = self.make_joplin_raw_export()
+        (export_dir / "._22222222222222222222222222222222.md").write_bytes(b"\x00\x05AppleDouble metadata")
+        _result, stdout, _stderr = self.capture_call(
+            kaal.import_joplin_raw,
+            SimpleNamespace(path=str(export_dir), dry_run=True, tags="", sensitivity="auto", extract=False, ocr=False),
+        )
+        payload = json.loads(stdout)
+        self.assertEqual(payload["notes"], 2)
+        self.assertFalse(any("._" in warning for warning in payload["warnings"]))
 
     def test_import_joplin_raw_imports_notes_tags_folders_and_resources(self):
         export_dir = self.make_joplin_raw_export()
