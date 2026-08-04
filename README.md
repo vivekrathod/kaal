@@ -24,12 +24,15 @@ Encryption: AES-256-GCM using Python `cryptography`
 
 Important: the classifier is a best guess. False negatives are the dangerous case. Use `--sensitivity sensitive` for anything you know is private, and only use `--sensitivity public` when you are comfortable storing the note or attachment as plaintext.
 
-## Optional document extraction/OCR
+## Local receipt extraction and confirmation
 
 - Text/Markdown-like files can be extracted into an `extracted.md` sidecar with `--extract`.
-- PDFs use Microsoft MarkItDown when installed in the Kaal venv.
-- Images use local Tesseract OCR with `--ocr` when `tesseract` is available.
-- EasyOCR is intentionally not the default because it pulls in PyTorch and is much heavier.
+- PDF receipts start with `pdftotext -layout`, preserving printed columns when a PDF has a native text layer.
+- A non-empty text layer is not automatically considered adequate: medical PDF receipts use the small ordered route `pdftotext -layout` → macOS Vision OCR → Docling, stopping when explicit paid-amount and date evidence is present. MarkItDown and Tesseract remain available only for generic, non-receipt attachment extraction.
+- Kaal never guesses the paid amount or date from an unlabelled total, balance, or date-like value. Ambiguous fields stay blank for review.
+- The narrow exception is an explicitly **SALE/PAYMENT - APPROVED** card receipt with a labelled **Total Amount**: that is recorded as the completed card payment. A bare `Total` or `Total Amount` is still rejected.
+- Kaal records field provenance (`labelled-text`, `docling-structured`, `manual`, or `confirmed`). Manual corrections survive re-extraction.
+- A receipt cannot be marked reviewed until it has a paid amount and at least one receipt date (service date or payment date). Marking it reviewed confirms non-manual values currently shown in the review screen.
 
 Current installed support on this machine:
 
@@ -128,6 +131,29 @@ Export an attachment when needed:
 ```bash
 kaal export-attachment "Tax 2025" ATTACHMENT_ID --output /tmp/tax-document.pdf
 ```
+
+## One-click medical receipt capture from Chrome
+
+Medical receipts are intentionally stored as **plaintext** in Kaal when using
+this workflow. The receipt original and its extracted/OCR text remain local,
+with normal macOS account permissions (not Kaal application-level encryption).
+
+Capture a downloaded receipt directly:
+
+```bash
+kaal medical capture /path/to/receipt.pdf \
+  --source-url "https://portal.example/receipt/123" \
+  --source-title "Payment confirmed"
+kaal medical list --inbox
+```
+
+The capture command creates a `medical`, `receipt`, `inbox` record, preserves a
+plaintext copy of the original, and extracts PDF text/OCR when possible.
+
+For the one-click Chrome toolbar and right-click workflow, see
+[`chrome-extension/README.md`](chrome-extension/README.md). It includes the
+one-time local Native Messaging host installation and Chrome's **Load unpacked**
+step.
 
 Delete a note and its attachments:
 

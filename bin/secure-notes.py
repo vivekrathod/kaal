@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 import dataclasses
 import getpass
 import hashlib
@@ -25,6 +26,7 @@ import sys
 import tempfile
 import textwrap
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -48,6 +50,7 @@ SENSITIVE_THRESHOLD = 5
 TEXT_ATTACHMENT_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".json", ".yaml", ".yml", ".xml", ".html", ".htm"}
 IMAGE_ATTACHMENT_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif", ".webp"}
 PDF_ATTACHMENT_SUFFIXES = {".pdf"}
+RECEIPT_FIELD_NAMES = {"patient_name", "provider", "service_date", "paid_date", "amount", "currency", "insurer"}
 
 CLASSIFIER_RULES: list[tuple[str, int, re.Pattern[str]]] = [
     ("SSN", 8, SENSITIVE_PATTERNS[0][1]),
@@ -171,6 +174,20 @@ def secure_write_json(path: Path, data: Any) -> None:
             pass
 
 
+@contextmanager
+def vault_capture_lock():
+    """Serialize multi-file browser captures that update the shared index."""
+    lock_path = VAULT / ".medical-capture.lock"
+    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_file:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def load_index() -> dict[str, Any]:
     if not INDEX_PATH.exists():
         return {"version": 1, "created": now_iso(), "notes": []}
@@ -285,6 +302,50 @@ def run_markitdown(path: Path) -> str:
         return proc.stdout if proc.returncode == 0 else ""
 
 
+def run_docling(path: Path) -> str:
+    """Run the repository venv's Docling CLI and return its layout-aware Markdown."""
+    cli = Path(sys.executable).with_name("docling")
+    if not cli.is_file():
+        return ""
+    environment = os.environ.copy()
+    # The Hermes shell may export a different Python environment. Docling's
+    # executable must see only the Kaal venv that owns its compiled packages.
+    environment.pop("PYTHONPATH", None)
+    with tempfile.TemporaryDirectory(prefix="kaal-docling-") as td:
+        try:
+            proc = subprocess.run([str(cli), "convert", str(path), "--to", "md", "--to", "json", "--output", td, "--quiet"], text=True, capture_output=True, timeout=240, env=environment)
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        if proc.returncode != 0:
+            return ""
+        outputs = sorted(Path(td).glob("*.md"))
+        return "\n\n".join(output.read_text(encoding="utf-8") for output in outputs)
+
+
+def run_docling_json(path: Path) -> dict[str, Any]:
+    """Return Docling's structured local document output for a PDF, if available."""
+    cli = Path(sys.executable).with_name("docling")
+    if not cli.is_file():
+        return {}
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    with tempfile.TemporaryDirectory(prefix="kaal-docling-json-") as td:
+        try:
+            proc = subprocess.run([str(cli), "convert", str(path), "--to", "json", "--output", td, "--quiet"], text=True, capture_output=True, timeout=240, env=environment)
+        except (OSError, subprocess.TimeoutExpired):
+            return {}
+        if proc.returncode != 0:
+            return {}
+        outputs = sorted(Path(td).glob("*.json"))
+        if len(outputs) != 1:
+            return {}
+        try:
+            data = json.loads(outputs[0].read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+
 def run_tesseract(path: Path) -> str:
     tesseract = shutil.which("tesseract")
     if not tesseract:
@@ -293,7 +354,48 @@ def run_tesseract(path: Path) -> str:
     return proc.stdout if proc.returncode == 0 else ""
 
 
-def extract_attachment_markdown(path: Path, *, ocr: bool = False, extract: bool = True) -> str:
+def run_pdftotext(path: Path) -> str:
+    pdftotext = shutil.which("pdftotext")
+    if not pdftotext:
+        return ""
+    # Preserve column alignment: medical receipt labels and values frequently
+    # share a visual row but are separated by whitespace rather than a colon.
+    proc = subprocess.run([pdftotext, "-layout", str(path), "-"], text=True, capture_output=True)
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def run_pdf_ocr(path: Path, *, max_pages: int = 10) -> str:
+    pdftoppm = shutil.which("pdftoppm")
+    if not pdftoppm or not shutil.which("tesseract"):
+        return ""
+    with tempfile.TemporaryDirectory(prefix="kaal-pdf-ocr-") as td:
+        prefix = Path(td) / "page"
+        proc = subprocess.run([pdftoppm, "-png", "-r", "200", "-f", "1", "-l", str(max_pages), str(path), str(prefix)], text=True, capture_output=True)
+        if proc.returncode != 0:
+            return ""
+        return "\n\n".join(text for image in sorted(Path(td).glob("page-*.png")) if (text := run_tesseract(image)).strip())
+
+
+def run_macos_vision_pdf_ocr(path: Path) -> str:
+    """Use macOS Vision's accurate recognizer when its local framework is available."""
+    helper = Path(__file__).with_name("kaal-vision-ocr.swift")
+    swift = shutil.which("swift")
+    if sys.platform != "darwin" or not swift or not helper.exists():
+        return ""
+    try:
+        proc = subprocess.run([swift, str(helper), str(path)], text=True, capture_output=True, timeout=180)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def receipt_nonnegotiable_evidence_score(text: str) -> int:
+    """Score only explicit paid-amount and date evidence from one extractor."""
+    fields = infer_receipt_fields(text)
+    return int(bool(fields.get("amount"))) + int(bool(fields.get("service_date") or fields.get("paid_date")))
+
+
+def extract_attachment_markdown(path: Path, *, ocr: bool = False, extract: bool = True, receipt: bool = False) -> str:
     if not extract and not ocr:
         return ""
     suffix = path.suffix.lower()
@@ -303,8 +405,30 @@ def extract_attachment_markdown(path: Path, *, ocr: bool = False, extract: bool 
         text = safe_read_text(path)
         method = "text"
     elif extract and suffix in PDF_ATTACHMENT_SUFFIXES:
-        text = run_markitdown(path)
-        method = "markitdown"
+        candidates = [("pdftotext-layout", run_pdftotext(path))]
+        # A non-empty native PDF text layer is not enough if it lacks one of the
+        # fields the user must verify. For PDFs, macOS Vision is the one local
+        # layout-aware retry. Only if both fast sources remain insufficient do
+        # we pay for the legacy conversion fallbacks.
+        if receipt_nonnegotiable_evidence_score(candidates[0][1]) < 2:
+            if ocr:
+                candidates.append(("macos-vision", run_macos_vision_pdf_ocr(path)))
+            best_local_score = max(receipt_nonnegotiable_evidence_score(candidate_text) for _candidate_method, candidate_text in candidates)
+            if best_local_score < 2:
+                candidates.append(("docling", run_docling(path)))
+                # Medical receipts use the small, evidence-tested route:
+                # native PDF text -> local Vision -> Docling. Keep the broader
+                # MarkItDown/Tesseract fallbacks for non-receipt attachments.
+                if not receipt:
+                    candidates.append(("markitdown", run_markitdown(path)))
+                    if ocr:
+                        candidates.append(("tesseract-pdf", run_pdf_ocr(path)))
+        candidates = [(candidate_method, candidate_text) for candidate_method, candidate_text in candidates if candidate_text.strip()]
+        if candidates:
+            method, text = max(
+                enumerate(candidates),
+                key=lambda item: (receipt_nonnegotiable_evidence_score(item[1][1]), -item[0]),
+            )[1]
     elif ocr and suffix in IMAGE_ATTACHMENT_SUFFIXES:
         text = run_tesseract(path)
         method = "tesseract"
@@ -655,13 +779,13 @@ def safe_attachment_filename(name: str, att_id: str, *, max_bytes: int = 180) ->
     return f"{out or 'attachment'}-{digest}{suffix}"
 
 
-def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "auto", extract: bool = False, ocr: bool = False, attachment_name: str | None = None, source: dict[str, Any] | None = None) -> dict[str, Any]:
+def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "auto", extract: bool = False, ocr: bool = False, attachment_name: str | None = None, source: dict[str, Any] | None = None, receipt: bool = False) -> dict[str, Any]:
     data = src.read_bytes()
     stored_name = attachment_name or src.name
     nid = meta["id"]
     att_id = secrets.token_hex(6)
     disk_name = safe_attachment_filename(stored_name, att_id)
-    extracted_md = extract_attachment_markdown(src, ocr=ocr, extract=extract)
+    extracted_md = extract_attachment_markdown(src, ocr=ocr, extract=extract, receipt=receipt)
     storage, classification = decide_storage(extracted_md, sensitivity=sensitivity, context=f"{stored_name}\n{meta.get('title','')}")
     # If the parent note is encrypted/sensitive, attachments inherit encryption.
     if meta.get("storage") == "encrypted" or meta.get("sensitivity") == "sensitive":
@@ -694,6 +818,16 @@ def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "
         os.chmod(original, 0o600)
     if extracted_md:
         write_attachment_extracted_sidecar(meta, attachment_meta, extracted_md)
+    if extracted_md and src.suffix.lower() in PDF_ATTACHMENT_SUFFIXES and "Method: docling" in extracted_md:
+        docling_json = run_docling_json(src)
+        if docling_json:
+            payload = json.dumps(docling_json, ensure_ascii=False).encode("utf-8")
+            if storage == "encrypted":
+                secure_write_json(out_dir / "docling.json.enc", {"encrypted": encrypt_bytes(payload, aad=f"{nid}:{att_id}:docling.json".encode())})
+            else:
+                (out_dir / "docling.json").write_bytes(payload)
+                os.chmod(out_dir / "docling.json", 0o600)
+            attachment_meta["docling_json"] = True
     secure_write_json(out_dir / "metadata.json", attachment_meta)
     index = load_index()
     for n in index.get("notes", []):
@@ -790,26 +924,44 @@ def ocr_attachments(args: argparse.Namespace) -> None:
             eligible += 1
             if dry_run:
                 continue
+            is_medical_receipt = "medical" in note.get("tags", []) and "receipt" in note.get("tags", [])
             try:
+                docling_json: dict[str, Any] = {}
                 with tempfile.TemporaryDirectory(prefix="kaal-ocr-") as td:
                     os.chmod(td, 0o700)
                     tmp = Path(td) / (att.get("stored_name") or att.get("name") or f"attachment-{att['id']}")
                     tmp.write_bytes(attachment_original_bytes(note, att))
                     os.chmod(tmp, 0o600)
-                    extracted_md = extract_attachment_markdown(tmp, ocr=ocr, extract=extract)
+                    extracted_md = extract_attachment_markdown(tmp, ocr=ocr, extract=extract, receipt=is_medical_receipt)
+                    if extracted_md and tmp.suffix.lower() in PDF_ATTACHMENT_SUFFIXES and "Method: docling" in extracted_md:
+                        docling_json = run_docling_json(tmp)
                 if extracted_md:
                     write_attachment_extracted_sidecar(note, att, extracted_md)
                     att["extracted_markdown"] = True
                     att["extracted_at"] = now_iso()
                     extracted += 1
+                    if docling_json:
+                        out_dir = attachment_note_dir(note["id"]) / att["id"]
+                        payload = json.dumps(docling_json, ensure_ascii=False).encode("utf-8")
+                        if att.get("storage") == "encrypted":
+                            secure_write_json(out_dir / "docling.json.enc", {"encrypted": encrypt_bytes(payload, aad=f"{note['id']}:{att['id']}:docling.json".encode())})
+                        else:
+                            (out_dir / "docling.json").write_bytes(payload)
+                            os.chmod(out_dir / "docling.json", 0o600)
+                        att["docling_json"] = True
                 else:
                     att["extracted_markdown"] = False
                     att["extraction_attempted_at"] = now_iso()
                     no_text += 1
+                if "medical" in note.get("tags", []) and "receipt" in note.get("tags", []):
+                    prior_receipt = note.get("receipt", {})
+                    note["receipt"] = build_receipt_state(extracted_md, docling_json, prior_receipt)
                 secure_write_json(attachment_note_dir(note["id"]) / att["id"] / "metadata.json", att)
             except Exception as e:
+                if "medical" in note.get("tags", []) and "receipt" in note.get("tags", []):
+                    note["receipt"] = receipt_extraction_state("", str(e))
                 errors.append({"note_id": note.get("id", ""), "attachment_id": att.get("id", ""), "name": att.get("name", ""), "error": str(e)})
-    if not dry_run and (extracted or no_text or skipped_existing):
+    if not dry_run and (extracted or no_text or skipped_existing or errors):
         save_index(index)
     print(json.dumps({
         "status": "dry-run" if dry_run else "updated",
@@ -821,6 +973,496 @@ def ocr_attachments(args: argparse.Namespace) -> None:
         "skipped_unsupported": skipped_unsupported,
         "errors": errors,
     }, indent=2, ensure_ascii=False))
+
+
+def infer_receipt_fields(extracted_text: str) -> dict[str, str]:
+    """Conservative label-based field inference; users can correct every value."""
+    text = re.sub(r"```(?:text)?|# Extracted text:.*|Method:.*", "", extracted_text, flags=re.IGNORECASE)
+    approved_card_sale = bool(re.search(r"\b(?:sale|payment)\s*[-–]\s*approved\b", text, flags=re.IGNORECASE))
+    lines = text.splitlines()
+
+    def labelled_next_line_date(label: str) -> str:
+        """Resolve a date directly below an OCR label without guessing roles."""
+        for index, line in enumerate(lines[:-1]):
+            if not re.search(label, line, flags=re.IGNORECASE):
+                continue
+            match = re.search(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b", lines[index + 1])
+            if match:
+                return match.group(1)
+        return ""
+    patterns = {
+        "patient_name": r"(?:patient|member)\s*(?:name)?\s*(?:[:#-]|\||\s{2,})\s*([^|\n]+)",
+        "provider": r"(?:provider|facility|practice)\s*(?:name)?\s*(?:[:#-]|\||\s{2,})\s*([^|\n]+)",
+        "service_date": r"(?:date\s+of\s+service|service\s+date|visit\s+date)\s*(?:[:#-]|\||\s{2,})\s*([^|\n]+)",
+        "paid_date": r"(?:payment\s+date|date\s+paid|paid\s+on)\s*(?:[:#-]|\||\s{2,})\s*([^|\n]+)",
+        "insurer": r"(?:insurance|insurer|plan)\s*(?:name)?\s*(?:[:#-]|\||\s{2,})\s*([^|\n]+)",
+    }
+    fields = {name: "" for name in patterns}
+    for name, pattern in patterns.items():
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            value = match.group(1).strip()[:200]
+            if name != "provider" or not re.match(r"(?:dr\.?|doctor)\s+", value, flags=re.IGNORECASE):
+                fields[name] = value
+    if not fields["paid_date"]:
+        fields["paid_date"] = labelled_next_line_date(r"\b(?:payment\s+date|date\s+paid|paid\s+on)\b")
+    if not fields["service_date"]:
+        fields["service_date"] = labelled_next_line_date(r"\b(?:date\s+of\s+service|service\s+date|visit\s+date)\b")
+    # A generic Date is ambiguous on invoices and statements. On a completed
+    # card-sale receipt, however, it is the card-payment transaction date.
+    if approved_card_sale and not fields["paid_date"]:
+        approved_date = re.search(r"\bdate\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b", text, flags=re.IGNORECASE)
+        if approved_date:
+            fields["paid_date"] = approved_date.group(1)
+    # A generic "Total" is commonly the billed charge, not the payment. Only
+    # infer an amount when the receipt explicitly identifies a payment value.
+    # A card transaction receipt marked "SALE - APPROVED" is a narrow additional
+    # case: its labelled "Total Amount" is the completed card payment, not an
+    # invoice/balance total. Bare "Total Amount" remains rejected.
+    amount = re.search(r"(?:amount\s+paid|payment\s+amount|payment\s+received|paid\s+today|amount\s+collected|you\s+paid)\s*[:#-]?\s*\$?([0-9][0-9,]*\.[0-9]{2})\b", text, flags=re.IGNORECASE)
+    if not amount and approved_card_sale:
+        amount = re.search(r"\btotal\s+amount\s*[:#-]?\s*\$([0-9][0-9,]*\.[0-9]{2})", text, flags=re.IGNORECASE)
+    fields["amount"] = amount.group(1).replace(",", "") if amount else ""
+    fields["currency"] = "USD" if "$" in text else ""
+    return fields
+
+
+def infer_docling_fields(document: dict[str, Any]) -> dict[str, str]:
+    """Resolve labelled Docling text cells while preserving conservative defaults."""
+    entries = [str(item.get("text", "")).strip() for item in document.get("texts", []) if isinstance(item, dict) and str(item.get("text", "")).strip()]
+    result: dict[str, str] = {}
+    labels = {
+        "patient_name": r"\b(?:patient|member)\s*(?:name)?\b",
+        "provider": r"\b(?:provider|facility|practice)\s*(?:name)?\b",
+        "service_date": r"\b(?:date\s+of\s+service|service\s+date|visit\s+date)\b",
+        "paid_date": r"\b(?:payment\s+date|date\s+paid|paid\s+on)\b",
+        "insurer": r"\b(?:insurance|insurer|plan)\s*(?:name)?\b",
+    }
+    generic_labels = {"date", "patient", "patient name", "member", "member name", "provider", "service date", "date of service", "payment date", "amount", "amount paid", "total", "total paid"}
+
+    def plausible_value(field: str, value: str) -> bool:
+        normalized = re.sub(r"\s+", " ", value).strip()
+        if not normalized or normalized.casefold() in generic_labels:
+            return False
+        if field == "patient_name":
+            words = re.findall(r"[A-Za-z][A-Za-z'’-]*", normalized)
+            return len(words) >= 2
+        if field == "provider" and re.match(r"(?:dr\.?|doctor)\s+", normalized, flags=re.IGNORECASE):
+            return False
+        return True
+
+    for index, entry in enumerate(entries):
+        normalized = re.sub(r"\s+", " ", entry).strip()
+        for field, pattern in labels.items():
+            if field in result or not re.search(pattern, normalized, flags=re.IGNORECASE):
+                continue
+            inline = re.split(r"[:|]\s*", normalized, maxsplit=1)
+            if len(inline) == 2 and plausible_value(field, inline[1]):
+                result[field] = inline[1].strip()[:200]
+                continue
+            for candidate in entries[index + 1:index + 4]:
+                candidate = re.sub(r"\s+", " ", candidate).strip()
+                if plausible_value(field, candidate) and not any(re.match(other, candidate, flags=re.IGNORECASE) for other in labels.values()):
+                    result[field] = candidate[:200]
+                    break
+    return result
+
+
+def receipt_extraction_state(extracted_text: str = "", error: str = "", ai_fields: dict[str, str] | None = None) -> dict[str, Any]:
+    """Create candidates only from explicit receipt evidence, never semantic guesses."""
+    fields = infer_receipt_fields(extracted_text) if extracted_text else {}
+    sources: dict[str, str] = {key: "labelled-text" for key, value in fields.items() if value}
+    return {"state": "error" if error else "extracted" if extracted_text.strip() else "no_text", "attempted_at": now_iso(), "error": error[:500], "fields": fields, "field_sources": sources}
+
+
+def build_receipt_state(extracted_text: str, docling_json: dict[str, Any] | None = None, prior_receipt: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Use one conservative field path for capture and re-extraction.
+
+    Text/layout candidates are suggestions. Only explicitly manual values survive
+    re-extraction, so a stale automatic result cannot become a durable fact.
+    """
+    receipt = receipt_extraction_state(extracted_text)
+    for field, value in infer_docling_fields(docling_json or {}).items():
+        if value and not receipt["fields"].get(field):
+            receipt["fields"][field] = value
+            receipt["field_sources"][field] = "docling-structured"
+    prior = prior_receipt or {}
+    prior_fields = prior.get("fields", {})
+    prior_sources = prior.get("field_sources", {})
+    for field, source in prior_sources.items():
+        if source == "manual" and prior_fields.get(field):
+            receipt["fields"][field] = prior_fields[field]
+            receipt["field_sources"][field] = "manual"
+    if prior.get("manually_updated_at"):
+        receipt["manually_updated_at"] = prior["manually_updated_at"]
+    return receipt
+
+
+def receipt_confirmation_issues(receipt: dict[str, Any]) -> list[str]:
+    fields = receipt.get("fields", {})
+    issues = []
+    if not fields.get("amount"):
+        issues.append("amount")
+    if not fields.get("service_date") and not fields.get("paid_date"):
+        issues.append("date")
+    return issues
+
+
+def medical_capture(args: argparse.Namespace) -> None:
+    """Create a plaintext medical-receipt inbox record from a browser capture.
+
+    Receipt handling intentionally overrides Kaal's classifier: the user has
+    chosen normal local filesystem protection for medical receipts rather than
+    application-level encryption.
+    """
+    init_if_needed()
+    src = Path(args.file).expanduser().resolve()
+    if not src.exists() or not src.is_file():
+        die(f"Receipt file not found: {src}")
+    source_url = (getattr(args, "source_url", "") or "").strip()
+    source_title = (getattr(args, "source_title", "") or "").strip()
+    captured_at = (getattr(args, "captured_at", "") or "").strip() or now_iso()
+    title = (getattr(args, "title", "") or "").strip() or source_title or src.stem.replace("_", " ").replace("-", " ")
+    source: dict[str, Any] = {"type": "browser-receipt-capture", "captured_at": captured_at}
+    if source_url:
+        source["url"] = source_url
+    if source_title:
+        source["title"] = source_title
+    body_lines = [
+        "# Medical receipt",
+        "",
+        "Status: inbox",
+        f"Captured at: {captured_at}",
+        f"Original file: {src.name}",
+    ]
+    if source_title:
+        body_lines.append(f"Source title: {source_title}")
+    if source_url:
+        body_lines.append(f"Source URL: {source_url}")
+    body_lines.extend([
+        "",
+        "Captured from the browser. Review or enrich this record later if needed.",
+        "",
+    ])
+    with vault_capture_lock():
+        meta = create_note(title, "\n".join(body_lines), tags=["medical", "receipt", "inbox"], sensitivity="public", source=source)
+        try:
+            attachment = attach_file_to_note(
+                meta,
+                src,
+                sensitivity="public",
+                extract=True,
+                ocr=True,
+                source=source,
+                receipt=True,
+            )
+        except Exception:
+            # Do not leave an empty inbox entry if copying or extracting the
+            # receipt fails. The browser staging file remains in place so a
+            # retry can start from the original artifact.
+            note_path(meta["id"]).unlink(missing_ok=True)
+            shutil.rmtree(attachment_note_dir(meta["id"]), ignore_errors=True)
+            index = load_index()
+            index["notes"] = [note for note in index.get("notes", []) if note.get("id") != meta["id"]]
+            save_index(index)
+            raise
+        # Keep the field-state update in the same vault transaction as note
+        # creation and attachment persistence. A browser capture must not see an
+        # index between those steps and lose its just-created record.
+        index = load_index()
+        saved = medical_receipt_meta(index, meta["id"])
+        sidecar = attachment_note_dir(meta["id"]) / attachment["id"] / "extracted.md"
+        extracted_text = sidecar.read_text(encoding="utf-8") if sidecar.exists() else ""
+        docling_json: dict[str, Any] = {}
+        docling_sidecar = attachment_note_dir(meta["id"]) / attachment["id"] / "docling.json"
+        if docling_sidecar.exists():
+            try:
+                docling_json = json.loads(docling_sidecar.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                docling_json = {}
+        saved["receipt"] = build_receipt_state(extracted_text, docling_json)
+        saved["updated"] = now_iso()
+        save_index(index)
+    print(json.dumps({
+        "status": "captured",
+        "id": meta["id"],
+        "title": meta["title"],
+        "storage": meta["storage"],
+        "sensitivity": meta["sensitivity"],
+        "attachment_id": attachment["id"],
+        "attachment_name": attachment["name"],
+        "extracted_markdown": attachment["extracted_markdown"],
+    }, indent=2, ensure_ascii=False))
+
+
+def medical_list(args: argparse.Namespace) -> None:
+    """List receipt metadata without mixing in unrelated Kaal notes."""
+    init_if_needed()
+    notes = [n for n in load_index().get("notes", []) if "medical" in n.get("tags", []) and "receipt" in n.get("tags", [])]
+    if getattr(args, "trash", False):
+        notes = [n for n in notes if n.get("trashed_at")]
+    else:
+        notes = [n for n in notes if not n.get("trashed_at")]
+    if getattr(args, "inbox", False):
+        notes = [n for n in notes if "inbox" in n.get("tags", [])]
+    notes.sort(key=lambda note: note.get("updated", ""), reverse=True)
+    limit = getattr(args, "limit", 0) or 0
+    if limit:
+        notes = notes[:limit]
+    if getattr(args, "json", False):
+        print(json.dumps(notes, indent=2, ensure_ascii=False))
+        return
+    for note in notes:
+        tags = " ".join(f"#{tag}" for tag in note.get("tags", []))
+        print(f"{note['id']}  {note.get('updated', '')}  {note.get('title', '')}  {tags}  attachments:{len(note.get('attachments', []))}")
+
+
+def medical_receipt_meta(index: dict[str, Any], note_id: str) -> dict[str, Any]:
+    for note in index.get("notes", []):
+        if note.get("id") == note_id:
+            if "medical" not in note.get("tags", []) or "receipt" not in note.get("tags", []):
+                die("That note is not a medical receipt.")
+            return note
+    die("Medical receipt not found.")
+
+
+def medical_review(args: argparse.Namespace) -> None:
+    init_if_needed()
+    with vault_capture_lock():
+        index = load_index()
+        meta = medical_receipt_meta(index, args.note_id)
+        receipt = meta.get("receipt", {})
+        if receipt_confirmation_issues(receipt):
+            die("Cannot mark reviewed until the paid amount and a date are confirmed.")
+        fields = receipt.setdefault("fields", {})
+        sources = receipt.setdefault("field_sources", {})
+        for field in ("amount", "service_date", "paid_date"):
+            if fields.get(field) and sources.get(field) != "manual":
+                sources[field] = "confirmed"
+        meta["tags"] = [tag for tag in meta.get("tags", []) if tag != "inbox"]
+        meta["reviewed_at"] = now_iso()
+        meta["updated"] = meta["reviewed_at"]
+        save_index(index)
+    print(json.dumps({"status": "reviewed", "id": meta["id"], "title": meta["title"]}, indent=2, ensure_ascii=False))
+
+
+def medical_reopen(args: argparse.Namespace) -> None:
+    init_if_needed()
+    with vault_capture_lock():
+        index = load_index()
+        meta = medical_receipt_meta(index, args.note_id)
+        meta["tags"] = sorted(set(meta.get("tags", []) + ["inbox"]))
+        meta.pop("reviewed_at", None)
+        meta["updated"] = now_iso()
+        save_index(index)
+    print(json.dumps({"status": "inbox", "id": meta["id"], "title": meta["title"]}, indent=2, ensure_ascii=False))
+
+
+def medical_extracted_text(args: argparse.Namespace) -> None:
+    init_if_needed()
+    meta = medical_receipt_meta(load_index(), args.note_id)
+    attachment_id = getattr(args, "attachment_id", "") or ""
+    matches = [att for att in meta.get("attachments", []) if not attachment_id or att.get("id") == attachment_id]
+    if len(matches) != 1:
+        die("Specify one receipt attachment id.")
+    att = matches[0]
+    sidecar = attachment_note_dir(meta["id"]) / att["id"] / "extracted.md"
+    encrypted_sidecar = attachment_note_dir(meta["id"]) / att["id"] / "extracted.md.json"
+    if sidecar.exists():
+        text = sidecar.read_text(encoding="utf-8")
+    elif encrypted_sidecar.exists():
+        payload = json.loads(encrypted_sidecar.read_text())
+        text = decrypt_payload(payload["encrypted"], aad=f"{meta['id']}:{att['id']}:extracted.md".encode()).decode()
+    else:
+        die("No extracted text is available. Run extraction first.")
+    print(json.dumps({"status": "ok", "id": meta["id"], "attachment_id": att["id"], "text": text}, ensure_ascii=False))
+
+
+def medical_update(args: argparse.Namespace) -> None:
+    init_if_needed()
+    try:
+        updates = json.loads(args.fields_json)
+    except json.JSONDecodeError:
+        die("Receipt fields must be valid JSON.")
+    allowed = {"patient_name", "provider", "service_date", "paid_date", "insurer", "amount", "currency"}
+    if not isinstance(updates, dict) or any(key not in allowed or not isinstance(value, str) or len(value) > 200 for key, value in updates.items()):
+        die("Receipt fields are invalid.")
+    with vault_capture_lock():
+        index = load_index()
+        meta = medical_receipt_meta(index, args.note_id)
+        receipt = meta.setdefault("receipt", receipt_extraction_state())
+        fields = receipt.setdefault("fields", {})
+        sources = receipt.setdefault("field_sources", {})
+        fields.update(updates)
+        for key, value in updates.items():
+            if value:
+                sources[key] = "manual"
+            else:
+                sources.pop(key, None)
+        receipt["manually_updated_at"] = now_iso()
+        meta["updated"] = receipt["manually_updated_at"]
+        save_index(index)
+    print(json.dumps({"status": "updated", "id": meta["id"], "fields": receipt["fields"]}, ensure_ascii=False))
+
+
+def medical_report(args: argparse.Namespace) -> None:
+    init_if_needed()
+    notes = [note for note in load_index().get("notes", []) if "medical" in note.get("tags", []) and "receipt" in note.get("tags", []) and not note.get("trashed_at")]
+    patient = (args.patient_name or "").lower()
+    start, end, year = args.from_date or "", args.to_date or "", args.year or ""
+    rows = []
+    total = 0.0
+    for note in notes:
+        fields = note.get("receipt", {}).get("fields", {})
+        date = fields.get("service_date") or fields.get("paid_date") or ""
+        if patient and patient not in fields.get("patient_name", "").lower(): continue
+        if year and not date.startswith(year): continue
+        if start and date < start: continue
+        if end and date > end: continue
+        try: total += float(fields.get("amount") or 0)
+        except ValueError: pass
+        rows.append({"id": note["id"], "title": note.get("title", ""), "fields": fields})
+    print(json.dumps({"status": "ok", "count": len(rows), "total_amount": f"{total:.2f}", "receipts": rows}, ensure_ascii=False))
+
+
+def medical_trash(args: argparse.Namespace) -> None:
+    """Soft-delete a receipt while preserving its Kaal-managed files for restore."""
+    init_if_needed()
+    with vault_capture_lock():
+        index = load_index()
+        meta = medical_receipt_meta(index, args.note_id)
+        if meta.get("trashed_at"):
+            die("Medical receipt is already in trash.")
+        meta["trashed_at"] = now_iso()
+        meta["updated"] = meta["trashed_at"]
+        save_index(index)
+    print(json.dumps({"status": "trashed", "id": meta["id"], "title": meta["title"], "attachments": len(meta.get("attachments", []))}, indent=2, ensure_ascii=False))
+
+
+def medical_restore(args: argparse.Namespace) -> None:
+    """Restore a soft-deleted medical receipt to the active inbox/list."""
+    init_if_needed()
+    with vault_capture_lock():
+        index = load_index()
+        meta = medical_receipt_meta(index, args.note_id)
+        if not meta.get("trashed_at"):
+            die("Medical receipt is not in trash.")
+        meta.pop("trashed_at", None)
+        meta["updated"] = now_iso()
+        save_index(index)
+    print(json.dumps({"status": "restored", "id": meta["id"], "title": meta["title"]}, indent=2, ensure_ascii=False))
+
+
+def medical_purge(args: argparse.Namespace) -> None:
+    """Irreversibly delete a receipt already placed in the medical trash."""
+    init_if_needed()
+    if not getattr(args, "yes", False):
+        die("Permanent receipt deletion requires --yes.")
+    with vault_capture_lock():
+        index = load_index()
+        meta = medical_receipt_meta(index, args.note_id)
+        if not meta.get("trashed_at"):
+            die("Move the medical receipt to trash before permanently deleting it.")
+        note_id = meta["id"]
+        # Only Kaal-managed copies and sidecars are removed. The original browser
+        # download/source file is never stored under these vault paths.
+        purge_dir = VAULT / ".receipt-purge" / note_id
+        moves = [
+            (plaintext_note_path(note_id), purge_dir / "note.md"),
+            (encrypted_note_path(note_id), purge_dir / "note.enc.json"),
+            (attachment_note_dir(note_id), purge_dir / "attachments"),
+        ]
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for source, staged in moves:
+                if source.exists():
+                    staged.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    os.replace(source, staged)
+                    moved.append((source, staged))
+            index["notes"] = [note for note in index.get("notes", []) if note.get("id") != note_id]
+            save_index(index)
+        except Exception:
+            for source, staged in reversed(moved):
+                if staged.exists():
+                    os.replace(staged, source)
+            if purge_dir.exists():
+                shutil.rmtree(purge_dir)
+            raise
+        try:
+            shutil.rmtree(purge_dir, ignore_errors=False)
+        except Exception as cleanup_error:
+            # The durable index change succeeded but physical erasure did not.
+            # Restore the receipt to trash so it stays visible and recoverable
+            # instead of stranding a hidden copy under .receipt-purge.
+            for source, staged in reversed(moved):
+                if staged.exists():
+                    os.replace(staged, source)
+            index["notes"].append(meta)
+            save_index(index)
+            die(f"Permanent deletion could not be completed; receipt was restored to trash: {cleanup_error}")
+        try:
+            purge_dir.parent.rmdir()
+        except OSError:
+            pass
+    print(json.dumps({"status": "purged", "id": note_id, "title": meta["title"]}, indent=2, ensure_ascii=False))
+
+
+def medical_purge_bulk(args: argparse.Namespace) -> None:
+    """Irreversibly delete multiple receipts that are already in medical trash."""
+    init_if_needed()
+    note_ids = list(getattr(args, "note_ids", []))
+    if not getattr(args, "yes", False):
+        die("Permanent receipt deletion requires --yes.")
+    if not note_ids:
+        die("Select at least one trashed medical receipt to permanently delete.")
+    if len(note_ids) != len(set(note_ids)):
+        die("Each receipt can be permanently deleted only once per bulk action.")
+    with vault_capture_lock():
+        index = load_index()
+        metas = [medical_receipt_meta(index, note_id) for note_id in note_ids]
+        if any(not meta.get("trashed_at") for meta in metas):
+            die("Move every selected medical receipt to trash before permanently deleting it.")
+        batch_dir = VAULT / ".receipt-purge" / f"bulk-{secrets.token_hex(8)}"
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for meta in metas:
+                note_id = meta["id"]
+                receipt_dir = batch_dir / note_id
+                for source, staged in (
+                    (plaintext_note_path(note_id), receipt_dir / "note.md"),
+                    (encrypted_note_path(note_id), receipt_dir / "note.enc.json"),
+                    (attachment_note_dir(note_id), receipt_dir / "attachments"),
+                ):
+                    if source.exists():
+                        staged.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        os.replace(source, staged)
+                        moved.append((source, staged))
+            selected_ids = set(note_ids)
+            index["notes"] = [note for note in index.get("notes", []) if note.get("id") not in selected_ids]
+            save_index(index)
+        except Exception:
+            for source, staged in reversed(moved):
+                if staged.exists():
+                    os.replace(staged, source)
+            if batch_dir.exists():
+                shutil.rmtree(batch_dir)
+            raise
+        try:
+            shutil.rmtree(batch_dir, ignore_errors=False)
+        except Exception as cleanup_error:
+            # As with a single purge, make every still-staged record visible in
+            # Trash rather than leaving recoverable Kaal data hidden on disk.
+            for source, staged in reversed(moved):
+                if staged.exists():
+                    os.replace(staged, source)
+            index["notes"].extend(metas)
+            save_index(index)
+            die(f"Bulk permanent deletion could not be completed; receipts were restored to trash: {cleanup_error}")
+        try:
+            batch_dir.parent.rmdir()
+        except OSError:
+            pass
+    print(json.dumps({"status": "purged", "count": len(note_ids), "ids": note_ids}, indent=2, ensure_ascii=False))
 
 
 def delete_note(args: argparse.Namespace) -> None:
@@ -1216,6 +1858,57 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-extract", action="store_true", help="Do not extract text/Markdown from text/PDF resources; extraction is on by default")
     sp.add_argument("--no-ocr", action="store_true", help="Do not OCR image resources; OCR is on by default")
     sp.set_defaults(func=import_joplin_raw)
+
+    sp = sub.add_parser("medical", help="Capture and manage plaintext medical expense receipts")
+    medical_sub = sp.add_subparsers(dest="medical_cmd", required=True)
+    capture = medical_sub.add_parser("capture", help="Capture a browser-downloaded receipt into the plaintext medical inbox")
+    capture.add_argument("file", help="Downloaded PDF, image, or receipt file")
+    capture.add_argument("--title", default="", help="Receipt title; defaults to browser title or filename")
+    capture.add_argument("--source-url", default="", help="Original browser page or PDF URL")
+    capture.add_argument("--source-title", default="", help="Original browser tab title")
+    capture.add_argument("--captured-at", default="", help="ISO-8601 capture time; defaults to now")
+    capture.set_defaults(func=medical_capture)
+    medical_list_parser = medical_sub.add_parser("list", help="List medical receipt records")
+    medical_list_filter = medical_list_parser.add_mutually_exclusive_group()
+    medical_list_filter.add_argument("--inbox", action="store_true", help="Show only receipts awaiting review")
+    medical_list_filter.add_argument("--trash", action="store_true", help="Show only receipts in the recoverable trash")
+    medical_list_parser.add_argument("--json", action="store_true")
+    medical_list_parser.add_argument("--limit", type=int, default=0, help="Maximum newest records to return; default all")
+    medical_list_parser.set_defaults(func=medical_list)
+    medical_review_parser = medical_sub.add_parser("review", help="Mark a receipt as reviewed")
+    medical_review_parser.add_argument("note_id")
+    medical_review_parser.set_defaults(func=medical_review)
+    medical_reopen_parser = medical_sub.add_parser("reopen", help="Return a reviewed receipt to the inbox")
+    medical_reopen_parser.add_argument("note_id")
+    medical_reopen_parser.set_defaults(func=medical_reopen)
+    medical_text_parser = medical_sub.add_parser("extracted-text", help="Print extracted text for one receipt attachment")
+    medical_text_parser.add_argument("note_id")
+    medical_text_parser.add_argument("--attachment-id", default="")
+    medical_text_parser.set_defaults(func=medical_extracted_text)
+    medical_update_parser = medical_sub.add_parser("update", help="Manually correct extracted receipt fields")
+    medical_update_parser.add_argument("note_id")
+    medical_update_parser.add_argument("--fields-json", required=True)
+    medical_update_parser.set_defaults(func=medical_update)
+    medical_report_parser = medical_sub.add_parser("report", help="Summarize active receipts by field filters")
+    medical_report_parser.add_argument("--year", default="")
+    medical_report_parser.add_argument("--patient-name", default="")
+    medical_report_parser.add_argument("--from-date", default="")
+    medical_report_parser.add_argument("--to-date", default="")
+    medical_report_parser.set_defaults(func=medical_report)
+    medical_trash_parser = medical_sub.add_parser("trash", help="Move a receipt to recoverable trash")
+    medical_trash_parser.add_argument("note_id")
+    medical_trash_parser.set_defaults(func=medical_trash)
+    medical_restore_parser = medical_sub.add_parser("restore", help="Restore a receipt from recoverable trash")
+    medical_restore_parser.add_argument("note_id")
+    medical_restore_parser.set_defaults(func=medical_restore)
+    medical_purge_parser = medical_sub.add_parser("purge", help="Permanently delete a receipt already in trash")
+    medical_purge_parser.add_argument("note_id")
+    medical_purge_parser.add_argument("--yes", action="store_true", help="Confirm permanent deletion")
+    medical_purge_parser.set_defaults(func=medical_purge)
+    medical_purge_bulk_parser = medical_sub.add_parser("purge-bulk", help="Permanently delete multiple receipts already in trash")
+    medical_purge_bulk_parser.add_argument("note_ids", nargs="+")
+    medical_purge_bulk_parser.add_argument("--yes", action="store_true", help="Confirm permanent deletion")
+    medical_purge_bulk_parser.set_defaults(func=medical_purge_bulk)
 
     sp = sub.add_parser("delete", help="Delete note and attachments")
     sp.add_argument("query")

@@ -756,6 +756,348 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["unresolved_resources"], 1)
         self.assertIn("missing resource", payload["warnings"][0])
 
+    def test_medical_capture_creates_plaintext_inbox_note_and_receipt_attachment(self):
+        receipt = self.vault / "payment-receipt.pdf"
+        receipt.write_bytes(b"%PDF fake receipt")
+        original = kaal.run_docling
+        try:
+            kaal.run_docling = lambda path: "Patient ID: 12345\nPaid: $42.00"
+            _result, stdout, _stderr = self.capture_call(
+                kaal.medical_capture,
+                SimpleNamespace(
+                    file=str(receipt),
+                    title="City Clinic payment receipt",
+                    source_url="https://portal.example.test/receipt/42",
+                    source_title="City Clinic: payment confirmed",
+                    captured_at="2026-07-29T12:00:00+00:00",
+                ),
+            )
+        finally:
+            kaal.run_docling = original
+
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "captured")
+        self.assertEqual(payload["storage"], "plaintext")
+        meta = kaal.load_index()["notes"][0]
+        self.assertEqual(meta["title"], "City Clinic payment receipt")
+        self.assertEqual(meta["storage"], "plaintext")
+        self.assertEqual(meta["sensitivity"], "public")
+        self.assertTrue({"medical", "receipt", "inbox"}.issubset(set(meta["tags"])))
+        self.assertEqual(meta["source"]["url"], "https://portal.example.test/receipt/42")
+        attachment = meta["attachments"][0]
+        self.assertEqual(attachment["storage"], "plaintext")
+        self.assertEqual(attachment["sensitivity"], "public")
+        self.assertTrue(attachment["extracted_markdown"])
+        self.assertEqual(attachment["source"]["title"], "City Clinic: payment confirmed")
+        self.assertIn("City Clinic: payment confirmed", kaal.load_note(meta)["body"])
+        self.assertIn("Paid: $42.00", (kaal.attachment_note_dir(meta["id"]) / attachment["id"] / "extracted.md").read_text())
+
+    def test_medical_list_limits_results_to_medical_receipts_and_can_filter_inbox(self):
+        self.add_note(title="Not medical", tags="home", body="# Home")
+        receipt = self.vault / "receipt.pdf"
+        receipt.write_bytes(b"%PDF fake receipt")
+        self.call_silently(
+            kaal.medical_capture,
+            SimpleNamespace(file=str(receipt), title="Receipt", source_url="", source_title="", captured_at=""),
+        )
+
+        _result, stdout, _stderr = self.capture_call(kaal.medical_list, SimpleNamespace(inbox=True, json=True))
+        listed = json.loads(stdout)
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["title"], "Receipt")
+        self.assertIn("inbox", listed[0]["tags"])
+
+    def test_medical_list_sorts_newest_first_and_honors_limit(self):
+        older = self.add_note(title="Older receipt", tags="medical,receipt,inbox", body="# Older")
+        newer = self.add_note(title="Newer receipt", tags="medical,receipt,inbox", body="# Newer")
+        index = kaal.load_index()
+        for note in index["notes"]:
+            if note["id"] == older["id"]:
+                note["updated"] = "2026-01-01T00:00:00+00:00"
+            if note["id"] == newer["id"]:
+                note["updated"] = "2026-02-01T00:00:00+00:00"
+        kaal.save_index(index)
+
+        _result, stdout, _stderr = self.capture_call(kaal.medical_list, SimpleNamespace(inbox=False, json=True, limit=1))
+        listed = json.loads(stdout)
+        self.assertEqual([note["title"] for note in listed], ["Newer receipt"])
+
+    def test_medical_receipt_trash_restore_and_purge_lifecycle(self):
+        receipt = self.add_note(title="Receipt to manage", tags="medical,receipt,inbox", body="# Receipt")
+        attachment_source = self.vault / "original.pdf"
+        attachment_source.write_bytes(b"%PDF receipt")
+        kaal.attach_file_to_note(receipt, attachment_source, sensitivity="public")
+
+        _result, stdout, _stderr = self.capture_call(kaal.medical_trash, SimpleNamespace(note_id=receipt["id"]))
+        self.assertEqual(json.loads(stdout)["status"], "trashed")
+        _result, stdout, _stderr = self.capture_call(kaal.medical_list, SimpleNamespace(inbox=False, json=True, limit=0, trash=False))
+        self.assertEqual(json.loads(stdout), [])
+        _result, stdout, _stderr = self.capture_call(kaal.medical_list, SimpleNamespace(inbox=False, json=True, limit=0, trash=True))
+        self.assertEqual([note["id"] for note in json.loads(stdout)], [receipt["id"]])
+
+        _result, stdout, _stderr = self.capture_call(kaal.medical_restore, SimpleNamespace(note_id=receipt["id"]))
+        self.assertEqual(json.loads(stdout)["status"], "restored")
+        _result, stdout, _stderr = self.capture_call(kaal.medical_trash, SimpleNamespace(note_id=receipt["id"]))
+        self.assertEqual(json.loads(stdout)["status"], "trashed")
+        _result, stdout, _stderr = self.capture_call(kaal.medical_purge, SimpleNamespace(note_id=receipt["id"], yes=True))
+        self.assertEqual(json.loads(stdout)["status"], "purged")
+        self.assertFalse(kaal.plaintext_note_path(receipt["id"]).exists())
+        self.assertFalse(kaal.attachment_note_dir(receipt["id"]).exists())
+        self.assertFalse((self.vault / ".receipt-purge").exists())
+        self.assertFalse(any(note["id"] == receipt["id"] for note in kaal.load_index()["notes"]))
+
+    def test_medical_purge_restores_the_trashed_receipt_when_staged_cleanup_fails(self):
+        receipt = self.add_note(title="Receipt with failed purge", tags="medical,receipt,inbox", body="# Receipt")
+        _result, _stdout, _stderr = self.capture_call(kaal.medical_trash, SimpleNamespace(note_id=receipt["id"]))
+        original_rmtree = kaal.shutil.rmtree
+
+        def fail_purge_cleanup(path, *args, **kwargs):
+            if Path(path).name == receipt["id"]:
+                raise OSError("simulated staged cleanup failure")
+            return original_rmtree(path, *args, **kwargs)
+
+        kaal.shutil.rmtree = fail_purge_cleanup
+        try:
+            with self.assertRaises(SystemExit):
+                kaal.medical_purge(SimpleNamespace(note_id=receipt["id"], yes=True))
+        finally:
+            kaal.shutil.rmtree = original_rmtree
+
+        restored = next(note for note in kaal.load_index()["notes"] if note["id"] == receipt["id"])
+        self.assertTrue(restored.get("trashed_at"))
+        self.assertTrue(kaal.plaintext_note_path(receipt["id"]).exists())
+
+    def test_medical_bulk_purge_requires_every_receipt_to_be_trashed(self):
+        trashed = self.add_note(title="Trashed receipt", tags="medical,receipt,inbox", body="# Receipt")
+        active = self.add_note(title="Active receipt", tags="medical,receipt,inbox", body="# Receipt")
+        self.call_silently(kaal.medical_trash, SimpleNamespace(note_id=trashed["id"]))
+
+        with self.assertRaises(SystemExit):
+            kaal.medical_purge_bulk(SimpleNamespace(note_ids=[trashed["id"], active["id"]], yes=True))
+
+        remaining = {note["id"]: note for note in kaal.load_index()["notes"]}
+        self.assertIn(trashed["id"], remaining)
+        self.assertIn(active["id"], remaining)
+        self.assertTrue(remaining[trashed["id"]].get("trashed_at"))
+
+    def test_medical_bulk_purge_removes_only_kaal_managed_copies(self):
+        first = self.add_note(title="First receipt", tags="medical,receipt,inbox", body="# Receipt")
+        second = self.add_note(title="Second receipt", tags="medical,receipt,inbox", body="# Receipt")
+        source = self.vault / "source.pdf"
+        source.write_bytes(b"%PDF source")
+        kaal.attach_file_to_note(first, source, sensitivity="public")
+        kaal.attach_file_to_note(second, source, sensitivity="public")
+        self.call_silently(kaal.medical_trash, SimpleNamespace(note_id=first["id"]))
+        self.call_silently(kaal.medical_trash, SimpleNamespace(note_id=second["id"]))
+
+        _result, stdout, _stderr = self.capture_call(
+            kaal.medical_purge_bulk,
+            SimpleNamespace(note_ids=[first["id"], second["id"]], yes=True),
+        )
+
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "purged")
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(set(payload["ids"]), {first["id"], second["id"]})
+        self.assertTrue(source.exists())
+        self.assertFalse(any(note["id"] in {first["id"], second["id"]} for note in kaal.load_index()["notes"]))
+
+    def test_medical_review_and_reopen_toggle_the_inbox_status(self):
+        receipt = self.add_note(title="Receipt to review", tags="medical,receipt,inbox", body="# Receipt")
+        receipt["receipt"] = {"fields": {"amount": "12.34", "service_date": "2026-01-01"}, "field_sources": {}}
+        kaal.save_index({"version": 1, "created": kaal.now_iso(), "notes": [receipt]})
+
+        _result, stdout, _stderr = self.capture_call(kaal.medical_review, SimpleNamespace(note_id=receipt["id"]))
+        self.assertEqual(json.loads(stdout)["status"], "reviewed")
+        reviewed = next(note for note in kaal.load_index()["notes"] if note["id"] == receipt["id"])
+        self.assertNotIn("inbox", reviewed["tags"])
+        self.assertTrue(reviewed.get("reviewed_at"))
+
+        _result, stdout, _stderr = self.capture_call(kaal.medical_reopen, SimpleNamespace(note_id=receipt["id"]))
+        self.assertEqual(json.loads(stdout)["status"], "inbox")
+        reopened = next(note for note in kaal.load_index()["notes"] if note["id"] == receipt["id"])
+        self.assertIn("inbox", reopened["tags"])
+        self.assertNotIn("reviewed_at", reopened)
+
+    def test_medical_extracted_text_returns_only_an_explicitly_requested_sidecar(self):
+        receipt = self.add_note(title="Receipt text", tags="medical,receipt,inbox", body="# Receipt")
+        source = self.vault / "receipt.txt"
+        source.write_text("receipt text", encoding="utf-8")
+        attachment = kaal.attach_file_to_note(receipt, source, sensitivity="public", extract=True)
+
+        _result, stdout, _stderr = self.capture_call(kaal.medical_extracted_text, SimpleNamespace(note_id=receipt["id"], attachment_id=attachment["id"]))
+        result = json.loads(stdout)
+        self.assertEqual(result["attachment_id"], attachment["id"])
+        self.assertIn("receipt text", result["text"])
+
+    def test_medical_capture_rolls_back_note_when_attachment_copy_fails(self):
+        receipt = self.vault / "receipt.pdf"
+        receipt.write_bytes(b"%PDF fake receipt")
+        original = kaal.attach_file_to_note
+        try:
+            def fail_attachment(*args, **kwargs):
+                raise OSError("disk full")
+            kaal.attach_file_to_note = fail_attachment
+            with self.assertRaises(OSError):
+                kaal.medical_capture(SimpleNamespace(file=str(receipt), title="Receipt", source_url="", source_title="", captured_at=""))
+        finally:
+            kaal.attach_file_to_note = original
+        self.assertEqual(kaal.load_index()["notes"], [])
+        self.assertEqual(list(kaal.NOTES_DIR.iterdir()), [])
+        self.assertEqual(list(kaal.ATTACH_DIR.iterdir()), [])
+
+    def test_docling_structured_field_resolver_uses_labelled_neighbor_cells(self):
+        document = {"texts": [
+            {"text": "Patient Name"},
+            {"text": "Example Patient"},
+            {"text": "Date of Service"},
+            {"text": "2026-07-30"},
+            {"text": "Amount Paid: $42.50"},
+        ]}
+        fields = kaal.infer_docling_fields(document)
+        self.assertEqual(fields["patient_name"], "Example Patient")
+        self.assertEqual(fields["service_date"], "2026-07-30")
+
+    def test_docling_structured_field_resolver_uses_inline_cell_values(self):
+        document = {"texts": [{"text": "Provider | Example Medical Practice"}]}
+        self.assertEqual(kaal.infer_docling_fields(document)["provider"], "Example Medical Practice")
+
+    def test_docling_structured_field_resolver_rejects_a_label_as_patient_value(self):
+        document = {"texts": [{"text": "Patient Name"}, {"text": "Date"}]}
+        self.assertNotIn("patient_name", kaal.infer_docling_fields(document))
+
+    def test_receipt_field_inference_supports_pdftotext_layout_columns(self):
+        fields = kaal.infer_receipt_fields("Patient Name          Example Patient\n")
+        self.assertEqual(fields["patient_name"], "Example Patient")
+
+    def test_pdf_extraction_escalates_when_native_text_lacks_paid_amount_or_date(self):
+        receipt = self.vault / "receipt.pdf"
+        receipt.write_bytes(b"%PDF-1.4")
+        original_pdf = kaal.run_pdftotext
+        original_vision = kaal.run_macos_vision_pdf_ocr
+        original_docling = kaal.run_docling
+        try:
+            kaal.run_pdftotext = lambda _path: "Patient Name: Example Patient\n"
+            kaal.run_macos_vision_pdf_ocr = lambda _path: "Payment received: $12.34\nDate of Service: 2026-01-01\n"
+            kaal.run_docling = lambda _path: ""
+            extracted = kaal.extract_attachment_markdown(receipt, extract=True, ocr=True)
+        finally:
+            kaal.run_pdftotext = original_pdf
+            kaal.run_macos_vision_pdf_ocr = original_vision
+            kaal.run_docling = original_docling
+        self.assertIn("Method: macos-vision", extracted)
+        fields = kaal.infer_receipt_fields(extracted)
+        self.assertEqual(fields["amount"], "12.34")
+        self.assertEqual(fields["service_date"], "2026-01-01")
+
+    def test_medical_pdf_route_stops_after_docling_without_markitdown_or_tesseract(self):
+        receipt = self.vault / "receipt.pdf"
+        receipt.write_bytes(b"%PDF-1.4")
+        original_pdf = kaal.run_pdftotext
+        original_vision = kaal.run_macos_vision_pdf_ocr
+        original_docling = kaal.run_docling
+        original_markitdown = kaal.run_markitdown
+        original_tesseract = kaal.run_pdf_ocr
+        calls = {"markitdown": 0, "tesseract": 0}
+        try:
+            kaal.run_pdftotext = lambda _path: "Patient Name: Example Patient\n"
+            kaal.run_macos_vision_pdf_ocr = lambda _path: "Patient Name: Example Patient\n"
+            kaal.run_docling = lambda _path: "Payment received: $12.34\nPayment Date: 2026-01-01\n"
+            kaal.run_markitdown = lambda _path: calls.__setitem__("markitdown", calls["markitdown"] + 1) or ""
+            kaal.run_pdf_ocr = lambda _path: calls.__setitem__("tesseract", calls["tesseract"] + 1) or ""
+            extracted = kaal.extract_attachment_markdown(receipt, extract=True, ocr=True, receipt=True)
+        finally:
+            kaal.run_pdftotext = original_pdf
+            kaal.run_macos_vision_pdf_ocr = original_vision
+            kaal.run_docling = original_docling
+            kaal.run_markitdown = original_markitdown
+            kaal.run_pdf_ocr = original_tesseract
+        self.assertIn("Method: docling", extracted)
+        self.assertEqual(calls, {"markitdown": 0, "tesseract": 0})
+
+    def test_receipt_state_uses_local_ai_only_for_safe_missing_fields(self):
+        state = kaal.receipt_extraction_state("Patient Name          Example Patient\n", ai_fields={"patient_name": "Wrong Person", "provider": "Example Medical Center"})
+        self.assertEqual(state["fields"]["patient_name"], "Example Patient")
+        self.assertEqual(state["field_sources"]["patient_name"], "labelled-text")
+        self.assertEqual(state["fields"]["provider"], "")
+        self.assertNotIn("provider", state["field_sources"])
+
+    def test_receipt_amount_requires_an_explicit_payment_label(self):
+        self.assertEqual(kaal.infer_receipt_fields("Total: $500.00\n")["amount"], "")
+        self.assertEqual(kaal.infer_receipt_fields("Total Amount: $23.24\n")["amount"], "")
+        self.assertEqual(kaal.infer_receipt_fields("Payment received: 202607319498541\n")["amount"], "")
+        self.assertEqual(kaal.infer_receipt_fields("Payment received: $112.45\n")["amount"], "112.45")
+        self.assertEqual(
+            kaal.infer_receipt_fields("SALE - APPROVED\nTotal Amount: $23.24\n")["amount"],
+            "23.24",
+        )
+        self.assertEqual(kaal.infer_receipt_fields("Date: 10/09/2025\n")["paid_date"], "")
+        self.assertEqual(
+            kaal.infer_receipt_fields("SALE - APPROVED\nDate: 10/09/2025\n")["paid_date"],
+            "10/09/2025",
+        )
+        self.assertEqual(
+            kaal.infer_receipt_fields("Payment Date\n07/31/2026\n")["paid_date"],
+            "07/31/2026",
+        )
+        self.assertEqual(kaal.infer_receipt_fields("Payment Date\nMember Identifier\n")["paid_date"], "")
+
+    def test_supplied_receipt_fixtures_detect_user_confirmed_paid_amounts(self):
+        fixture_dir = ROOT / ".hermes" / "desktop-attachments"
+        fixtures = {
+            "Payment receipt.pdf": "23.24",
+            "Labcorp-Receipt.pdf": "112.45",
+        }
+        if not all((fixture_dir / name).is_file() for name in fixtures):
+            self.skipTest("user-supplied receipt fixtures are not present")
+        for name, expected_amount in fixtures.items():
+            extracted = kaal.extract_attachment_markdown(fixture_dir / name, extract=True, ocr=True, receipt=True)
+            receipt = kaal.build_receipt_state(extracted)
+            self.assertEqual(receipt["fields"].get("amount"), expected_amount, name)
+
+    def test_receipt_state_does_not_accept_an_unverified_ai_amount(self):
+        state = kaal.receipt_extraction_state("Total: $500.00\n", ai_fields={"amount": "500.00"})
+        self.assertEqual(state["fields"]["amount"], "")
+        self.assertNotIn("amount", state["field_sources"])
+
+    def test_receipt_provider_rejects_individual_clinician_candidates(self):
+        self.assertEqual(kaal.infer_receipt_fields("Provider: Dr. Example\n")["provider"], "")
+        state = kaal.receipt_extraction_state("", ai_fields={"provider": "Dr. Example"})
+        self.assertEqual(state["fields"].get("provider", ""), "")
+        self.assertNotIn("provider", state["field_sources"])
+
+    def test_receipt_state_rejects_semantic_guesses_for_amount_and_dates(self):
+        state = kaal.receipt_extraction_state("", ai_fields={"amount": "500.00", "service_date": "2026-01-01", "paid_date": "2026-01-02"})
+        self.assertEqual(state["fields"], {})
+        self.assertEqual(state["field_sources"], {})
+
+    def test_build_receipt_state_preserves_manual_critical_fields_on_reextraction(self):
+        prior = {
+            "fields": {"amount": "12.34", "service_date": "2026-01-01"},
+            "field_sources": {"amount": "manual", "service_date": "manual"},
+            "manually_updated_at": "2026-01-01T00:00:00+00:00",
+        }
+        receipt = kaal.build_receipt_state("Amount Paid: $99.00\nDate of Service: 2026-02-01\n", {}, prior)
+        self.assertEqual(receipt["fields"]["amount"], "12.34")
+        self.assertEqual(receipt["fields"]["service_date"], "2026-01-01")
+        self.assertEqual(receipt["field_sources"]["amount"], "manual")
+        self.assertEqual(receipt["field_sources"]["service_date"], "manual")
+
+    def test_review_requires_paid_amount_and_a_date(self):
+        note = self.add_note(title="Receipt", tags="medical,receipt")
+        note["receipt"] = {"fields": {"amount": "", "service_date": "", "paid_date": ""}, "field_sources": {}}
+        kaal.save_index({"version": 1, "created": kaal.now_iso(), "notes": [note]})
+        code, _stdout, stderr = self.assert_dies(kaal.medical_review, SimpleNamespace(note_id=note["id"]))
+        self.assertEqual(code, 1)
+        self.assertIn("amount and a date", stderr)
+
+        note["receipt"]["fields"].update({"amount": "12.34", "service_date": "2026-01-01"})
+        kaal.save_index({"version": 1, "created": kaal.now_iso(), "notes": [note]})
+        self.call_silently(kaal.medical_review, SimpleNamespace(note_id=note["id"]))
+        reviewed = kaal.load_index()["notes"][0]
+        self.assertEqual(reviewed["receipt"]["field_sources"]["amount"], "confirmed")
+        self.assertEqual(reviewed["receipt"]["field_sources"]["service_date"], "confirmed")
+
     def test_build_parser_parses_representative_commands(self):
         parser = kaal.build_parser()
         self.assertEqual(parser.parse_args(["add", "--title", "T", "--body", "B"]).func, kaal.add_note)
@@ -769,6 +1111,13 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(parser.parse_args(["export-attachment", "query", "att", "--force"]).func, kaal.export_attachment)
         self.assertEqual(parser.parse_args(["ocr-attachments", "--dry-run", "--limit", "5"]).func, kaal.ocr_attachments)
         self.assertEqual(parser.parse_args(["import-joplin-raw", "export", "--dry-run", "--tags", "migrated", "--no-extract", "--no-ocr"]).func, kaal.import_joplin_raw)
+        self.assertEqual(parser.parse_args(["medical", "capture", "receipt.pdf", "--source-url", "https://example.test"]).func, kaal.medical_capture)
+        self.assertEqual(parser.parse_args(["medical", "list", "--inbox", "--json"]).func, kaal.medical_list)
+        self.assertEqual(parser.parse_args(["medical", "list", "--limit", "25"]).limit, 25)
+        self.assertEqual(parser.parse_args(["medical", "trash", "abc123"]).func, kaal.medical_trash)
+        self.assertEqual(parser.parse_args(["medical", "restore", "abc123"]).func, kaal.medical_restore)
+        self.assertEqual(parser.parse_args(["medical", "purge", "abc123", "--yes"]).func, kaal.medical_purge)
+        self.assertEqual(parser.parse_args(["medical", "purge-bulk", "abc123", "def456", "--yes"]).func, kaal.medical_purge_bulk)
         self.assertEqual(parser.parse_args(["delete", "query", "--yes"]).func, kaal.delete_note)
 
     def test_main_dispatches_to_parsed_command(self):
