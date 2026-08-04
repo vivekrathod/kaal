@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Kaal Receipt Inbox</title>
+  <style>
+    :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 36px auto; max-width: 980px; padding: 0 24px 48px; }
+    header { align-items: center; display: flex; flex-wrap: wrap; gap: 18px; justify-content: space-between; }
+    h1 { font-size: 28px; margin: 0; }
+    button { border: 0; border-radius: 7px; cursor: pointer; font: inherit; padding: 9px 14px; }
+    button.active { background: #1a73e8; color: white; }
+    button.danger { background: #b3261e; color: white; }
+    button.secondary { background: #e8eaed; color: #202124; }
+    .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
+    #search { border: 1px solid #dadce0; border-radius: 7px; font: inherit; min-width: 230px; padding: 8px 10px; }
+    #summary { color: #5f6368; margin: 8px 0 24px; }
+    #state { border: 1px solid #dadce0; border-radius: 8px; color: #5f6368; padding: 18px; }
+    #state.error { border-color: #b3261e; color: #b3261e; }
+    #receipts { display: grid; gap: 12px; }
+    article { border: 1px solid #dadce0; border-radius: 10px; padding: 16px; }
+    h2 { font-size: 18px; margin: 0 0 8px; overflow-wrap: anywhere; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 5px 14px; margin: 0; }
+    dt { color: #5f6368; }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    .tag { background: #e8f0fe; border-radius: 999px; color: #174ea6; display: inline-block; font-size: 12px; margin: 8px 5px 0 0; padding: 3px 8px; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .receipt-select { display: inline-flex; gap: 6px; margin: 0 0 10px; }
+    .notice { background: #fff8e1; border: 1px solid #f9ab00; border-radius: 8px; margin: 0 0 20px; padding: 12px; }
+    pre.extracted { background: #f8f9fa; border: 1px solid #dadce0; border-radius: 8px; margin: 16px 0 0; max-height: 360px; overflow: auto; padding: 12px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Kaal Receipt Inbox</h1>
+      <p id="summary">Loading recent locally stored receipts…</p>
+    </div>
+    <div class="toolbar">
+      <button id="inbox-receipts" class="active" type="button">Needs review</button>
+      <button id="all-receipts" type="button">All receipts</button>
+      <button id="trashed-receipts" type="button">Trash</button>
+      <input id="search" type="search" placeholder="Filter receipt title, source, or ID" aria-label="Filter receipts">
+      <button id="report" type="button">Run report</button>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+  </header>
+  <p id="trash-notice" class="notice" hidden>Items in Trash are still recoverable. “Delete permanently” removes only Kaal's stored receipt copy, attachment sidecars, and metadata; it never touches the original browser download.</p>
+  <div id="bulk-purge-controls" class="actions" hidden>
+    <button id="bulk-purge" class="danger" type="button" disabled>Delete selected permanently</button>
+  </div>
+  <main id="receipts" aria-live="polite"></main>
+  <div id="state" hidden></div>
+  <script src="inbox.js"></script>
+</body>
+</html>
