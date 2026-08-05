@@ -116,6 +116,78 @@ class ReceiptHostTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Downloads"):
             host.capture({"action": "capture-local-file", "path": str(receipt)})
 
+    def test_general_capture_uses_the_generic_cli_and_cleans_only_trusted_general_staging_files(self):
+        staged = self.root / "custom-chrome-downloads" / "Kaal Capture"
+        staged.mkdir(parents=True)
+        host.STAGING_DIR = staged
+        item = staged / "item-2026-08-04T17-30-00-123Z-reference.txt"
+        item.write_text("reference", encoding="utf-8")
+        calls = []
+
+        def fake_capture(command, **kwargs):
+            calls.append(command)
+            return self.fake_success()
+
+        host.subprocess.run = fake_capture
+        result = host.capture({"action": "capture-general", "path": str(item), "cleanupStaging": True})
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["stagingFileCleaned"])
+        self.assertFalse(item.exists())
+        self.assertEqual(calls[0][-3:-1], [str(host.KAAL_SCRIPT), "capture"])
+        self.assertEqual(Path(calls[0][-1]), item.resolve())
+
+    def test_general_capture_local_file_preserves_download_and_rejects_an_untrusted_staging_name(self):
+        downloads = self.root / "Downloads"
+        downloads.mkdir()
+        host.DOWNLOADS_DIR = downloads
+        item = downloads / "reference.txt"
+        item.write_text("reference", encoding="utf-8")
+        host.subprocess.run = self.fake_success
+
+        result = host.capture({"action": "capture-general-local-file", "path": str(item)})
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(item.exists())
+        staged = self.root / "trusted-downloads" / "Kaal Capture"
+        staged.mkdir(parents=True)
+        host.STAGING_DIR = staged
+        bad = staged / "receipt-2026-08-04T17-30-00-123Z-not-a-general-item.pdf"
+        bad.write_bytes(b"receipt")
+        with self.assertRaisesRegex(ValueError, "staging"):
+            host.capture({"action": "capture-general", "path": str(bad)})
+
+    def test_selection_capture_forwards_text_over_stdin_not_the_command_line(self):
+        calls = []
+
+        def fake_capture(command, **kwargs):
+            calls.append((command, kwargs))
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"status": "captured", "id": "n1", "title": "Article selection"}), stderr="")
+
+        host.subprocess.run = fake_capture
+        result = host.handle_request({
+            "action": "capture-selection",
+            "text": "A short selected passage.",
+            "title": "Article selection",
+            "sourceUrl": "https://example.test/article",
+            "sourceTitle": "Example article",
+            "capturedAt": "2026-08-04T18:00:00Z",
+        })
+
+        self.assertTrue(result["ok"])
+        command, kwargs = calls[0]
+        self.assertEqual(command[1:3], [str(host.KAAL_SCRIPT), "capture-text"])
+        self.assertNotIn("A short selected passage.", command)
+        self.assertEqual(kwargs["input"], "A short selected passage.")
+        self.assertTrue(kwargs["text"])
+        self.assertTrue(kwargs["capture_output"])
+
+    def test_selection_capture_rejects_blank_or_oversized_text(self):
+        with self.assertRaisesRegex(ValueError, "selection text"):
+            host.handle_request({"action": "capture-selection", "text": "   "})
+        with self.assertRaisesRegex(ValueError, "selection text"):
+            host.handle_request({"action": "capture-selection", "text": "x" * (host.MAX_SELECTION_CHARS + 1)})
+
     def test_list_returns_bounded_receipt_metadata_from_kaal(self):
         calls = []
         def fake_list(command, **kwargs):

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Save to Kaal</title>
+  <style>
+    :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; min-width: 290px; padding: 16px; }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    p { font-size: 13px; line-height: 1.4; margin: 0 0 14px; }
+    .actions { display: grid; gap: 8px; }
+    button { border: 0; border-radius: 7px; cursor: pointer; font: inherit; padding: 10px 12px; text-align: left; }
+    #save-general { background: #1a73e8; color: white; }
+    #save-medical { background: #e8eaed; color: #202124; }
+    button:disabled { cursor: progress; opacity: 0.65; }
+    #state { font-size: 12px; line-height: 1.35; margin: 12px 0 0; }
+    #state.error { color: #b3261e; }
+  </style>
+</head>
+<body>
+  <h1>Save to Kaal</h1>
+  <p>Save a normal browser item with Kaal’s automatic privacy classification, or explicitly route a paid medical receipt to the receipt review inbox.</p>
+  <div class="actions">
+    <button id="save-general" type="button">Save to Kaal</button>
+    <button id="save-medical" type="button">Save as medical receipt</button>
+  </div>
+  <p id="state" role="status" aria-live="polite"></p>
+  <script src="popup.js"></script>
+</body>
+</html>

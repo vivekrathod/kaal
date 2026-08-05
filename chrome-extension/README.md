@@ -1,22 +1,23 @@
-# Kaal Receipt Capture Chrome extension
+# Kaal Capture Chrome extension
 
-This unpacked Chrome extension turns a receipt visible in Chrome into a local Kaal medical-inbox record.
+This unpacked Chrome extension captures browser items into local Kaal storage without uploading them.
 
-## What it captures
+## Capture modes
 
-- **Toolbar button:**
-  - a receipt PDF already opened from your Downloads folder is copied directly into Kaal (the original download remains untouched);
-  - a web PDF is downloaded unchanged;
-  - an HTML receipt/confirmation page is printed to a PDF using Chrome's authenticated current tab.
-- **Right-click a receipt link:** Chrome downloads the linked file unchanged.
+- **Save to Kaal:** saves the current page, PDF, Downloads file, or linked item as a normal Kaal note and managed attachment. Kaal applies its standard automatic sensitivity classification; the original download stays untouched.
+- **Save as medical receipt:** creates the distinct plaintext `medical`, `receipt`, `inbox` record used by the receipt dashboard and review lifecycle.
+- **Save selected text to Kaal:** right-click selected page text to create a normal Kaal note containing only that selection and its sanitized page provenance. It never triggers medical receipt processing.
 
-The downloaded artifact is passed to the local Native Messaging host, which runs:
+The toolbar popup presents both choices explicitly. Page and link context menus do the same. HTML pages are printed to a PDF through Chrome's authenticated current tab; PDFs and linked files are downloaded unchanged. A Downloads `file://` item is copied directly into Kaal without re-downloading it.
+
+The local Native Messaging host invokes one of:
 
 ```bash
+kaal capture <artifact> --source-url <url> --source-title <title>
 kaal medical capture <artifact> --source-url <url> --source-title <title>
 ```
 
-Kaal creates a **plaintext** `medical`, `receipt`, `inbox` note, copies the receipt, and extracts PDF text/OCR when available. The extension only talks to the host on the same Mac; it does not upload a receipt or access any cloud API.
+General-capture URL provenance strips query strings and fragments before Kaal stores it. The extension only talks to the host on the same Mac; it does not access any cloud API.
 
 ## One-time installation on macOS
 
@@ -46,9 +47,9 @@ The extension has a fixed public extension ID, so the host manifest installed ab
 
 ## Normal use
 
-1. Complete a payment and open its receipt PDF or confirmation page.
-2. Click the Kaal toolbar button, or right-click a receipt/PDF link and select **Add linked receipt to Kaal**.
-3. The toolbar badge stays `OK` when Kaal copied the receipt; `ERR` opens a page with the actual failure reason.
+1. Open a page, PDF, Downloads file, or linked item in Chrome. To save just text, select it first.
+2. Click the Kaal toolbar icon and select **Save to Kaal** for a normal capture, or **Save as medical receipt** for a paid medical receipt. The same choices are available from the page/link context menus; selected text has its own **Save selected text to Kaal** context-menu item.
+3. The toolbar badge stays `OK` when Kaal copied the artifact; `ERR` opens a page with the actual failure reason.
 
 ### Verify captured receipts
 

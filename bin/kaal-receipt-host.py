@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Chrome Native Messaging host for the Kaal Receipt Capture extension."""
+"""Chrome Native Messaging host for the Kaal browser-capture extension."""
 from __future__ import annotations
 
 import json
@@ -13,12 +13,14 @@ from typing import Any
 
 MAX_MESSAGE_BYTES = 1_000_000
 MAX_CAPTURE_BYTES = 100 * 1024 * 1024
+MAX_SELECTION_CHARS = 100_000
 RECEIPT_LIST_LIMIT = 100
 STAGING_DIRECTORY_NAME = "Kaal Capture"
 DOWNLOADS_DIR = Path.home() / "Downloads"
 DEFAULT_STAGING_DIR = DOWNLOADS_DIR / STAGING_DIRECTORY_NAME
 STAGING_DIR = Path(os.environ.get("KAAL_RECEIPT_STAGING_DIR", str(DEFAULT_STAGING_DIR))).expanduser().resolve()
 STAGING_FILE_RE = re.compile(r"^receipt-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-.+\.pdf$")
+GENERAL_STAGING_FILE_RE = re.compile(r"^item-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-.+\.[A-Za-z0-9]{1,16}$")
 KAAL_SCRIPT = Path(__file__).with_name("secure-notes.py")
 
 
@@ -57,10 +59,11 @@ def optional_text(payload: dict[str, Any], key: str, limit: int = 4096) -> str:
     return value
 
 
-def is_staging_file(path: Path) -> bool:
+def is_staging_file(path: Path, *, general: bool = False) -> bool:
     # The installer pins this absolute directory to the user's Chrome download
     # location. Do not authorize a similarly named directory elsewhere.
-    return path.parent == STAGING_DIR.resolve() and STAGING_FILE_RE.fullmatch(path.name) is not None
+    filename_pattern = GENERAL_STAGING_FILE_RE if general else STAGING_FILE_RE
+    return path.parent == STAGING_DIR.resolve() and filename_pattern.fullmatch(path.name) is not None
 
 
 def is_download_file(path: Path) -> bool:
@@ -72,24 +75,32 @@ def is_download_file(path: Path) -> bool:
 
 def capture(payload: dict[str, Any]) -> dict[str, Any]:
     action = payload.get("action")
-    if action not in {"capture", "capture-local-file"}:
+    medical_action = action in {"capture", "capture-local-file"}
+    general_action = action in {"capture-general", "capture-general-local-file"}
+    if not medical_action and not general_action:
         raise ValueError("unsupported action")
     raw_path = optional_text(payload, "path")
     if not raw_path:
         raise ValueError("path is required")
     candidate = Path(raw_path).expanduser()
     if candidate.is_symlink():
-        raise ValueError("symbolic-link receipt paths are not allowed")
+        raise ValueError("symbolic-link capture paths are not allowed")
     source = candidate.resolve()
     if not source.is_file():
-        raise ValueError("receipt file no longer exists")
-    if action == "capture" and not is_staging_file(source):
-        raise ValueError("receipt path is outside the Kaal capture staging directory")
-    if action == "capture-local-file" and not is_download_file(source):
-        raise ValueError("local receipt path is outside the user's Downloads directory")
+        raise ValueError("capture file no longer exists")
+    is_local_file = action in {"capture-local-file", "capture-general-local-file"}
+    if not is_local_file and not is_staging_file(source, general=general_action):
+        raise ValueError("capture path is outside the Kaal capture staging directory")
+    if is_local_file and not is_download_file(source):
+        raise ValueError("local capture path is outside the user's Downloads directory")
     if source.stat().st_size > MAX_CAPTURE_BYTES:
-        raise ValueError(f"receipt exceeds the {MAX_CAPTURE_BYTES // (1024 * 1024)} MiB capture limit")
-    command = [sys.executable, str(KAAL_SCRIPT), "medical", "capture", str(source)]
+        raise ValueError(f"capture exceeds the {MAX_CAPTURE_BYTES // (1024 * 1024)} MiB capture limit")
+    command = [sys.executable, str(KAAL_SCRIPT)]
+    if medical_action:
+        command.extend(["medical", "capture"])
+    else:
+        command.append("capture")
+    command.append(str(source))
     options = (("title", "--title"), ("sourceUrl", "--source-url"), ("sourceTitle", "--source-title"), ("capturedAt", "--captured-at"))
     for key, flag in options:
         value = optional_text(payload, key)
@@ -109,7 +120,7 @@ def capture(payload: dict[str, Any]) -> dict[str, Any]:
     cleanup_error = ""
     # Chrome creates this staging file solely for the capture workflow. Remove it
     # only after Kaal reports that it copied the original successfully.
-    if action == "capture" and payload.get("cleanupStaging") is True and is_staging_file(source):
+    if not is_local_file and payload.get("cleanupStaging") is True and is_staging_file(source, general=general_action):
         try:
             source.unlink()
             cleaned = True
@@ -121,6 +132,36 @@ def capture(payload: dict[str, Any]) -> dict[str, Any]:
     if cleanup_error:
         response["stagingCleanupError"] = cleanup_error
     return response
+
+
+def capture_selection(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("action") != "capture-selection":
+        raise ValueError("unsupported selection action")
+    selected_text = payload.get("text")
+    if not isinstance(selected_text, str):
+        raise ValueError("selection text must be a string")
+    selected_text = selected_text.strip()
+    if not selected_text or len(selected_text) > MAX_SELECTION_CHARS:
+        raise ValueError(f"selection text must contain 1 to {MAX_SELECTION_CHARS:,} characters")
+    command = [sys.executable, str(KAAL_SCRIPT), "capture-text"]
+    options = (("title", "--title"), ("sourceUrl", "--source-url"), ("sourceTitle", "--source-title"), ("capturedAt", "--captured-at"))
+    for key, flag in options:
+        value = optional_text(payload, key)
+        if value:
+            command.extend([flag, value])
+    # Keep potentially private selected text out of process arguments and any
+    # process-list inspection; secure-notes reads it only from standard input.
+    proc = subprocess.run(command, input=selected_text, text=True, capture_output=True, check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "Kaal selection capture failed").strip()
+        return {"ok": False, "error": detail[:2000]}
+    try:
+        result = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {"ok": False, "error": "Kaal returned invalid selection-capture output"}
+    if not isinstance(result, dict) or result.get("status") != "captured" or not result.get("id"):
+        return {"ok": False, "error": "Kaal selection capture did not confirm a saved note"}
+    return {"ok": True, "result": result}
 
 
 def list_receipts(*, inbox: bool = False, trash: bool = False) -> dict[str, Any]:
@@ -210,6 +251,8 @@ def manage_receipt(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_request(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("action") == "capture-selection":
+        return capture_selection(payload)
     if payload.get("action") == "list":
         return list_receipts(inbox=payload.get("inbox") is True, trash=payload.get("trash") is True)
     if payload.get("action") in {"trash", "restore", "purge", "purge-bulk", "review", "reopen", "extract", "extracted-text", "update", "report"}:

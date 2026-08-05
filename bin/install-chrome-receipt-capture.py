@@ -14,7 +14,7 @@ EXTENSION_ID = "ebmkcbpcihgiaoimcpncmadadogclmld"
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Install Kaal's Chrome Native Messaging receipt-capture host")
+    parser = argparse.ArgumentParser(description="Install Kaal's Chrome Native Messaging capture host")
     parser.add_argument("--chrome-app-support", default=str(Path.home() / "Library" / "Application Support" / "Google" / "Chrome"))
     parser.add_argument("--downloads-dir", default=str(Path.home() / "Downloads"), help="Chrome's configured download directory; staging is limited to its Kaal Capture subdirectory")
     parser.add_argument("--python", default=sys.executable, help="Python that has Kaal's optional PDF extraction dependencies")
@@ -46,7 +46,7 @@ def main() -> None:
     manifest = manifest_dir / f"{HOST_NAME}.json"
     manifest.write_text(json.dumps({
         "name": HOST_NAME,
-        "description": "Kaal Receipt Capture local host",
+        "description": "Kaal browser capture local host",
         "path": str(wrapper),
         "type": "stdio",
         "allowed_origins": [f"chrome-extension://{EXTENSION_ID}/"],

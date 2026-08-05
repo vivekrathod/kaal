@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Kaal Receipt Capture",
-  "version": "0.1.8",
-  "description": "Save the current receipt PDF or page into the local Kaal medical inbox.",
+  "name": "Kaal Capture",
+  "version": "0.2.1",
+  "description": "Save browser pages, files, selected text, and medical receipts into local Kaal storage.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApybJtPACgI7ru7YW2AqfTwERDEMiDXk3AIvca1z04Xpf+wZdbDE/PXsxHCnSl4gz7FbR8xyd/enNDsfsGYH/55sAAugy4Nom8GLYcxbfE0ECde5W60YKjRY2Ycjmhuko5eWVrmWTb2weHYwUH/edlOmM9EFRho9nzbSVhaUZZR3vkquoIgcOwfrWT1a0eqdfmhOuKNY7EqsapwPyRZzutjsHVyQRYTlLZmbvK28rGKyUhIS57k7T/ZR/AHfENsWa6ryavTdHzZDGeCavzoMluyAloxJkkMFzpOEL+/2+wqSrtlIMbB1Uas8YcY0kg7PSoawaWWylzdxXnkPGoaVXbQIDAQAB",
   "permissions": [
     "activeTab",
@@ -17,6 +17,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Save this receipt to Kaal"
+    "default_popup": "popup.html",
+    "default_title": "Save to Kaal"
   }
 }

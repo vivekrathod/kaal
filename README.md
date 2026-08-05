@@ -132,6 +132,24 @@ Export an attachment when needed:
 kaal export-attachment "Tax 2025" ATTACHMENT_ID --output /tmp/tax-document.pdf
 ```
 
+## One-click browser capture from Chrome
+
+The Chrome extension presents two explicit capture choices:
+
+- **Save to Kaal** saves a webpage, PDF, local download, or linked item as a
+  normal Kaal note with an attached managed copy. Standard automatic sensitivity
+  classification applies, and source URL query strings/fragments are not kept.
+- **Save selected text to Kaal** appears when right-clicking selected browser
+  text and creates a normal note from that text plus sanitized page provenance.
+- **Save as medical receipt** uses the distinct medical receipt workflow below.
+
+General browser captures preserve the source artifact and never delete the
+original browser download:
+
+```bash
+kaal capture /path/to/file --title "Useful reference"
+```
+
 ## One-click medical receipt capture from Chrome
 
 Medical receipts are intentionally stored as **plaintext** in Kaal when using
