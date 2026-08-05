@@ -30,6 +30,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 VAULT = Path(os.environ.get("SECURE_NOTES_VAULT", str(Path.home() / ".secure-notes"))).expanduser()
 NOTES_DIR = VAULT / "notes"
@@ -1108,6 +1109,124 @@ def receipt_confirmation_issues(receipt: dict[str, Any]) -> list[str]:
     return issues
 
 
+def sanitized_capture_url(value: str) -> str:
+    """Keep useful browser provenance without persisting transient URL secrets."""
+    value = value.strip()
+    if not value:
+        return ""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return ""
+    if not parsed.scheme:
+        return ""
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def browser_capture(args: argparse.Namespace) -> None:
+    """Capture a browser artifact as a normal Kaal note and attachment.
+
+    Unlike ``medical_capture``, this follows Kaal's regular automatic storage
+    classification and does not add medical receipt metadata or lifecycle tags.
+    """
+    init_if_needed()
+    src = Path(args.file).expanduser().resolve()
+    if not src.exists() or not src.is_file():
+        die(f"Capture file not found: {src}")
+    source_url = sanitized_capture_url(getattr(args, "source_url", "") or "")
+    source_title = (getattr(args, "source_title", "") or "").strip()
+    captured_at = (getattr(args, "captured_at", "") or "").strip() or now_iso()
+    title = (getattr(args, "title", "") or "").strip() or source_title or src.stem.replace("_", " ").replace("-", " ")
+    source: dict[str, Any] = {"type": "browser-capture", "captured_at": captured_at}
+    if source_url:
+        source["url"] = source_url
+    if source_title:
+        source["title"] = source_title
+    body_lines = [
+        "# Browser capture",
+        "",
+        f"Captured at: {captured_at}",
+        f"Original file: {src.name}",
+    ]
+    if source_title:
+        body_lines.append(f"Source title: {source_title}")
+    if source_url:
+        body_lines.append(f"Source URL: {source_url}")
+    body_lines.extend(["", "Captured from the browser.", ""])
+    with vault_capture_lock():
+        meta = create_note(title, "\n".join(body_lines), tags=["browser-capture"], sensitivity="auto", source=source)
+        try:
+            attachment = attach_file_to_note(
+                meta,
+                src,
+                sensitivity="auto",
+                extract=True,
+                ocr=True,
+                source=source,
+                receipt=False,
+            )
+        except Exception:
+            # Keep the browser source intact and avoid an empty generic note if
+            # attachment persistence or extraction fails.
+            plaintext_note_path(meta["id"]).unlink(missing_ok=True)
+            encrypted_note_path(meta["id"]).unlink(missing_ok=True)
+            shutil.rmtree(attachment_note_dir(meta["id"]), ignore_errors=True)
+            index = load_index()
+            index["notes"] = [note for note in index.get("notes", []) if note.get("id") != meta["id"]]
+            save_index(index)
+            raise
+    print(json.dumps({
+        "status": "captured",
+        "id": meta["id"],
+        "title": meta["title"],
+        "storage": meta["storage"],
+        "sensitivity": meta["sensitivity"],
+        "attachment_id": attachment["id"],
+        "attachment_name": attachment["name"],
+        "extracted_markdown": attachment["extracted_markdown"],
+    }, indent=2, ensure_ascii=False))
+
+
+def browser_capture_text(args: argparse.Namespace) -> None:
+    """Store browser-selected text as a normal Kaal note read from stdin."""
+    init_if_needed()
+    max_chars = 100_000
+    selected_text = sys.stdin.read(max_chars + 1).strip()
+    if not selected_text:
+        die("Selected browser text is required")
+    if len(selected_text) > max_chars:
+        die(f"Selected browser text exceeds the {max_chars:,}-character limit")
+    source_url = sanitized_capture_url(getattr(args, "source_url", "") or "")
+    source_title = (getattr(args, "source_title", "") or "").strip()
+    captured_at = (getattr(args, "captured_at", "") or "").strip() or now_iso()
+    title = (getattr(args, "title", "") or "").strip() or source_title or "Browser selection"
+    source: dict[str, Any] = {"type": "browser-selection", "captured_at": captured_at}
+    if source_url:
+        source["url"] = source_url
+    if source_title:
+        source["title"] = source_title
+    body_lines = [
+        "# Browser selection",
+        "",
+        f"Captured at: {captured_at}",
+    ]
+    if source_title:
+        body_lines.append(f"Source title: {source_title}")
+    if source_url:
+        body_lines.append(f"Source URL: {source_url}")
+    body_lines.extend(["", "## Selected text", "", selected_text, ""])
+    with vault_capture_lock():
+        meta = create_note(title, "\n".join(body_lines), tags=["browser-capture", "browser-selection"], sensitivity="auto", source=source)
+    print(json.dumps({
+        "status": "captured",
+        "type": "browser-selection",
+        "id": meta["id"],
+        "title": meta["title"],
+        "storage": meta["storage"],
+        "sensitivity": meta["sensitivity"],
+    }, indent=2, ensure_ascii=False))
+
+
 def medical_capture(args: argparse.Namespace) -> None:
     """Create a plaintext medical-receipt inbox record from a browser capture.
 
@@ -1858,6 +1977,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-extract", action="store_true", help="Do not extract text/Markdown from text/PDF resources; extraction is on by default")
     sp.add_argument("--no-ocr", action="store_true", help="Do not OCR image resources; OCR is on by default")
     sp.set_defaults(func=import_joplin_raw)
+
+    sp = sub.add_parser("capture", help="Capture a browser artifact as a normal Kaal note and attachment")
+    sp.add_argument("file", help="Downloaded browser file or generated page PDF")
+    sp.add_argument("--title", default="", help="Capture title; defaults to browser title or filename")
+    sp.add_argument("--source-url", default="", help="Original browser URL; query strings and fragments are discarded")
+    sp.add_argument("--source-title", default="", help="Original browser tab title")
+    sp.add_argument("--captured-at", default="", help="ISO-8601 capture time; defaults to now")
+    sp.set_defaults(func=browser_capture)
+
+    sp = sub.add_parser("capture-text", help="Capture selected browser text from stdin as a normal Kaal note")
+    sp.add_argument("--title", default="", help="Capture title; defaults to browser title")
+    sp.add_argument("--source-url", default="", help="Original browser URL; query strings and fragments are discarded")
+    sp.add_argument("--source-title", default="", help="Original browser tab title")
+    sp.add_argument("--captured-at", default="", help="ISO-8601 capture time; defaults to now")
+    sp.set_defaults(func=browser_capture_text)
 
     sp = sub.add_parser("medical", help="Capture and manage plaintext medical expense receipts")
     medical_sub = sp.add_subparsers(dest="medical_cmd", required=True)

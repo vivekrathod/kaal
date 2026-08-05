@@ -7,6 +7,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -792,6 +793,73 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertIn("City Clinic: payment confirmed", kaal.load_note(meta)["body"])
         self.assertIn("Paid: $42.00", (kaal.attachment_note_dir(meta["id"]) / attachment["id"] / "extracted.md").read_text())
 
+    def test_browser_capture_creates_a_general_note_preserves_the_source_and_sanitizes_url(self):
+        source = self.vault / "reference.txt"
+        source.write_text("Harmless project reference", encoding="utf-8")
+
+        _result, stdout, _stderr = self.capture_call(
+            kaal.browser_capture,
+            SimpleNamespace(
+                file=str(source),
+                title="Useful reference",
+                source_url="https://example.test/docs/reference?token=secret#section",
+                source_title="Reference tab",
+                captured_at="2026-08-04T17:00:00+00:00",
+            ),
+        )
+
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "captured")
+        self.assertTrue(payload["id"])
+        self.assertTrue(payload["attachment_id"])
+        meta = kaal.load_index()["notes"][0]
+        self.assertEqual(meta["title"], "Useful reference")
+        self.assertIn("browser-capture", meta["tags"])
+        self.assertNotIn("medical", meta["tags"])
+        self.assertNotIn("receipt", meta["tags"])
+        self.assertNotIn("inbox", meta["tags"])
+        self.assertEqual(meta["source"]["url"], "https://example.test/docs/reference")
+        self.assertNotIn("token=secret", kaal.load_note(meta)["body"])
+        attachment = meta["attachments"][0]
+        self.assertEqual((kaal.attachment_note_dir(meta["id"]) / attachment["id"] / attachment["stored_name"]).read_text(), "Harmless project reference")
+        self.assertEqual(source.read_text(), "Harmless project reference")
+
+    def test_browser_capture_keeps_a_sensitive_attachment_encrypted(self):
+        source = self.vault / "private.txt"
+        source.write_text(f"SSN: {DUMMY_SSN}", encoding="utf-8")
+
+        with self.with_fake_crypto():
+            self.call_silently(
+                kaal.browser_capture,
+                SimpleNamespace(file=str(source), title="Private reference", source_url="", source_title="", captured_at=""),
+            )
+
+        meta = kaal.load_index()["notes"][0]
+        self.assertEqual(meta["attachments"][0]["storage"], "encrypted")
+
+    def test_browser_capture_text_saves_a_selected_text_note_with_sanitized_provenance(self):
+        args = SimpleNamespace(
+            title="Selected reference",
+            source_url="https://example.test/article?access_token=secret#section",
+            source_title="Example article",
+            captured_at="2026-08-04T18:00:00Z",
+        )
+
+        with patch.object(sys, "stdin", io.StringIO(f"Private selection {DUMMY_SSN}")):
+            _, output, _ = self.capture_call(kaal.browser_capture_text, args)
+
+        result = json.loads(output)
+        self.assertEqual(result["status"], "captured")
+        self.assertEqual(result["type"], "browser-selection")
+        index = kaal.load_index()
+        meta = next(note for note in index["notes"] if note["id"] == result["id"])
+        self.assertEqual(meta["storage"], "encrypted")
+        self.assertEqual(meta["sensitivity"], "sensitive")
+        self.assertEqual(meta["source"]["type"], "browser-selection")
+        self.assertEqual(meta["source"]["url"], "https://example.test/article")
+        self.assertIn("browser-selection", meta["tags"])
+        self.assertFalse(kaal.plaintext_note_path(meta["id"]).exists())
+
     def test_medical_list_limits_results_to_medical_receipts_and_can_filter_inbox(self):
         self.add_note(title="Not medical", tags="home", body="# Home")
         receipt = self.vault / "receipt.pdf"
@@ -1111,6 +1179,8 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(parser.parse_args(["export-attachment", "query", "att", "--force"]).func, kaal.export_attachment)
         self.assertEqual(parser.parse_args(["ocr-attachments", "--dry-run", "--limit", "5"]).func, kaal.ocr_attachments)
         self.assertEqual(parser.parse_args(["import-joplin-raw", "export", "--dry-run", "--tags", "migrated", "--no-extract", "--no-ocr"]).func, kaal.import_joplin_raw)
+        self.assertEqual(parser.parse_args(["capture", "reference.pdf", "--source-url", "https://example.test/reference"]).func, kaal.browser_capture)
+        self.assertEqual(parser.parse_args(["capture-text", "--source-url", "https://example.test/reference"]).func, kaal.browser_capture_text)
         self.assertEqual(parser.parse_args(["medical", "capture", "receipt.pdf", "--source-url", "https://example.test"]).func, kaal.medical_capture)
         self.assertEqual(parser.parse_args(["medical", "list", "--inbox", "--json"]).func, kaal.medical_list)
         self.assertEqual(parser.parse_args(["medical", "list", "--limit", "25"]).limit, 25)
