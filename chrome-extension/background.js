@@ -5,7 +5,7 @@ const MEDICAL_CAPTURE_MENU = "kaal-capture-current-receipt";
 const GENERAL_LINK_MENU = "kaal-capture-linked-item";
 const MEDICAL_LINK_MENU = "kaal-capture-linked-receipt";
 const GENERAL_SELECTION_MENU = "kaal-capture-selected-text";
-const INBOX_MENU = "kaal-open-receipt-inbox";
+const INBOX_MENU = "kaal-open-dashboard";
 
 const CAPTURE_MODES = Object.freeze({
   general: Object.freeze({
@@ -51,7 +51,7 @@ chrome.runtime.onInstalled.addListener(() => {
     });
     chrome.contextMenus.create({
       id: INBOX_MENU,
-      title: "Open Kaal receipt inbox",
+      title: "Open Kaal dashboard",
       contexts: ["page", "action"],
     });
   });
@@ -249,7 +249,7 @@ function openReceiptInbox() {
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === INBOX_MENU) {
-    openReceiptInbox().catch((error) => console.error("Could not open Kaal receipt inbox", error));
+    openReceiptInbox().catch((error) => console.error("Could not open Kaal dashboard", error));
     return;
   }
   if (info.menuItemId === GENERAL_SELECTION_MENU) {
@@ -270,6 +270,10 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.action === "open-dashboard") {
+    openReceiptInbox().then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: String(error) }));
+    return true;
+  }
   if (message?.action !== "capture-current-tab") return;
   const mode = CAPTURE_MODES[message.mode];
   if (!mode) {

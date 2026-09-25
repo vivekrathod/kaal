@@ -13,3 +13,6 @@ __pycache__/
 .DS_Store
 *.tmp
 *.log
+
+# Hermes session artifacts can contain user-provided documents and planning notes.
+/.hermes/

@@ -15,7 +15,11 @@ EXTENSION_ID = "ebmkcbpcihgiaoimcpncmadadogclmld"
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Install Kaal's Chrome Native Messaging capture host")
-    parser.add_argument("--chrome-app-support", default=str(Path.home() / "Library" / "Application Support" / "Google" / "Chrome"))
+    parser.add_argument(
+        "--chrome-app-support",
+        default=str(Path.home() / "Library" / "Application Support" / "Google" / "Chrome"),
+        help="Chrome user-data directory that receives NativeMessagingHosts (pass the --user-data-dir value for a dedicated Chrome profile)",
+    )
     parser.add_argument("--downloads-dir", default=str(Path.home() / "Downloads"), help="Chrome's configured download directory; staging is limited to its Kaal Capture subdirectory")
     parser.add_argument("--python", default=sys.executable, help="Python that has Kaal's optional PDF extraction dependencies")
     args = parser.parse_args()

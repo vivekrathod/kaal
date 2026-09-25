@@ -2,9 +2,9 @@
 
 Kaal is your local notes vault for personal data. Notes are Markdown by default and Kaal now uses best-effort local sensitivity detection to decide whether a note or attachment should be encrypted.
 
-Vault: `/Users/vrathod/.secure-notes`
-Primary CLI: `/Users/vrathod/.local/bin/kaal`
-Compatibility CLI: `/Users/vrathod/.local/bin/secure-notes`
+Vault: `$HOME/.secure-notes`
+Primary CLI: `$HOME/.local/bin/kaal`
+Compatibility CLI: `$HOME/.local/bin/secure-notes`
 Key: macOS Keychain item `Hermes Secure Notes` / `vault-key-v1`
 Encryption: AES-256-GCM using Python `cryptography`
 
@@ -40,6 +40,9 @@ Current installed support on this machine:
 - MarkItDown: installed in `/Users/vrathod/.secure-notes/.venv`
 
 ## Commands
+
+For safe, repeatable use by Claude Code, Cursor, Hermes, and other local coding
+agents, see [`AGENTS.md`](AGENTS.md).
 
 Initialize/status:
 
@@ -148,6 +151,33 @@ original browser download:
 
 ```bash
 kaal capture /path/to/file --title "Useful reference"
+```
+
+### Kaal Dashboard
+
+The extension's **Open Kaal dashboard** command opens a local two-tab view:
+
+- **Notes** is the generic interface for every non-medical Kaal note,
+  including browser captures, selected-text captures, manually created notes,
+  and imports. It supports metadata search; explicit body/extracted-text reveal;
+  create and edit of title/tags/body; optional managed local-file attachments;
+  generic extraction/OCR; and recoverable trash/restore.
+- **Medical Receipts** preserves the dedicated receipt inbox, evidence review,
+  and reporting workflow. Receipts never appear in Notes.
+
+Notes listing is metadata-first; note bodies and extracted text are sent to
+the browser only after an explicit reveal action. A note must be moved
+to Trash before permanent deletion, then its record ID must be typed exactly.
+Permanent deletion removes only Kaal-managed note, attachment, and extraction
+sidecar copies—never the original browser/local source.
+
+```bash
+# The CLI namespace remains `library` for compatibility.
+kaal library list
+kaal library show NOTE_ID
+kaal library trash NOTE_ID
+kaal library restore NOTE_ID
+kaal library purge NOTE_ID --yes
 ```
 
 ## One-click medical receipt capture from Chrome

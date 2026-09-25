@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import io
 import json
 import sys
@@ -793,6 +794,32 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertIn("City Clinic: payment confirmed", kaal.load_note(meta)["body"])
         self.assertIn("Paid: $42.00", (kaal.attachment_note_dir(meta["id"]) / attachment["id"] / "extracted.md").read_text())
 
+    def test_medical_export_original_writes_the_exact_managed_attachment_bytes(self):
+        receipt = self.vault / "source-receipt.pdf"
+        original_bytes = b"%PDF exact original receipt bytes"
+        receipt.write_bytes(original_bytes)
+        with patch.object(kaal, "run_docling", lambda path: "Paid: $12.34"):
+            _result, stdout, _stderr = self.capture_call(
+                kaal.medical_capture,
+                SimpleNamespace(file=str(receipt), title="Receipt", source_url="", source_title="", captured_at=""),
+            )
+        captured = json.loads(stdout)
+        destination = self.vault / "exported-receipt.pdf"
+
+        _result, export_stdout, _stderr = self.capture_call(
+            kaal.medical_export_original,
+            SimpleNamespace(
+                note_id=captured["id"],
+                attachment_id=captured["attachment_id"],
+                output=str(destination),
+            ),
+        )
+
+        exported = json.loads(export_stdout)
+        self.assertEqual(exported["status"], "exported")
+        self.assertEqual(destination.read_bytes(), original_bytes)
+        self.assertEqual(exported["sha256"], hashlib.sha256(original_bytes).hexdigest())
+
     def test_browser_capture_creates_a_general_note_preserves_the_source_and_sanitizes_url(self):
         source = self.vault / "reference.txt"
         source.write_text("Harmless project reference", encoding="utf-8")
@@ -859,6 +886,48 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(meta["source"]["url"], "https://example.test/article")
         self.assertIn("browser-selection", meta["tags"])
         self.assertFalse(kaal.plaintext_note_path(meta["id"]).exists())
+
+    def test_library_list_reveal_update_and_trash_lifecycle_excludes_medical_receipts(self):
+        general = self.add_note(title="Library note", tags="project,reference", body="# Original")
+        receipt = self.add_note(title="Medical receipt", tags="medical,receipt,inbox", body="# Receipt")
+
+        _result, output, _stderr = self.capture_call(kaal.library_list, SimpleNamespace(trash=False, limit=100))
+        listed = json.loads(output)
+        self.assertEqual([note["id"] for note in listed], [general["id"]])
+        self.assertNotIn("body", listed[0])
+
+        _result, output, _stderr = self.capture_call(kaal.library_show, SimpleNamespace(note_id=general["id"]))
+        self.assertEqual(json.loads(output)["note"]["body"], "# Original")
+        with patch.object(sys, "stdin", io.StringIO("# Updated")):
+            _result, output, _stderr = self.capture_call(kaal.library_update, SimpleNamespace(note_id=general["id"], title="Updated library note", tags="project,edited", body=None))
+        self.assertEqual(json.loads(output)["note"]["title"], "Updated library note")
+
+        self.call_silently(kaal.library_trash, SimpleNamespace(note_id=general["id"]))
+        _result, output, _stderr = self.capture_call(kaal.library_list, SimpleNamespace(trash=True, limit=100))
+        self.assertEqual([note["id"] for note in json.loads(output)], [general["id"]])
+        self.call_silently(kaal.library_restore, SimpleNamespace(note_id=general["id"]))
+        self.call_silently(kaal.library_trash, SimpleNamespace(note_id=general["id"]))
+        self.call_silently(kaal.library_purge, SimpleNamespace(note_id=general["id"], yes=True))
+        self.assertFalse(any(note["id"] == general["id"] for note in kaal.load_index()["notes"]))
+        self.assertTrue(any(note["id"] == receipt["id"] for note in kaal.load_index()["notes"]))
+
+    def test_library_mutators_reject_medical_receipts(self):
+        receipt = self.add_note(title="Medical receipt", tags="medical,receipt,inbox", body="# Receipt")
+        with self.assertRaises(SystemExit):
+            kaal.library_show(SimpleNamespace(note_id=receipt["id"]))
+        with self.assertRaises(SystemExit):
+            kaal.library_trash(SimpleNamespace(note_id=receipt["id"]))
+
+    def test_library_attach_copies_source_and_exposes_extracted_text(self):
+        note = self.add_note(title="Research", tags="reference", body="# Research")
+        source = self.vault / "source.txt"
+        source.write_text("Extracted generic reference text", encoding="utf-8")
+        _result, output, _stderr = self.capture_call(kaal.library_attach, SimpleNamespace(note_id=note["id"], file=str(source)))
+        attachment = json.loads(output)["attachment"]
+        self.assertTrue(source.exists())
+        self.assertTrue((kaal.attachment_note_dir(note["id"]) / attachment["id"] / attachment["stored_name"]).exists())
+        _result, output, _stderr = self.capture_call(kaal.library_extracted_text, SimpleNamespace(note_id=note["id"], attachment_id=attachment["id"]))
+        self.assertIn("Extracted generic reference text", json.loads(output)["text"])
 
     def test_medical_list_limits_results_to_medical_receipts_and_can_filter_inbox(self):
         self.add_note(title="Not medical", tags="home", body="# Home")
