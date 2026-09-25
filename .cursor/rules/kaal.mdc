@@ -1,0 +1,11 @@
+---
+description: Kaal privacy and CLI guidance
+alwaysApply: true
+---
+
+Read and follow `AGENTS.md` before operating Kaal or its vault.
+
+Use `$HOME/.local/bin/kaal` explicitly when `kaal` is unavailable on `PATH`.
+Never print vault bodies, OCR text, medical data, tax data, attachment names, or
+Keychain material unless the user explicitly asks to disclose it. Keep medical
+receipts in `kaal medical …`; do not use generic note commands for them.
