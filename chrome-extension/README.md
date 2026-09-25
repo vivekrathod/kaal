@@ -27,6 +27,16 @@ From the Kaal checkout:
 /Users/vivek.rathod/SOURCE/kaal/.venv/bin/python bin/install-chrome-receipt-capture.py
 ```
 
+If Chrome is launched with a dedicated `--user-data-dir`, Chrome looks for a
+user-level Native Messaging manifest in that profile's own
+`NativeMessagingHosts/` directory. Install an additional manifest for that
+profile (the default installation remains appropriate for ordinary Chrome):
+
+```bash
+/Users/vivek.rathod/SOURCE/kaal/.venv/bin/python bin/install-chrome-receipt-capture.py \
+  --chrome-app-support "$HOME/.hermes/chrome-debug"
+```
+
 If Chrome uses a non-default download directory, install with its absolute
 directory so Kaal can trust only that directory's `Kaal Capture/` staging
 subfolder:
@@ -41,7 +51,7 @@ Then in Chrome:
 1. Visit `chrome://extensions`.
 2. Enable **Developer mode**.
 3. Select **Load unpacked** and choose this `chrome-extension` directory.
-4. Pin **Kaal Receipt Capture** to the toolbar.
+4. Pin **Kaal Capture** to the toolbar.
 
 The extension has a fixed public extension ID, so the host manifest installed above is already restricted to this extension alone.
 
@@ -50,12 +60,45 @@ The extension has a fixed public extension ID, so the host manifest installed ab
 1. Open a page, PDF, Downloads file, or linked item in Chrome. To save just text, select it first.
 2. Click the Kaal toolbar icon and select **Save to Kaal** for a normal capture, or **Save as medical receipt** for a paid medical receipt. The same choices are available from the page/link context menus; selected text has its own **Save selected text to Kaal** context-menu item.
 3. The toolbar badge stays `OK` when Kaal copied the artifact; `ERR` opens a page with the actual failure reason.
+### Manage Kaal Notes
+
+Choose **Open Kaal dashboard** from the toolbar popup or page context menu.
+The default **Notes** tab is a metadata-first view of the 100 newest
+non-medical Kaal notes: browser captures, selected-text captures, manually
+created notes, imports, and other ordinary records. Medical receipts remain in
+the dedicated **Medical Receipts** tab so their evidence and review workflow is
+not mixed into regular notes. The Notes toolbar includes **Trash**, which changes
+to **Back to notes** while viewing recoverable deleted notes.
+
+Notes actions are local-only:
+
+- **New note** and **Edit** create or update titles, tags, and Markdown bodies.
+- **Reveal note** (or **Edit**) explicitly retrieves its body. Note bodies are
+  never prefetched into the dashboard.
+- An optional local file can be attached when saving a new or edited note.
+  Chrome stages it in the configured `Kaal Capture/` directory; Kaal copies it
+  into managed storage and leaves the selected original untouched.
+- **Extract / OCR attachments** uses the generic Kaal extraction pipeline;
+  **View extracted text** is also explicit and capped by the host.
+- **Move to Trash** is recoverable. In Notes Trash, **Restore** reverses it;
+  **Delete permanently** requires typing the note record ID and removes only
+  Kaal-managed note, attachment, and sidecar copies.
+
+CLI equivalents are available for diagnostics and automation:
+
+```bash
+kaal library list
+kaal library show <note-id>
+kaal library trash <note-id>
+kaal library restore <note-id>
+kaal library purge <note-id> --yes
+```
 
 ### Verify captured receipts
 
-Right-click the pinned **Kaal Receipt Capture** toolbar icon and select
-**Open Kaal receipt inbox**. The extension opens a local dashboard listing the
-100 newest receipt records, including capture date, inbox status, original
+Open the **Medical Receipts** dashboard tab. Use **Needs review**, **Reviewed**,
+or **Trash** to narrow the receipt list. It lists the 100 newest receipt
+records, including capture date, inbox status, original
 attachment filename, extraction status, source, tags, and Kaal record ID. Click
 **Extract / OCR text** to retry text extraction for that specific receipt; medical
 PDFs use `pdftotext -layout`, macOS Vision OCR, then Docling as needed.

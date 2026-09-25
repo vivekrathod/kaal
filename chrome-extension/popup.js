@@ -1,10 +1,12 @@
 const generalButton = document.querySelector("#save-general");
 const medicalButton = document.querySelector("#save-medical");
+const dashboardButton = document.querySelector("#open-dashboard");
 const state = document.querySelector("#state");
 
 function setBusy(busy) {
   generalButton.disabled = busy;
   medicalButton.disabled = busy;
+  dashboardButton.disabled = busy;
 }
 
 async function capture(mode) {
@@ -25,3 +27,15 @@ async function capture(mode) {
 
 generalButton.addEventListener("click", () => capture("general"));
 medicalButton.addEventListener("click", () => capture("medical"));
+dashboardButton.addEventListener("click", async () => {
+  setBusy(true);
+  try {
+    const response = await chrome.runtime.sendMessage({ action: "open-dashboard" });
+    if (!response?.ok) throw new Error(response?.error || "Could not open the Kaal dashboard");
+    window.close();
+  } catch (error) {
+    state.classList.add("error");
+    state.textContent = error instanceof Error ? error.message : String(error);
+    setBusy(false);
+  }
+});

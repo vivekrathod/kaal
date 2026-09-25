@@ -2,47 +2,121 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Kaal Receipt Inbox</title>
+  <title>Kaal Dashboard</title>
   <style>
-    :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    body { margin: 36px auto; max-width: 980px; padding: 0 24px 48px; }
+    :root {
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --accent: #2563eb;
+      --accent-strong: #1d4ed8;
+      --canvas: #f6f7fb;
+      --surface: #ffffff;
+      --surface-muted: #f8fafc;
+      --border: #e2e8f0;
+      --text: #172033;
+      --muted: #64748b;
+      --danger: #b42318;
+      --warning-bg: #fff7ed;
+      --warning-text: #9a3412;
+      --success-bg: #ecfdf3;
+      --success-text: #067647;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --canvas: #111827;
+        --surface: #182235;
+        --surface-muted: #202c40;
+        --border: #334155;
+        --text: #f1f5f9;
+        --muted: #a8b3c5;
+        --warning-bg: #422006;
+        --warning-text: #fdba74;
+        --success-bg: #052e26;
+        --success-text: #6ee7b7;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { background: var(--canvas); color: var(--text); margin: 0 auto; max-width: 1120px; padding: 36px 24px 64px; }
     header { align-items: center; display: flex; flex-wrap: wrap; gap: 18px; justify-content: space-between; }
     h1 { font-size: 28px; margin: 0; }
-    button { border: 0; border-radius: 7px; cursor: pointer; font: inherit; padding: 9px 14px; }
-    button.active { background: #1a73e8; color: white; }
-    button.danger { background: #b3261e; color: white; }
-    button.secondary { background: #e8eaed; color: #202124; }
+    button { border: 1px solid transparent; border-radius: 9px; cursor: pointer; font: inherit; font-weight: 600; padding: 9px 14px; transition: background 120ms ease, border-color 120ms ease, transform 120ms ease; }
+    button:hover:not(:disabled) { transform: translateY(-1px); }
+    button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid rgb(37 99 235 / 25%); outline-offset: 2px; }
+    button:disabled { cursor: not-allowed; opacity: 0.5; }
+    button.active, button.primary { background: var(--accent); color: white; }
+    button.active:hover:not(:disabled), button.primary:hover:not(:disabled) { background: var(--accent-strong); }
+    button.danger { background: var(--danger); color: white; }
+    button.secondary { background: var(--surface-muted); border-color: var(--border); color: var(--text); }
+    [hidden] { display: none !important; }
     .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
-    #search { border: 1px solid #dadce0; border-radius: 7px; font: inherit; min-width: 230px; padding: 8px 10px; }
-    #summary { color: #5f6368; margin: 8px 0 24px; }
-    #state { border: 1px solid #dadce0; border-radius: 8px; color: #5f6368; padding: 18px; }
-    #state.error { border-color: #b3261e; color: #b3261e; }
-    #receipts { display: grid; gap: 12px; }
-    article { border: 1px solid #dadce0; border-radius: 10px; padding: 16px; }
+    #search, #library-search { background: var(--surface); border: 1px solid var(--border); border-radius: 9px; color: var(--text); font: inherit; min-width: 230px; padding: 9px 11px; }
+    #summary { color: var(--muted); margin: 8px 0 24px; }
+    #state { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; color: var(--muted); padding: 18px; }
+    #state.error { border-color: var(--danger); color: var(--danger); }
+    #receipts, #library-notes { display: grid; gap: 12px; }
+    article { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 8px 22px rgb(15 23 42 / 5%); padding: 20px; }
     h2 { font-size: 18px; margin: 0 0 8px; overflow-wrap: anywhere; }
-    dl { display: grid; grid-template-columns: max-content 1fr; gap: 5px 14px; margin: 0; }
-    dt { color: #5f6368; }
+    dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 7px 18px; margin: 0; }
+    dt { color: var(--muted); }
     dd { margin: 0; overflow-wrap: anywhere; }
     .tag { background: #e8f0fe; border-radius: 999px; color: #174ea6; display: inline-block; font-size: 12px; margin: 8px 5px 0 0; padding: 3px 8px; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
-    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .receipt-card-header { align-items: flex-start; display: flex; gap: 16px; justify-content: space-between; margin-bottom: 16px; }
+    .receipt-card-header h2 { margin: 0; }
+    .status-pill { border-radius: 999px; flex: 0 0 auto; font-size: 12px; font-weight: 700; padding: 5px 9px; }
+    .status-pill.inbox { background: var(--warning-bg); color: var(--warning-text); }
+    .status-pill.recorded { background: var(--success-bg); color: var(--success-text); }
+    .status-pill.trash { background: var(--surface-muted); color: var(--muted); }
+    .receipt-details { background: var(--surface-muted); border-radius: 10px; padding: 14px; }
+    .actions { border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; padding-top: 16px; }
+    .receipt-editor { background: var(--surface-muted); border: 1px solid var(--border); border-radius: 12px; margin-top: 18px; padding: 18px; }
+    .receipt-editor-header { margin-bottom: 16px; }
+    .receipt-editor-header h3 { font-size: 17px; margin: 0 0 5px; }
+    .receipt-editor-header p { color: var(--muted); margin: 0; }
+    .receipt-editor-grid { display: grid; gap: 14px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .receipt-editor label { color: var(--muted); display: grid; font-size: 13px; font-weight: 700; gap: 6px; }
+    .receipt-editor input { background: var(--surface); border: 1px solid var(--border); border-radius: 9px; color: var(--text); font: inherit; font-weight: 400; padding: 10px 11px; width: 100%; }
+    .receipt-editor-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+    .receipt-editor-error { color: var(--danger); margin: 12px 0 0; }
     .receipt-select { display: inline-flex; gap: 6px; margin: 0 0 10px; }
     .notice { background: #fff8e1; border: 1px solid #f9ab00; border-radius: 8px; margin: 0 0 20px; padding: 12px; }
-    pre.extracted { background: #f8f9fa; border: 1px solid #dadce0; border-radius: 8px; margin: 16px 0 0; max-height: 360px; overflow: auto; padding: 12px; white-space: pre-wrap; }
+    pre.extracted { background: var(--surface-muted); border: 1px solid var(--border); border-radius: 8px; margin: 16px 0 0; max-height: 360px; overflow: auto; padding: 12px; white-space: pre-wrap; }
+    .note-body { background: var(--surface-muted); border: 1px solid var(--border); border-radius: 8px; margin: 16px 0 0; max-height: 420px; overflow: auto; padding: 12px; white-space: pre-wrap; }
+    dialog { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; color: var(--text); max-width: min(720px, calc(100vw - 48px)); padding: 0; }
+    dialog::backdrop { background: rgb(0 0 0 / 45%); }
+    dialog form { display: grid; gap: 12px; padding: 20px; }
+    dialog input, dialog textarea { box-sizing: border-box; font: inherit; padding: 8px; width: 100%; }
+    dialog textarea { min-height: 260px; resize: vertical; }
+    .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    @media (max-width: 720px) {
+      body { padding: 24px 14px 48px; }
+      .receipt-editor-grid { grid-template-columns: 1fr; }
+      dl { grid-template-columns: 1fr; gap: 2px; }
+      dd { margin-bottom: 8px; }
+    }
   </style>
 </head>
 <body>
   <header>
     <div>
-      <h1>Kaal Receipt Inbox</h1>
-      <p id="summary">Loading recent locally stored receipts…</p>
+      <h1>Kaal Dashboard</h1>
+      <p id="summary">Loading locally stored Kaal notes…</p>
     </div>
     <div class="toolbar">
-      <button id="inbox-receipts" class="active" type="button">Needs review</button>
-      <button id="all-receipts" type="button">All receipts</button>
-      <button id="trashed-receipts" type="button">Trash</button>
-      <input id="search" type="search" placeholder="Filter receipt title, source, or ID" aria-label="Filter receipts">
-      <button id="report" type="button">Run report</button>
+      <button id="library-tab" class="active" type="button">Notes</button>
+      <button id="receipts-tab" type="button">Medical Receipts</button>
+      <span id="receipt-toolbar" class="toolbar" hidden>
+        <button id="inbox-receipts" class="active" type="button">Needs review</button>
+        <button id="reviewed-receipts" type="button">Reviewed</button>
+        <button id="trashed-receipts" type="button">Trash</button>
+        <input id="search" type="search" placeholder="Filter receipt title, source, or ID" aria-label="Filter receipts">
+        <button id="report" type="button">Run report</button>
+      </span>
+      <span id="library-toolbar" class="toolbar">
+        <button id="library-trash" type="button">Trash</button>
+        <input id="library-search" type="search" placeholder="Filter title, tag, source, or ID" aria-label="Filter notes">
+        <button id="library-create" type="button">New note</button>
+      </span>
       <button id="refresh" type="button">Refresh</button>
     </div>
   </header>
@@ -50,8 +124,21 @@
   <div id="bulk-purge-controls" class="actions" hidden>
     <button id="bulk-purge" class="danger" type="button" disabled>Delete selected permanently</button>
   </div>
+  <p id="library-trash-notice" class="notice" hidden>Notes in Trash are recoverable. Permanent deletion removes only Kaal-managed note and attachment copies; it never touches a browser or local source file.</p>
+  <main id="library-notes" aria-live="polite"></main>
   <main id="receipts" aria-live="polite"></main>
   <div id="state" hidden></div>
+  <dialog id="library-editor">
+    <form method="dialog" id="library-editor-form">
+      <h2 id="library-editor-title">New note</h2>
+      <label>Title <input id="library-note-title" required maxlength="500"></label>
+      <label>Tags (comma-separated) <input id="library-note-tags" maxlength="2000"></label>
+      <label>Note body <textarea id="library-note-body" required maxlength="100000"></textarea></label>
+      <label>Attach a local file (optional; original stays untouched) <input id="library-note-file" type="file"></label>
+      <p>Note text is stored locally and classified by Kaal. Sensitive content stays encrypted at rest.</p>
+      <div class="dialog-actions"><button id="library-editor-cancel" class="secondary" type="button">Cancel</button><button type="submit">Save note</button></div>
+    </form>
+  </dialog>
   <script src="inbox.js"></script>
 </body>
 </html>

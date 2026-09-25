@@ -14,7 +14,10 @@ from typing import Any
 MAX_MESSAGE_BYTES = 1_000_000
 MAX_CAPTURE_BYTES = 100 * 1024 * 1024
 MAX_SELECTION_CHARS = 100_000
+MAX_LIBRARY_BODY_CHARS = 100_000
+MAX_LIBRARY_TEXT_CHARS = 100_000
 RECEIPT_LIST_LIMIT = 100
+LIBRARY_LIST_LIMIT = 100
 STAGING_DIRECTORY_NAME = "Kaal Capture"
 DOWNLOADS_DIR = Path.home() / "Downloads"
 DEFAULT_STAGING_DIR = DOWNLOADS_DIR / STAGING_DIRECTORY_NAME
@@ -164,6 +167,101 @@ def capture_selection(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "result": result}
 
 
+def library_note_id(payload: dict[str, Any]) -> str:
+    note_id = optional_text(payload, "id", limit=128)
+    if not note_id:
+        raise ValueError("id is required")
+    return note_id
+
+
+def library_body(payload: dict[str, Any]) -> str:
+    body = payload.get("body")
+    if not isinstance(body, str):
+        raise ValueError("body must be a string")
+    if not body.strip() or len(body) > MAX_LIBRARY_BODY_CHARS:
+        raise ValueError(f"body must contain 1 to {MAX_LIBRARY_BODY_CHARS:,} characters")
+    return body
+
+
+def run_library(command: list[str], *, body: str | None = None) -> dict[str, Any]:
+    proc = subprocess.run(command, input=body, text=True, capture_output=True, check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "Kaal Library operation failed").strip()
+        return {"ok": False, "error": detail[:2000]}
+    try:
+        result = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {"ok": False, "error": "Kaal returned invalid Library output"}
+    return {"ok": True, "result": result}
+
+
+def manage_library(payload: dict[str, Any]) -> dict[str, Any]:
+    action = payload.get("action")
+    actions = {"library-list", "library-show", "library-create", "library-update", "library-trash", "library-restore", "library-purge", "library-attach", "library-extract", "library-extracted-text"}
+    if action not in actions:
+        raise ValueError("unsupported Library action")
+    command = [sys.executable, str(KAAL_SCRIPT), "library"]
+    if action == "library-list":
+        command.extend(["list", "--limit", str(LIBRARY_LIST_LIMIT)])
+        if payload.get("trash") is True:
+            command.append("--trash")
+        response = run_library(command)
+        if response.get("ok") and not isinstance(response.get("result"), list):
+            return {"ok": False, "error": "Kaal returned an invalid Library list"}
+        return {"ok": response["ok"], "notes": response.get("result", []), **({"error": response["error"]} if not response["ok"] else {})}
+    if action in {"library-create", "library-update"}:
+        body = library_body(payload)
+        title = optional_text(payload, "title", limit=500)
+        if not title:
+            raise ValueError("title is required")
+        tags = optional_text(payload, "tags", limit=2000)
+        command.append("create" if action == "library-create" else "update")
+        if action == "library-update":
+            command.append(library_note_id(payload))
+        command.extend(["--title", title, "--tags", tags])
+        if action == "library-create":
+            for key, flag in (("sourceUrl", "--source-url"), ("sourceTitle", "--source-title")):
+                value = optional_text(payload, key)
+                if value:
+                    command.extend([flag, value])
+        return run_library(command, body=body)
+    note_id = library_note_id(payload)
+    if action == "library-attach":
+        raw_path = optional_text(payload, "path")
+        if not raw_path:
+            raise ValueError("path is required")
+        candidate = Path(raw_path).expanduser()
+        if candidate.is_symlink():
+            raise ValueError("symbolic-link attachment paths are not allowed")
+        source = candidate.resolve()
+        if not source.is_file() or not is_staging_file(source, general=True):
+            raise ValueError("attachment path is outside the Kaal capture staging directory")
+        if source.stat().st_size > MAX_CAPTURE_BYTES:
+            raise ValueError(f"attachment exceeds the {MAX_CAPTURE_BYTES // (1024 * 1024)} MiB limit")
+        response = run_library([*command, "attach", note_id, str(source)])
+        if response.get("ok") and payload.get("cleanupStaging") is True:
+            source.unlink(missing_ok=True)
+        return response
+    if action == "library-purge":
+        if payload.get("confirmPermanent") is not True or optional_text(payload, "confirmationText", limit=128) != note_id:
+            raise ValueError("permanent deletion requires typed note-ID confirmation")
+        return run_library([*command, "purge", note_id, "--yes"])
+    if action == "library-extracted-text":
+        attachment_id = optional_text(payload, "attachmentId", limit=128)
+        if not attachment_id:
+            raise ValueError("attachmentId is required")
+        response = run_library([*command, "extracted-text", note_id, "--attachment-id", attachment_id])
+        if response.get("ok"):
+            result = response.get("result")
+            if not isinstance(result, dict) or not isinstance(result.get("text"), str):
+                return {"ok": False, "error": "Kaal returned invalid extracted text"}
+            result["truncated"] = len(result["text"]) > MAX_LIBRARY_TEXT_CHARS
+            result["text"] = result["text"][:MAX_LIBRARY_TEXT_CHARS]
+        return response
+    command.extend([{"library-trash": "trash", "library-restore": "restore", "library-extract": "extract", "library-show": "show"}[action], note_id])
+    return run_library(command)
+
+
 def list_receipts(*, inbox: bool = False, trash: bool = False) -> dict[str, Any]:
     """Return bounded receipt metadata for the extension's local inbox page."""
     command = [sys.executable, str(KAAL_SCRIPT), "medical", "list", "--json", "--limit", str(RECEIPT_LIST_LIMIT)]
@@ -201,6 +299,71 @@ def selected_receipt_ids(payload: dict[str, Any]) -> list[str]:
     if len(ids) != len(set(ids)):
         raise ValueError("receipt IDs must be unique")
     return ids
+
+
+def safe_download_filename(raw_name: str) -> str:
+    filename = Path(raw_name.replace("\\", "/")).name
+    suffix = Path(filename).suffix
+    if not re.fullmatch(r"\.[A-Za-z0-9]{1,16}", suffix):
+        suffix = ""
+    stem = filename[:-len(suffix)] if suffix else filename
+    stem = re.sub(r"[^\w .()\-]+", "_", stem).strip(" .")[:120]
+    return f"{stem or 'receipt'}{suffix}"
+
+
+def unique_download_path(filename: str) -> Path:
+    downloads = DOWNLOADS_DIR.expanduser().resolve()
+    downloads.mkdir(parents=True, exist_ok=True, mode=0o700)
+    safe_name = safe_download_filename(filename)
+    suffix = Path(safe_name).suffix
+    stem = safe_name[:-len(suffix)] if suffix else safe_name
+    candidate = downloads / safe_name
+    sequence = 2
+    while candidate.exists() or candidate.is_symlink():
+        candidate = downloads / f"{stem} ({sequence}){suffix}"
+        sequence += 1
+    return candidate
+
+
+def download_receipt_original(payload: dict[str, Any]) -> dict[str, Any]:
+    note_id = optional_text(payload, "id", limit=128)
+    if not note_id:
+        raise ValueError("id is required")
+    attachment_id = optional_text(payload, "attachmentId", limit=128)
+    if not attachment_id:
+        raise ValueError("attachmentId is required")
+    attachment_name = optional_text(payload, "attachmentName", limit=500)
+    if not attachment_name:
+        raise ValueError("attachmentName is required")
+    output = unique_download_path(attachment_name)
+    command = [
+        sys.executable,
+        str(KAAL_SCRIPT),
+        "medical",
+        "export-original",
+        note_id,
+        "--attachment-id",
+        attachment_id,
+        "--output",
+        str(output),
+    ]
+    proc = subprocess.run(command, text=True, capture_output=True, check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "Kaal original receipt export failed").strip()
+        return {"ok": False, "error": detail[:2000]}
+    try:
+        result = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {"ok": False, "error": "Kaal returned invalid original-receipt export output"}
+    if not isinstance(result, dict) or result.get("status") != "exported":
+        return {"ok": False, "error": "Kaal did not confirm the original receipt export"}
+    reported_path = result.get("path", "")
+    if not isinstance(reported_path, str) or output.is_symlink() or not output.is_file() or Path(reported_path).expanduser().resolve() != output.resolve():
+        output.unlink(missing_ok=True)
+        return {"ok": False, "error": "Kaal did not create the expected original receipt export"}
+    result["path"] = str(output)
+    result["filename"] = output.name
+    return {"ok": True, "result": result}
 
 
 def manage_receipt(payload: dict[str, Any]) -> dict[str, Any]:
@@ -251,10 +414,14 @@ def manage_receipt(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_request(payload: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(payload.get("action"), str) and payload["action"].startswith("library-"):
+        return manage_library(payload)
     if payload.get("action") == "capture-selection":
         return capture_selection(payload)
     if payload.get("action") == "list":
         return list_receipts(inbox=payload.get("inbox") is True, trash=payload.get("trash") is True)
+    if payload.get("action") == "download-original":
+        return download_receipt_original(payload)
     if payload.get("action") in {"trash", "restore", "purge", "purge-bulk", "review", "reopen", "extract", "extracted-text", "update", "report"}:
         return manage_receipt(payload)
     return capture(payload)

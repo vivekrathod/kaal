@@ -655,6 +655,215 @@ def list_notes(args: argparse.Namespace) -> None:
         print(f"{n['id']}  {n.get('updated','')}  {n.get('title','')}  {tags}  attachments:{att}")
 
 
+def is_medical_receipt(meta: dict[str, Any]) -> bool:
+    tags = meta.get("tags", [])
+    return "medical" in tags and "receipt" in tags
+
+
+def library_note_meta(index: dict[str, Any], note_id: str, *, allow_trashed: bool = True) -> dict[str, Any]:
+    for note in index.get("notes", []):
+        if note.get("id") != note_id:
+            continue
+        if is_medical_receipt(note):
+            die("Medical receipts are managed from the Medical Receipts dashboard.")
+        if not allow_trashed and note.get("trashed_at"):
+            die("Restore this Library note before changing it.")
+        return note
+    die("Library note not found.")
+
+
+def library_attachment_summary(attachment: dict[str, Any]) -> dict[str, Any]:
+    return {key: attachment.get(key) for key in ("id", "name", "stored_name", "size", "storage", "sensitivity", "extracted_markdown", "extracted_at", "extraction_attempted_at", "source") if key in attachment}
+
+
+def library_note_summary(meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: meta.get(key)
+        for key in ("id", "title", "tags", "created", "updated", "storage", "sensitivity", "source", "trashed_at")
+        if key in meta
+    } | {"attachments": [library_attachment_summary(att) for att in meta.get("attachments", [])]}
+
+
+def library_list(args: argparse.Namespace) -> None:
+    """Emit bounded generic-note metadata for the local dashboard."""
+    init_if_needed()
+    limit = max(0, min(int(getattr(args, "limit", 100) or 100), 100))
+    trash = bool(getattr(args, "trash", False))
+    notes = [note for note in load_index().get("notes", []) if not is_medical_receipt(note) and bool(note.get("trashed_at")) == trash]
+    notes.sort(key=lambda note: note.get("updated", note.get("created", "")), reverse=True)
+    print(json.dumps([library_note_summary(note) for note in notes[:limit]], ensure_ascii=False))
+
+
+def library_show(args: argparse.Namespace) -> None:
+    init_if_needed()
+    meta = library_note_meta(load_index(), args.note_id)
+    note = load_note(meta)
+    print(json.dumps({"status": "ok", "note": {**library_note_summary(meta), "body": note.get("body", "")}}, ensure_ascii=False))
+
+
+def library_create(args: argparse.Namespace) -> None:
+    init_if_needed()
+    body = read_stdin_or_arg(getattr(args, "body", None))
+    source_url = sanitized_capture_url(getattr(args, "source_url", "") or "")
+    source_title = (getattr(args, "source_title", "") or "").strip()
+    source = {"type": "library"}
+    if source_url:
+        source["url"] = source_url
+    if source_title:
+        source["title"] = source_title
+    with vault_capture_lock():
+        meta = create_note(args.title.strip(), body, tags=parse_tags(args.tags), sensitivity="auto", source=source if len(source) > 1 else None)
+    print(json.dumps({"status": "created", "note": library_note_summary(meta)}, ensure_ascii=False))
+
+
+def write_library_note(meta: dict[str, Any], note: dict[str, Any]) -> None:
+    """Persist an edited note while preserving automatic encryption upgrades."""
+    storage, classification = decide_storage(note["body"], sensitivity="auto", context=note["title"])
+    if meta.get("storage") == "encrypted":
+        storage = "encrypted"
+        classification["sensitivity"] = "sensitive"
+    note["storage"] = storage
+    note["sensitivity"] = classification["sensitivity"]
+    note["classification"] = classification
+    plaintext_note_path(note["id"]).unlink(missing_ok=True)
+    encrypted_note_path(note["id"]).unlink(missing_ok=True)
+    if storage == "encrypted":
+        secure_write_json(encrypted_note_path(note["id"]), encrypt_bytes(json.dumps(note, ensure_ascii=False).encode(), aad=note["id"].encode()))
+    else:
+        plaintext_note_path(note["id"]).write_text(note["body"], encoding="utf-8")
+        os.chmod(plaintext_note_path(note["id"]), 0o600)
+    for key in ("title", "tags", "updated", "storage", "sensitivity", "classification"):
+        meta[key] = note[key]
+
+
+def library_update(args: argparse.Namespace) -> None:
+    init_if_needed()
+    body = read_stdin_or_arg(getattr(args, "body", None))
+    if not body.strip():
+        die("Refusing to save an empty note.")
+    with vault_capture_lock():
+        index = load_index()
+        meta = library_note_meta(index, args.note_id, allow_trashed=False)
+        note = load_note(meta)
+        note["title"] = args.title.strip()
+        note["tags"] = parse_tags(args.tags)
+        note["body"] = body
+        note["updated"] = now_iso()
+        write_library_note(meta, note)
+        save_index(index)
+    print(json.dumps({"status": "updated", "note": library_note_summary(meta)}, ensure_ascii=False))
+
+
+def library_trash(args: argparse.Namespace) -> None:
+    init_if_needed()
+    with vault_capture_lock():
+        index = load_index()
+        meta = library_note_meta(index, args.note_id, allow_trashed=True)
+        if meta.get("trashed_at"):
+            die("Library note is already in trash.")
+        meta["trashed_at"] = now_iso()
+        meta["updated"] = meta["trashed_at"]
+        save_index(index)
+    print(json.dumps({"status": "trashed", "id": meta["id"], "title": meta["title"]}, ensure_ascii=False))
+
+
+def library_restore(args: argparse.Namespace) -> None:
+    init_if_needed()
+    with vault_capture_lock():
+        index = load_index()
+        meta = library_note_meta(index, args.note_id, allow_trashed=True)
+        if not meta.get("trashed_at"):
+            die("Library note is not in trash.")
+        meta.pop("trashed_at", None)
+        meta["updated"] = now_iso()
+        save_index(index)
+    print(json.dumps({"status": "restored", "id": meta["id"], "title": meta["title"]}, ensure_ascii=False))
+
+
+def library_purge(args: argparse.Namespace) -> None:
+    init_if_needed()
+    if not getattr(args, "yes", False):
+        die("Permanent Library deletion requires --yes.")
+    with vault_capture_lock():
+        index = load_index()
+        meta = library_note_meta(index, args.note_id, allow_trashed=True)
+        if not meta.get("trashed_at"):
+            die("Move the Library note to trash before permanently deleting it.")
+        note_id = meta["id"]
+        purge_dir = VAULT / ".library-purge" / note_id
+        moves = [(plaintext_note_path(note_id), purge_dir / "note.md"), (encrypted_note_path(note_id), purge_dir / "note.enc.json"), (attachment_note_dir(note_id), purge_dir / "attachments")]
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for source, staged in moves:
+                if source.exists():
+                    staged.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    os.replace(source, staged)
+                    moved.append((source, staged))
+            index["notes"] = [note for note in index.get("notes", []) if note.get("id") != note_id]
+            save_index(index)
+        except Exception:
+            for source, staged in reversed(moved):
+                if staged.exists():
+                    os.replace(staged, source)
+            shutil.rmtree(purge_dir, ignore_errors=True)
+            raise
+        try:
+            shutil.rmtree(purge_dir, ignore_errors=False)
+        except Exception as cleanup_error:
+            for source, staged in reversed(moved):
+                if staged.exists():
+                    os.replace(staged, source)
+            index["notes"].append(meta)
+            save_index(index)
+            die(f"Permanent deletion could not be completed; Library note was restored to trash: {cleanup_error}")
+        try:
+            purge_dir.parent.rmdir()
+        except OSError:
+            pass
+    print(json.dumps({"status": "purged", "id": note_id, "title": meta["title"]}, ensure_ascii=False))
+
+
+def library_attach(args: argparse.Namespace) -> None:
+    init_if_needed()
+    src = Path(args.file).expanduser().resolve()
+    if not src.is_file():
+        die(f"Attachment file not found: {src}")
+    with vault_capture_lock():
+        index = load_index()
+        meta = library_note_meta(index, args.note_id, allow_trashed=False)
+        attachment = attach_file_to_note(meta, src, sensitivity="auto", extract=True, ocr=True, receipt=False)
+    print(json.dumps({"status": "attached", "id": meta["id"], "attachment": library_attachment_summary(attachment)}, ensure_ascii=False))
+
+
+def library_extracted_text(args: argparse.Namespace) -> None:
+    init_if_needed()
+    meta = library_note_meta(load_index(), args.note_id)
+    attachment_id = getattr(args, "attachment_id", "") or ""
+    matches = [att for att in meta.get("attachments", []) if att.get("id") == attachment_id]
+    if len(matches) != 1:
+        die("Specify one Library attachment id.")
+    att = matches[0]
+    sidecar = attachment_note_dir(meta["id"]) / att["id"] / "extracted.md"
+    encrypted_sidecar = attachment_note_dir(meta["id"]) / att["id"] / "extracted.md.json"
+    if sidecar.exists():
+        text = sidecar.read_text(encoding="utf-8")
+    elif encrypted_sidecar.exists():
+        payload = json.loads(encrypted_sidecar.read_text())
+        text = decrypt_payload(payload["encrypted"], aad=f"{meta['id']}:{att['id']}:extracted.md".encode()).decode()
+    else:
+        die("No extracted text is available. Run extraction first.")
+    print(json.dumps({"status": "ok", "id": meta["id"], "attachment_id": att["id"], "text": text}, ensure_ascii=False))
+
+
+def library_extract(args: argparse.Namespace) -> None:
+    init_if_needed()
+    with vault_capture_lock():
+        meta = library_note_meta(load_index(), args.note_id, allow_trashed=False)
+    # Reuse Kaal's generic attachment pipeline. It never selects the medical
+    # PDF route because the library predicate excludes medical receipt records.
+    ocr_attachments(SimpleNamespace(query=meta["id"], force=True, dry_run=False, no_extract=False, no_ocr=False, limit=0))
+
+
 def show_note(args: argparse.Namespace) -> None:
     init_if_needed()
     meta = require_one_note(args.query)
@@ -1397,6 +1606,41 @@ def medical_extracted_text(args: argparse.Namespace) -> None:
     print(json.dumps({"status": "ok", "id": meta["id"], "attachment_id": att["id"], "text": text}, ensure_ascii=False))
 
 
+def medical_export_original(args: argparse.Namespace) -> None:
+    """Export one exact Kaal-managed receipt attachment without altering it."""
+    init_if_needed()
+    meta = medical_receipt_meta(load_index(), args.note_id)
+    matches = [att for att in meta.get("attachments", []) if att.get("id") == args.attachment_id]
+    if len(matches) != 1:
+        die("Specify one exact receipt attachment id.")
+    attachment = matches[0]
+    output = Path(args.output).expanduser().resolve()
+    if not output.parent.is_dir():
+        die("Export destination directory does not exist.")
+    if output.exists() or output.is_symlink():
+        die(f"Output exists: {output}")
+    plaintext = attachment_original_bytes(meta, attachment)
+    file_descriptor: int | None = None
+    try:
+        file_descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(file_descriptor, "wb") as exported:
+            file_descriptor = None
+            exported.write(plaintext)
+    except Exception:
+        if file_descriptor is not None:
+            os.close(file_descriptor)
+        output.unlink(missing_ok=True)
+        raise
+    print(json.dumps({
+        "status": "exported",
+        "id": meta["id"],
+        "attachment_id": attachment["id"],
+        "path": str(output),
+        "bytes": len(plaintext),
+        "sha256": hashlib.sha256(plaintext).hexdigest(),
+    }, ensure_ascii=False))
+
+
 def medical_update(args: argparse.Namespace) -> None:
     init_if_needed()
     try:
@@ -1993,6 +2237,46 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--captured-at", default="", help="ISO-8601 capture time; defaults to now")
     sp.set_defaults(func=browser_capture_text)
 
+    sp = sub.add_parser("library", help="Manage non-medical Kaal notes for the local dashboard")
+    library_sub = sp.add_subparsers(dest="library_cmd", required=True)
+    library_list_parser = library_sub.add_parser("list", help="List bounded non-medical note metadata")
+    library_list_parser.add_argument("--trash", action="store_true")
+    library_list_parser.add_argument("--limit", type=int, default=100)
+    library_list_parser.set_defaults(func=library_list)
+    library_show_parser = library_sub.add_parser("show", help="Reveal one non-medical note")
+    library_show_parser.add_argument("note_id")
+    library_show_parser.set_defaults(func=library_show)
+    library_create_parser = library_sub.add_parser("create", help="Create a non-medical note from stdin")
+    library_create_parser.add_argument("--title", required=True)
+    library_create_parser.add_argument("--tags", default="")
+    library_create_parser.add_argument("--source-url", default="")
+    library_create_parser.add_argument("--source-title", default="")
+    library_create_parser.set_defaults(func=library_create)
+    library_update_parser = library_sub.add_parser("update", help="Replace a non-medical note body from stdin")
+    library_update_parser.add_argument("note_id")
+    library_update_parser.add_argument("--title", required=True)
+    library_update_parser.add_argument("--tags", default="")
+    library_update_parser.set_defaults(func=library_update)
+    for action, handler, help_text in (("trash", library_trash, "Move a non-medical note to Trash"), ("restore", library_restore, "Restore a non-medical note")):
+        action_parser = library_sub.add_parser(action, help=help_text)
+        action_parser.add_argument("note_id")
+        action_parser.set_defaults(func=handler)
+    library_purge_parser = library_sub.add_parser("purge", help="Permanently delete a trashed non-medical note")
+    library_purge_parser.add_argument("note_id")
+    library_purge_parser.add_argument("--yes", action="store_true")
+    library_purge_parser.set_defaults(func=library_purge)
+    library_attach_parser = library_sub.add_parser("attach", help="Attach a file to an active non-medical note")
+    library_attach_parser.add_argument("note_id")
+    library_attach_parser.add_argument("file")
+    library_attach_parser.set_defaults(func=library_attach)
+    library_extract_parser = library_sub.add_parser("extract", help="Run generic extraction/OCR for one Library note")
+    library_extract_parser.add_argument("note_id")
+    library_extract_parser.set_defaults(func=library_extract)
+    library_text_parser = library_sub.add_parser("extracted-text", help="Reveal one Library attachment's extracted text")
+    library_text_parser.add_argument("note_id")
+    library_text_parser.add_argument("--attachment-id", required=True)
+    library_text_parser.set_defaults(func=library_extracted_text)
+
     sp = sub.add_parser("medical", help="Capture and manage plaintext medical expense receipts")
     medical_sub = sp.add_subparsers(dest="medical_cmd", required=True)
     capture = medical_sub.add_parser("capture", help="Capture a browser-downloaded receipt into the plaintext medical inbox")
@@ -2019,6 +2303,11 @@ def build_parser() -> argparse.ArgumentParser:
     medical_text_parser.add_argument("note_id")
     medical_text_parser.add_argument("--attachment-id", default="")
     medical_text_parser.set_defaults(func=medical_extracted_text)
+    medical_export_parser = medical_sub.add_parser("export-original", help="Export one exact managed receipt attachment")
+    medical_export_parser.add_argument("note_id")
+    medical_export_parser.add_argument("--attachment-id", required=True)
+    medical_export_parser.add_argument("--output", required=True)
+    medical_export_parser.set_defaults(func=medical_export_original)
     medical_update_parser = medical_sub.add_parser("update", help="Manually correct extracted receipt fields")
     medical_update_parser.add_argument("note_id")
     medical_update_parser.add_argument("--fields-json", required=True)

@@ -188,6 +188,37 @@ class ReceiptHostTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "selection text"):
             host.handle_request({"action": "capture-selection", "text": "x" * (host.MAX_SELECTION_CHARS + 1)})
 
+    def test_library_create_sends_body_over_stdin_and_library_purge_requires_typed_id(self):
+        calls = []
+
+        def fake_library(command, **kwargs):
+            calls.append((command, kwargs))
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"status": "created", "note": {"id": "n1"}}), stderr="")
+
+        host.subprocess.run = fake_library
+        result = host.handle_request({"action": "library-create", "title": "Reference", "tags": "project", "body": "Private note body"})
+        self.assertTrue(result["ok"])
+        command, kwargs = calls[0]
+        self.assertEqual(command[1:3], [str(host.KAAL_SCRIPT), "library"])
+        self.assertIn("create", command)
+        self.assertNotIn("Private note body", command)
+        self.assertEqual(kwargs["input"], "Private note body")
+        with self.assertRaisesRegex(ValueError, "typed note-ID"):
+            host.handle_request({"action": "library-purge", "id": "n1", "confirmPermanent": True, "confirmationText": "wrong"})
+
+    def test_library_list_is_bounded_and_returns_notes(self):
+        calls = []
+
+        def fake_library(command, **kwargs):
+            calls.append(command)
+            return SimpleNamespace(returncode=0, stdout=json.dumps([{"id": "n1", "title": "Reference"}]), stderr="")
+
+        host.subprocess.run = fake_library
+        result = host.handle_request({"action": "library-list", "trash": True})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["notes"][0]["id"], "n1")
+        self.assertEqual(calls[0][-3:], ["--limit", str(host.LIBRARY_LIST_LIMIT), "--trash"])
+
     def test_list_returns_bounded_receipt_metadata_from_kaal(self):
         calls = []
         def fake_list(command, **kwargs):
@@ -225,6 +256,46 @@ class ReceiptHostTests(unittest.TestCase):
         self.assertEqual(calls[3][-3:], ["medical", "review", "r1"])
         with self.assertRaisesRegex(ValueError, "id is required"):
             host.handle_request({"action": "restore"})
+
+    def test_download_original_uses_an_exact_attachment_id_and_unique_safe_download_path(self):
+        downloads = self.root / "Downloads"
+        downloads.mkdir()
+        setattr(host, "DOWNLOADS_DIR", downloads)
+        (downloads / "Receipt.pdf").write_bytes(b"existing")
+        calls = []
+
+        def fake_export(command, **kwargs):
+            calls.append(command)
+            output = Path(command[command.index("--output") + 1])
+            output.write_bytes(b"original receipt bytes")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({
+                    "status": "exported",
+                    "path": str(output),
+                    "bytes": output.stat().st_size,
+                    "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+                }),
+                stderr="",
+            )
+
+        host.subprocess.run = fake_export
+        result = host.handle_request({
+            "action": "download-original",
+            "id": "receipt-1",
+            "attachmentId": "attachment-1",
+            "attachmentName": "../Receipt.pdf",
+        })
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["result"]["filename"], "Receipt (2).pdf")
+        exported = Path(result["result"]["path"])
+        self.assertEqual(exported.parent, downloads.resolve())
+        self.assertEqual(exported.read_bytes(), b"original receipt bytes")
+        self.assertEqual(calls[0][1:5], [str(host.KAAL_SCRIPT), "medical", "export-original", "receipt-1"])
+        self.assertIn("attachment-1", calls[0])
+        with self.assertRaisesRegex(ValueError, "attachmentId is required"):
+            host.handle_request({"action": "download-original", "id": "receipt-1", "attachmentName": "Receipt.pdf"})
 
     def test_bulk_purge_requires_typed_ids_and_forwards_one_confirmed_command(self):
         calls = []
