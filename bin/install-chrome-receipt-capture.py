@@ -13,6 +13,16 @@ HOST_NAME = "com.kaal.receipt_capture"
 EXTENSION_ID = "ebmkcbpcihgiaoimcpncmadadogclmld"
 
 
+def wrapper_text(staging_dir: Path, python: Path, host_script: Path, kaal_config: Path | None = None) -> str:
+    """The shell wrapper Chrome launches. KAAL_CONFIG, when given, points the
+    Kaal CLI at a server config holding the extension's own API token."""
+    lines = ["#!/bin/sh", f"export KAAL_RECEIPT_STAGING_DIR={json.dumps(str(staging_dir))}"]
+    if kaal_config is not None:
+        lines.append(f"export KAAL_CONFIG={json.dumps(str(kaal_config))}")
+    lines.append(f"exec {json.dumps(str(python))} {json.dumps(str(host_script))}")
+    return "\n".join(lines) + "\n"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Install Kaal's Chrome Native Messaging capture host")
     parser.add_argument(
@@ -22,6 +32,7 @@ def main() -> None:
     )
     parser.add_argument("--downloads-dir", default=str(Path.home() / "Downloads"), help="Chrome's configured download directory; staging is limited to its Kaal Capture subdirectory")
     parser.add_argument("--python", default=sys.executable, help="Python that has Kaal's optional PDF extraction dependencies")
+    parser.add_argument("--kaal-config", default="", help="Kaal client config (server URL and the extension's token file) for the host to use; omit to use the local vault")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     host_script = root / "bin" / "kaal-receipt-host.py"
@@ -39,10 +50,10 @@ def main() -> None:
     install_dir = Path.home() / ".local" / "share" / "kaal" / "chrome-receipt-capture"
     install_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     wrapper = install_dir / "kaal-receipt-host"
-    wrapper.write_text(
-        f"#!/bin/sh\nexport KAAL_RECEIPT_STAGING_DIR={json.dumps(str(staging_dir))}\nexec {json.dumps(str(python))} {json.dumps(str(host_script))}\n",
-        encoding="utf-8",
-    )
+    kaal_config = Path(args.kaal_config).expanduser().resolve() if args.kaal_config else None
+    if kaal_config is not None and not kaal_config.is_file():
+        parser.error(f"Kaal config not found: {kaal_config}")
+    wrapper.write_text(wrapper_text(staging_dir, python, host_script, kaal_config), encoding="utf-8")
     wrapper.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
 
     manifest_dir = Path(args.chrome_app_support).expanduser() / "NativeMessagingHosts"

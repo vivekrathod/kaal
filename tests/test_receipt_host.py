@@ -341,5 +341,12 @@ class ReceiptHostTests(unittest.TestCase):
         self.assertEqual(installer.HOST_NAME, "com.kaal.receipt_capture")
 
 
+    def test_installer_wrapper_can_point_the_cli_at_a_server_config(self):
+        local = installer.wrapper_text(Path("/s"), Path("/py"), Path("/host.py"))
+        self.assertNotIn("KAAL_CONFIG", local)
+        remote = installer.wrapper_text(Path("/s"), Path("/py"), Path("/host.py"), Path("/cfg/chrome.toml"))
+        self.assertIn('export KAAL_CONFIG="/cfg/chrome.toml"', remote)
+        self.assertTrue(remote.rstrip().endswith('exec "/py" "/host.py"'))
+
 if __name__ == "__main__":
     unittest.main()
