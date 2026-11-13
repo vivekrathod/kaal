@@ -9,6 +9,9 @@ Kaal is a local-first personal notes vault. Treat all vault contents, attachment
 - From this checkout, use `.venv/bin/python bin/secure-notes.py …` when the wrapper is unavailable.
 - Do not print note bodies, OCR text, medical receipt fields, tax information, or attachment paths into chat/logs by default.
 - Verify a command with `kaal --help` or `kaal status`; do not read the vault directory directly.
+- `kaal` may be a client of `kaal-server`: when `~/.config/kaal/config.toml` (or `KAAL_CONFIG`/`KAAL_URL`) names a server, every command runs there with that machine's token and prints the same output. `kaal status` shows `"server"` in that case. `KAAL_LOCAL=1` forces local mode; only use it when told to.
+- A token can lack a scope (`read`, `reveal`, `write`, `delete`, `admin`); an error saying so is expected, so do not look for another way around it.
+- `kaal verify` checks the vault and prints ids only; `kaal export`/`kaal import` move a whole vault and are admin operations: run them only when explicitly asked.
 
 ## Safety rules
 
@@ -53,11 +56,19 @@ kaal medical capture /absolute/path/receipt.pdf
 
 ## Development
 
-Run the full verification suite before reporting a code change complete:
+Code lives in the `kaal` package: `core.py` (vault, encryption, command handlers), `keys.py` (Keychain and key-file providers), `cli.py` (argument parsing, local or remote), `client.py` (remote mode), `server.py` (kaal-server) and `tokens.py`. `bin/secure-notes.py` is a launcher. Install dev dependencies with `pip install -e '.[dev]'` (add `extract` for Docling).
+
+Tests use a throwaway key file and never the Keychain, and never a real `~/.config/kaal/config.toml` (see `tests/conftest.py`); keep it that way. Run the full verification suite before reporting a code change complete:
 
 ```bash
 env -u PYTHONPATH .venv/bin/python -m pytest -q
-.venv/bin/python -m py_compile bin/secure-notes.py bin/kaal-receipt-host.py
+.venv/bin/python -m py_compile bin/secure-notes.py bin/kaal-receipt-host.py kaal/*.py
+```
+
+After changing an endpoint, regenerate the API spec (a test fails until you do):
+
+```bash
+.venv/bin/python -m kaal.server openapi --output docs/openapi.json
 ```
 
 The root `README.md` is end-user documentation. Update this file when agent behavior, safety rules, or stable command locations change.

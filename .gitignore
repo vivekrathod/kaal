@@ -9,6 +9,11 @@
 __pycache__/
 *.py[cod]
 
+# Build output
+/build/
+/dist/
+*.egg-info/
+
 # Local/editor noise
 .DS_Store
 *.tmp

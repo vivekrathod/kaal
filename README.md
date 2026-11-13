@@ -5,8 +5,9 @@ Kaal is your local notes vault for personal data. Notes are Markdown by default 
 Vault: `$HOME/.secure-notes`
 Primary CLI: `$HOME/.local/bin/kaal`
 Compatibility CLI: `$HOME/.local/bin/secure-notes`
-Key: macOS Keychain item `Hermes Secure Notes` / `vault-key-v1`
+Key: macOS Keychain item `Hermes Secure Notes` / `vault-key-v1`, or an owner-only key file (see below)
 Encryption: AES-256-GCM using Python `cryptography`
+Server: optional `kaal-server`, so several machines share one vault (see [Running Kaal as a server](#running-kaal-as-a-server))
 
 ## Security model
 
@@ -17,12 +18,96 @@ Encryption: AES-256-GCM using Python `cryptography`
 - Attachments always preserve the original bytes; optional extracted/OCR Markdown sidecars are created separately.
 - Sensitive parent notes force attachments to be encrypted too.
 - The index stores metadata: id, title, tags, timestamps, storage mode, classification reasons, attachment names/sizes/hashes.
-- The encryption key is stored in macOS Keychain, not in vault files.
+- The encryption key is never stored in vault files: it lives in the macOS Keychain or, with `KAAL_KEY_PROVIDER=file`, in the file named by `KAAL_KEY_FILE`, which Kaal refuses to read unless only its owner can read it.
 - File permissions are restrictive: vault directories `700`, stored files `600`.
 - Default note display is redacted.
 - Full plaintext should usually be copied to clipboard rather than printed in chat.
 
 Important: the classifier is a best guess. False negatives are the dangerous case. Use `--sensitivity sensitive` for anything you know is private, and only use `--sensitivity public` when you are comfortable storing the note or attachment as plaintext.
+
+## Running Kaal as a server
+
+`kaal-server` puts one vault behind an authenticated HTTP API, so the CLI, the
+Chrome extension and agents on other machines share it. The server is the only
+process that opens the vault or reads the key. Every endpoint runs the same code
+as the local CLI, and the API is described in [`docs/openapi.json`](docs/openapi.json).
+
+```bash
+pip install '.[server]'               # add ,extract for Docling and MarkItDown
+export KAAL_HOME=/srv/kaal KAAL_VAULT=/srv/kaal/data
+export KAAL_KEY_PROVIDER=file KAAL_KEY_FILE=/etc/kaal/master.key
+kaal init                             # new vault and key, or `kaal import` an export
+kaal-server token create mac-cli --scopes read,reveal,write,delete --output mac-cli.token
+kaal-server serve                     # 127.0.0.1:8765; publish with `tailscale serve`
+```
+
+[`deploy/kaal-server.service`](deploy/kaal-server.service) is a hardened systemd
+unit, and the [`Dockerfile`](Dockerfile) builds a container image.
+
+**Tokens** are shown once (or written to a new mode-600 file with `--output`)
+and stored only as SHA-256 hashes. `kaal-server token list` and
+`kaal-server token revoke NAME` manage them. Each token has scopes:
+
+| Scope | Allows |
+|---|---|
+| `read` | Metadata: list, search, redacted views, status, verify |
+| `reveal` | Plaintext: full note bodies, field values, attachment contents, extracted text, medical receipt fields |
+| `write` | Create, edit, append, attach, capture, extract, trash, restore |
+| `delete` | Permanent deletion and purges |
+| `admin` | Whole-vault export |
+
+**Clients.** Point the same `kaal` command at the server with
+`~/.config/kaal/config.toml` (or `KAAL_CONFIG`), mode 600:
+
+```toml
+url = "https://storage.example.ts.net"
+token_file = "~/.config/kaal/mac-cli.token"
+```
+
+Every command then runs remotely and prints exactly what it prints locally.
+Files you attach are uploaded, and exports are written on your machine.
+`KAAL_LOCAL=1` forces local mode. For the Chrome extension, reinstall its helper with
+`bin/install-chrome-receipt-capture.py --kaal-config PATH`, pointing at a config
+that holds the extension's own token.
+
+**Checks and moving data.** `kaal verify [--deep]` compares the index with the
+files on disk and reports ids only. `kaal export --output FILE.tar` writes the
+vault exactly as stored (the key is not included). `kaal import FILE.tar`
+restores into an empty vault and verifies it.
+
+## Threat model
+
+**What encryption protects.** Notes and attachments classified sensitive are
+encrypted with AES-256-GCM, so someone holding a copy of the vault files without
+the key (a stolen disk, a backup, a snapshot) cannot read them.
+
+**What it does not protect.** Public notes, medical receipts (plaintext by
+design) and all metadata are stored unencrypted: titles, tags, attachment names,
+sizes and hashes in `index.json` and each `metadata.json`. Only file permissions
+protect them: the `kaal` user, folders 700, files 600. Backups and snapshots of
+the vault hold the same plaintext parts, so keep them as private as the vault.
+
+**On the server.** Only `kaal-server`, running as its own user, reads the vault
+and the key file. The key is never stored next to the data, and keep a recovery
+copy offline. Anyone with root on the server host, or on the hypervisor under
+it, can read everything: that is the trust boundary.
+
+**On the network.** The server listens on loopback only. TLS and the choice of
+which devices can connect come from the proxy in front of it (for example
+`tailscale serve`, reachable from your tailnet only). Each client has its own
+revocable token with only the scopes it needs. The CLI refuses plain http to
+anything but loopback, and refuses token or config files that others can read.
+
+**What the server never records.** Logs carry the method, route template,
+status, token name and duration only, never bodies, query strings, file
+contents or tokens. Validation errors name the bad fields without echoing the
+values. Uploads go to a private folder that is removed after each request.
+
+**Not defended against.** A compromised client can do whatever its token allows
+until you revoke it, and a token with `admin` can export everything. A
+compromised server host exposes everything. The classifier can miss sensitive
+text, which would then be stored as plaintext. Rate limits are basic and are not
+denial-of-service protection.
 
 ## Local receipt extraction and confirmation
 

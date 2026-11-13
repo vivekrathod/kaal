@@ -1,0 +1,11 @@
+.git
+.venv
+.worktrees
+.hermes
+.pytest_cache
+**/__pycache__
+index.json
+notes/
+attachments/
+*.token
+*.key

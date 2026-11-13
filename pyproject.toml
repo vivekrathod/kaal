@@ -37,6 +37,9 @@ kaal-server = "kaal.server:main"
 [tool.setuptools]
 packages = ["kaal"]
 
+[tool.setuptools.package-data]
+kaal = ["vision_ocr.swift"]
+
 [tool.setuptools.dynamic]
 version = { attr = "kaal.__version__" }
 
