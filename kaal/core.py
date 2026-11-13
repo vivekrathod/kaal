@@ -43,6 +43,24 @@ VAULT = Path(os.environ.get("SECURE_NOTES_VAULT", str(Path.home() / ".secure-not
 NOTES_DIR = VAULT / "notes"
 ATTACH_DIR = VAULT / "attachments"
 INDEX_PATH = VAULT / "index.json"
+
+
+def configure_vault(path: str | os.PathLike[str]) -> Path:
+    """Point the core at a vault directory (kaal-server calls this at startup)."""
+    global VAULT, NOTES_DIR, ATTACH_DIR, INDEX_PATH
+    VAULT = Path(path).expanduser()
+    NOTES_DIR = VAULT / "notes"
+    ATTACH_DIR = VAULT / "attachments"
+    INDEX_PATH = VAULT / "index.json"
+    return VAULT
+
+
+def note_by_id(note_id: str) -> dict[str, Any]:
+    """Return the note with exactly this id; never falls back to title matching."""
+    for note in load_index().get("notes", []):
+        if note.get("id") == note_id:
+            return note
+    die("Note not found.", kind="not_found")
 SERVICE = key_providers.DEFAULT_KEYCHAIN_SERVICE
 ACCOUNT = key_providers.DEFAULT_KEYCHAIN_ACCOUNT
 KEY_BYTES = key_providers.KEY_BYTES
