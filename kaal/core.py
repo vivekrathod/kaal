@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Kaal core: the encrypted notes vault and its command handlers.
 
-Vault default: ~/.secure-notes (override with SECURE_NOTES_VAULT)
+Vault default: ~/.secure-notes (override with KAAL_VAULT; SECURE_NOTES_VAULT still works)
 Key storage: kaal.keys (macOS Keychain or an owner-only key file)
 Encryption: AES-256-GCM via Python cryptography.
 
@@ -40,7 +40,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from kaal import keys as key_providers
 
-VAULT = Path(os.environ.get("SECURE_NOTES_VAULT", str(Path.home() / ".secure-notes"))).expanduser()
+VAULT = Path(os.environ.get("KAAL_VAULT") or os.environ.get("SECURE_NOTES_VAULT") or str(Path.home() / ".secure-notes")).expanduser()
 NOTES_DIR = VAULT / "notes"
 ATTACH_DIR = VAULT / "attachments"
 INDEX_PATH = VAULT / "index.json"

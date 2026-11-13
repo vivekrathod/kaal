@@ -177,3 +177,21 @@ class CoreServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VaultLocationTests(unittest.TestCase):
+    def run_status(self, **env_vars):
+        import os
+        import subprocess
+        import sys
+        env = {k: v for k, v in os.environ.items() if k not in {"KAAL_VAULT", "SECURE_NOTES_VAULT", "PYTHONPATH"}}
+        env.update(env_vars, KAAL_LOCAL="1")
+        launcher = Path(__file__).resolve().parents[1] / "bin" / "secure-notes.py"
+        proc = subprocess.run([sys.executable, str(launcher), "status"], env=env, capture_output=True, text=True, check=True)
+        return json.loads(proc.stdout)["vault"]
+
+    def test_kaal_vault_sets_the_vault_and_wins_over_the_old_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(self.run_status(KAAL_VAULT=f"{td}/a"), f"{td}/a")
+            self.assertEqual(self.run_status(SECURE_NOTES_VAULT=f"{td}/b"), f"{td}/b")
+            self.assertEqual(self.run_status(KAAL_VAULT=f"{td}/a", SECURE_NOTES_VAULT=f"{td}/b"), f"{td}/a")
