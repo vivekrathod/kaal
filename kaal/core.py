@@ -22,6 +22,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1109,8 +1110,12 @@ def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "
         storage = "encrypted"
         classification["sensitivity"] = "sensitive"
         classification.setdefault("reasons", []).insert(0, "parent note is sensitive")
+    # Create the per-note directory explicitly: mkdir(parents=True) gives
+    # intermediate directories the default mode (755), not 700.
+    ATTACH_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    attachment_note_dir(nid).mkdir(mode=0o700, exist_ok=True)
     out_dir = attachment_note_dir(nid) / att_id
-    out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    out_dir.mkdir(mode=0o700, exist_ok=True)
     attachment_meta = {
         "id": att_id,
         "name": stored_name,
@@ -1946,6 +1951,142 @@ def medical_purge_bulk(args: argparse.Namespace) -> None:
     emit({"status": "purged", "count": len(note_ids), "ids": note_ids}, indent=2, ensure_ascii=False)
 
 
+
+def _file_sha256(path: Path) -> str:
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _decrypts(payload: dict[str, Any], aad: bytes, key: bytes) -> bytes | None:
+    """Decrypt without dying: verify reports failures instead of stopping."""
+    try:
+        if payload.get("alg") != "AES-256-GCM" or base64.b64decode(payload.get("aad", "")) != aad:
+            return None
+        AESGCM = import_crypto()
+        return AESGCM(key).decrypt(base64.b64decode(payload["nonce"]), base64.b64decode(payload["ciphertext"]), aad)
+    except Exception:
+        return None
+
+
+def verify_vault(args: argparse.Namespace) -> None:
+    """Check the index against the files on disk. Reports ids only, never titles or names.
+
+    Problems (exit 2 on the CLI): duplicate ids, missing note or attachment
+    files, plaintext attachments whose sha256 differs from the index and, with
+    --deep, encrypted notes or attachments that do not decrypt or match.
+    Warnings: orphaned files or directories and loose permissions.
+    """
+    init_if_needed()
+    deep = bool(getattr(args, "deep", False))
+    with vault_capture_lock():
+        index = load_index()
+        notes = index.get("notes", [])
+        key = get_key() if deep else b""
+        problems: list[dict[str, str]] = []
+        seen: set[str] = set()
+        attachments = hashes_checked = decrypted = 0
+        known_attachments: dict[str, set[str]] = {}
+        for note in notes:
+            nid = note.get("id", "")
+            if nid in seen:
+                problems.append({"kind": "duplicate_note_id", "note_id": nid})
+                continue
+            seen.add(nid)
+            if note.get("storage", "encrypted") == "plaintext":
+                if not plaintext_note_path(nid).is_file():
+                    problems.append({"kind": "missing_note_file", "note_id": nid})
+            else:
+                path = encrypted_note_path(nid)
+                if not path.is_file():
+                    problems.append({"kind": "missing_note_file", "note_id": nid})
+                elif deep:
+                    try:
+                        payload = json.loads(path.read_text())
+                    except (OSError, json.JSONDecodeError):
+                        payload = {}
+                    if _decrypts(payload, nid.encode(), key) is None:
+                        problems.append({"kind": "decrypt_failed", "note_id": nid})
+                    else:
+                        decrypted += 1
+            known_attachments[nid] = set()
+            for att in note.get("attachments", []):
+                attachments += 1
+                aid = att.get("id", "")
+                known_attachments[nid].add(aid)
+                att_dir = attachment_note_dir(nid) / aid
+                where = {"note_id": nid, "attachment_id": aid}
+                if not (att_dir / "metadata.json").is_file():
+                    problems.append({"kind": "missing_attachment_metadata", **where})
+                if att.get("storage", "encrypted") == "plaintext":
+                    original = att_dir / att.get("stored_name", att.get("name", ""))
+                    if not original.is_file():
+                        problems.append({"kind": "missing_attachment_file", **where})
+                    elif att.get("sha256"):
+                        hashes_checked += 1
+                        if _file_sha256(original) != att["sha256"]:
+                            problems.append({"kind": "attachment_hash_mismatch", **where})
+                    continue
+                payload_path = att_dir / "original.json"
+                if not payload_path.is_file():
+                    payload_path = attachment_note_dir(nid) / f"{aid}.json"
+                if not payload_path.is_file():
+                    problems.append({"kind": "missing_attachment_file", **where})
+                elif deep:
+                    try:
+                        stored = json.loads(payload_path.read_text())
+                        plain = _decrypts(stored["encrypted"], f"{nid}:{aid}:{stored['name']}".encode(), key)
+                    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+                        plain = None
+                    if plain is None:
+                        problems.append({"kind": "decrypt_failed", **where})
+                    else:
+                        decrypted += 1
+                        if att.get("sha256"):
+                            hashes_checked += 1
+                            if hashlib.sha256(plain).hexdigest() != att["sha256"]:
+                                problems.append({"kind": "attachment_hash_mismatch", **where})
+        orphan_note_files = sorted(
+            {entry.name.split(".", 1)[0] for entry in NOTES_DIR.iterdir() if entry.is_file() and entry.suffix in {".md", ".json"}} - seen
+        ) if NOTES_DIR.is_dir() else []
+        orphan_note_dirs: list[str] = []
+        orphan_attachment_dirs: list[str] = []
+        if ATTACH_DIR.is_dir():
+            for note_dir in sorted(entry for entry in ATTACH_DIR.iterdir() if entry.is_dir()):
+                if note_dir.name not in known_attachments:
+                    orphan_note_dirs.append(note_dir.name)
+                    continue
+                for att_dir in sorted(entry for entry in note_dir.iterdir() if entry.is_dir()):
+                    if att_dir.name not in known_attachments[note_dir.name]:
+                        orphan_attachment_dirs.append(f"{note_dir.name}/{att_dir.name}")
+        loose_dirs = loose_files = 0
+        for root, dirs, files in os.walk(VAULT):
+            for name in dirs:
+                if stat.S_IMODE(os.lstat(os.path.join(root, name)).st_mode) != 0o700:
+                    loose_dirs += 1
+            for name in files:
+                if stat.S_IMODE(os.lstat(os.path.join(root, name)).st_mode) != 0o600:
+                    loose_files += 1
+        pending_purges = sorted(name for name in (".library-purge", ".receipt-purge") if (VAULT / name).exists())
+    result = {
+        "status": "problems" if problems else "ok",
+        "deep": deep,
+        "notes": len(notes),
+        "attachments": attachments,
+        "hashes_checked": hashes_checked,
+        "decrypted": decrypted,
+        "problems": problems,
+        "warnings": {
+            "orphan_note_files": orphan_note_files,
+            "orphan_note_dirs": orphan_note_dirs,
+            "orphan_attachment_dirs": orphan_attachment_dirs,
+            "loose_permissions": {"dirs": loose_dirs, "files": loose_files},
+            "pending_purges": pending_purges,
+        },
+    }
+    emit(result, indent=2)
+    if problems and not capturing():
+        raise SystemExit(2)
+
 @holds_vault_lock
 def delete_note(args: argparse.Namespace) -> None:
     init_if_needed()
@@ -2459,6 +2600,10 @@ def build_parser() -> argparse.ArgumentParser:
     medical_purge_bulk_parser.add_argument("note_ids", nargs="+")
     medical_purge_bulk_parser.add_argument("--yes", action="store_true", help="Confirm permanent deletion")
     medical_purge_bulk_parser.set_defaults(func=medical_purge_bulk)
+
+    sp = sub.add_parser("verify", help="Check the index against the files on disk (ids only)")
+    sp.add_argument("--deep", action="store_true", help="Also decrypt every encrypted note and attachment and check attachment hashes")
+    sp.set_defaults(func=verify_vault)
 
     sp = sub.add_parser("delete", help="Delete note and attachments")
     sp.add_argument("query")
