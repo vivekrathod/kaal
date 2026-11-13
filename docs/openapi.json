@@ -559,6 +559,20 @@
         ]
       }
     },
+    "/v1/export": {
+      "get": {
+        "operationId": "export_v1_export_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Export",
+        "tags": [
+          "service"
+        ]
+      }
+    },
     "/v1/health": {
       "get": {
         "operationId": "health_v1_health_get",

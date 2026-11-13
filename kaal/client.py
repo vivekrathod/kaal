@@ -271,6 +271,19 @@ class Commands:
         _write_new_file(out, data, overwrite=bool(args.force))
         print(json.dumps({"status": "exported", "path": str(out), "bytes": len(data), "sha256": digest}, indent=2))
 
+    def export_vault(self, args: Any) -> None:
+        out = Path(args.output).expanduser().resolve()
+        if out.exists() or out.is_symlink():
+            core.die(f"Output exists: {out}")
+        data, headers = self.api.call("GET", "/v1/export", raw=True)
+        lowered = {key.lower(): value for key, value in headers.items()}
+        digest = hashlib.sha256(data).hexdigest()
+        if lowered.get("x-kaal-sha256") and lowered["x-kaal-sha256"] != digest:
+            core.die("The downloaded export does not match the server's checksum.")
+        _write_new_file(out, data, overwrite=False)
+        print(json.dumps({"status": "exported", "path": str(out), "bytes": len(data), "sha256": digest,
+                          "notes": int(lowered.get("x-kaal-notes", 0)), "files": int(lowered.get("x-kaal-files", 0))}, indent=2))
+
     def ocr_attachments(self, args: Any) -> None:
         body = {k: getattr(args, k, d) for k, d in (("query", ""), ("force", False), ("dry_run", False), ("no_extract", False), ("no_ocr", False), ("limit", 0))}
         _print(self.api.call("POST", "/v1/notes/extract", json_body=body))
@@ -395,7 +408,7 @@ class Commands:
         _print(self.api.call("POST", "/v1/medical/receipts/purge", json_body={"ids": ids, "confirm": True}))
 
 
-SERVER_ONLY = {"init_vault": "kaal init", "import_joplin_raw": "kaal import-joplin-raw"}
+SERVER_ONLY = {"init_vault": "kaal init", "import_joplin_raw": "kaal import-joplin-raw", "import_vault": "kaal import"}
 LOCAL_ALWAYS = {"classify_command"}
 
 

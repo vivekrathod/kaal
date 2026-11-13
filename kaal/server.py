@@ -32,8 +32,9 @@ from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from kaal import __version__, core, tokens
@@ -387,6 +388,20 @@ def create_app(settings: Settings) -> FastAPI:
     @app.get("/v1/verify", tags=["service"], dependencies=[require("read")])
     def verify(request: Request, deep: bool = False):
         return _run(S(request), core.verify_vault, deep=deep)
+
+    @app.get("/v1/export", tags=["service"], dependencies=[require("read", "reveal", "admin")], response_class=Response)
+    def export(request: Request):
+        state = S(request)
+        workdir = Path(tempfile.mkdtemp(prefix="export-", dir=state.settings.tmp_dir))
+        out = workdir / "kaal-export.tar"
+        with state.vault_lock:
+            try:
+                result, _ = core.call_captured(core.export_vault, SimpleNamespace(output=str(out)))
+            except core.KaalError as error:
+                shutil.rmtree(workdir, ignore_errors=True)
+                return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind)
+        headers = {"X-Kaal-Sha256": result["sha256"], "X-Kaal-Notes": str(result["notes"]), "X-Kaal-Files": str(result["files"])}
+        return FileResponse(out, media_type="application/x-tar", filename="kaal-export.tar", headers=headers, background=BackgroundTask(shutil.rmtree, workdir, True))
 
     # --- notes
 

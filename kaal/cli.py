@@ -211,6 +211,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--deep", action="store_true", help="Also decrypt every encrypted note and attachment and check attachment hashes")
     sp.set_defaults(func=core.verify_vault)
 
+    sp = sub.add_parser("export", help="Write the whole vault as stored (encrypted parts stay encrypted) to a new tar file")
+    sp.add_argument("--output", required=True)
+    sp.set_defaults(func=core.export_vault)
+
+    sp = sub.add_parser("import", help="Restore a kaal export into an empty vault, then verify it")
+    sp.add_argument("archive")
+    sp.set_defaults(func=core.import_vault)
+
     sp = sub.add_parser("delete", help="Delete note and attachments")
     sp.add_argument("query")
     sp.add_argument("--yes", action="store_true")

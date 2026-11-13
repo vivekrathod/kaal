@@ -25,6 +25,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 import threading
@@ -32,7 +33,7 @@ import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any, Callable, NoReturn
 from urllib.parse import urlsplit, urlunsplit
@@ -2104,6 +2105,103 @@ def verify_vault(args: argparse.Namespace) -> None:
     emit(result, indent=2)
     if problems and not capturing():
         raise SystemExit(2)
+
+
+EXPORT_EXCLUDED = {".medical-capture.lock", ".library-purge", ".receipt-purge"}
+
+
+def _anonymous(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    info.uid = info.gid = 0
+    info.uname = info.gname = ""
+    return info
+
+
+def _write_vault_tar(handle: Any) -> int:
+    files = 0
+    with tarfile.open(fileobj=handle, mode="w") as tar:
+        for root, dirs, names in os.walk(VAULT):
+            rel_root = Path(root).relative_to(VAULT)
+            top = rel_root == Path(".")
+            dirs[:] = sorted(d for d in dirs if not (top and d in EXPORT_EXCLUDED) and not os.path.islink(os.path.join(root, d)))
+            for name in dirs:
+                tar.add(os.path.join(root, name), arcname=str(rel_root / name), recursive=False, filter=_anonymous)
+            for name in sorted(names):
+                full = os.path.join(root, name)
+                if (top and name in EXPORT_EXCLUDED) or os.path.islink(full) or not os.path.isfile(full):
+                    continue
+                tar.add(full, arcname=str(rel_root / name), recursive=False, filter=_anonymous)
+                files += 1
+    return files
+
+
+def export_vault(args: argparse.Namespace) -> None:
+    """Write the whole vault, exactly as stored, to a new tar file (mode 600).
+
+    Encrypted notes and attachments stay encrypted; the key is never included.
+    """
+    init_if_needed()
+    out = Path(args.output).expanduser().resolve()
+    if out.exists() or out.is_symlink():
+        die(f"Output exists: {out}")
+    if out.is_relative_to(VAULT.resolve()):
+        die("Write the export outside the vault.")
+    with vault_capture_lock():
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                files = _write_vault_tar(handle)
+        except BaseException:
+            out.unlink(missing_ok=True)
+            raise
+        notes = len(load_index().get("notes", []))
+    emit({"status": "exported", "path": str(out), "bytes": out.stat().st_size, "sha256": _file_sha256(out), "notes": notes, "files": files}, indent=2)
+
+
+def _mkdirs_700(path: Path) -> None:
+    missing = []
+    while not path.exists():
+        missing.append(path)
+        path = path.parent
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o700)
+
+
+def import_vault(args: argparse.Namespace) -> None:
+    """Restore a `kaal export` archive into a missing or empty vault, then verify it."""
+    archive = Path(args.archive).expanduser().resolve()
+    if not archive.is_file():
+        die(f"Archive not found: {archive}", kind="not_found")
+    if VAULT.exists() and any(VAULT.iterdir()):
+        die(f"The vault at {VAULT} is not empty; import only restores into an empty vault.", kind="conflict")
+    try:
+        tar = tarfile.open(archive)
+    except tarfile.TarError:
+        die("The archive is not a tar file.")
+    files = 0
+    with tar:
+        members = tar.getmembers()
+        for member in members:
+            parts = PurePosixPath(member.name).parts
+            if PurePosixPath(member.name).is_absolute() or ".." in parts or not parts or not (member.isfile() or member.isdir()):
+                die(f"Refusing unsafe archive member: {member.name}")
+        if "index.json" not in {PurePosixPath(m.name).as_posix() for m in members if m.isfile()}:
+            die("The archive has no index.json, so it is not a Kaal export.")
+        _mkdirs_700(VAULT)
+        os.chmod(VAULT, 0o700)
+        with vault_capture_lock():
+            for member in members:
+                dest = VAULT.joinpath(*PurePosixPath(member.name).parts)
+                if member.isdir():
+                    _mkdirs_700(dest)
+                    continue
+                _mkdirs_700(dest.parent)
+                source = tar.extractfile(member)
+                fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as out, source:
+                    shutil.copyfileobj(source, out)
+                files += 1
+    verify, _ = call_captured(verify_vault, SimpleNamespace(deep=False))
+    emit({"status": "imported", "vault": str(VAULT), "files": files, "notes": verify["notes"], "verify": verify}, indent=2)
 
 @holds_vault_lock
 def delete_note(args: argparse.Namespace) -> None:
