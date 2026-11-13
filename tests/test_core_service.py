@@ -195,3 +195,28 @@ class VaultLocationTests(unittest.TestCase):
             self.assertEqual(self.run_status(KAAL_VAULT=f"{td}/a"), f"{td}/a")
             self.assertEqual(self.run_status(SECURE_NOTES_VAULT=f"{td}/b"), f"{td}/b")
             self.assertEqual(self.run_status(KAAL_VAULT=f"{td}/a", SECURE_NOTES_VAULT=f"{td}/b"), f"{td}/a")
+
+
+class BrokenPipeTests(unittest.TestCase):
+    def test_closing_the_pipe_early_exits_quietly(self):
+        import os
+        import subprocess
+        import sys
+        with tempfile.TemporaryDirectory() as td:
+            vault = Path(td) / "vault"
+            (vault / "notes").mkdir(parents=True)
+            (vault / "attachments").mkdir()
+            notes = [{"id": f"{i:012x}", "title": f"Note {i}", "tags": [], "updated": "", "attachments": []} for i in range(20000)]
+            (vault / "index.json").write_text(json.dumps({"version": 1, "notes": notes}))
+            env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+            env.update(KAAL_LOCAL="1", KAAL_VAULT=str(vault))
+            launcher = Path(__file__).resolve().parents[1] / "bin" / "secure-notes.py"
+            proc = subprocess.Popen([sys.executable, str(launcher), "list"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            proc.stdout.readline()
+            proc.stdout.close()
+            stderr = proc.stderr.read().decode()
+            proc.wait(timeout=60)
+            proc.stderr.close()
+        self.assertNotIn("Traceback", stderr)
+        self.assertNotIn("BrokenPipeError", stderr)
+        self.assertEqual(proc.returncode, 141)

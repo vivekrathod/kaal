@@ -228,7 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 
-def main(argv: list[str] | None = None) -> None:
+def _run(argv: list[str] | None) -> None:
     args = build_parser().parse_args(argv)
     try:
         remote = client.remote_config()
@@ -238,6 +238,17 @@ def main(argv: list[str] | None = None) -> None:
         args.func(args)
     else:
         client.run(remote, args)
+
+
+def main(argv: list[str] | None = None) -> None:
+    try:
+        _run(argv)
+    except BrokenPipeError:
+        # The reader (for example `head`) stopped early. Exit quietly, as other
+        # command-line tools do, and keep Python's exit-time flush from complaining.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        raise SystemExit(141)
 
 
 if __name__ == "__main__":
