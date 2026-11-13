@@ -14,6 +14,7 @@ import argparse
 import base64
 import fcntl
 import dataclasses
+import functools
 import getpass
 import hashlib
 import json
@@ -25,11 +26,14 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, Callable, NoReturn
 from urllib.parse import urlsplit, urlunsplit
 
 from kaal import keys as key_providers
@@ -72,9 +76,61 @@ CLASSIFIER_RULES: list[tuple[str, int, re.Pattern[str]]] = [
 ]
 
 
-def die(msg: str, code: int = 1) -> None:
-    print(f"ERROR: {msg}", file=sys.stderr)
-    sys.exit(code)
+class KaalError(SystemExit):
+    """A user-facing failure.
+
+    It subclasses SystemExit so the CLI keeps exiting with status 1. ``kind``
+    lets kaal-server map it to an HTTP status: invalid, not_found, conflict or
+    unavailable. ``details`` carries structured context such as the notes an
+    ambiguous query matched.
+    """
+
+    def __init__(self, message: str, *, code: int = 1, kind: str = "invalid", details: dict[str, Any] | None = None) -> None:
+        super().__init__(code)
+        self.message = message
+        self.kind = kind
+        self.details = details or {}
+
+    def __str__(self) -> str:
+        return self.message
+
+
+# When set, handlers hand their result to this list instead of printing it,
+# and errors are raised without being printed. kaal-server uses this so it runs
+# exactly the same handlers as the CLI.
+_RESULT_SINK: ContextVar[list[tuple[Any, dict[str, Any]]] | None] = ContextVar("kaal_result_sink", default=None)
+
+
+def capturing() -> bool:
+    return _RESULT_SINK.get() is not None
+
+
+def die(msg: str, code: int = 1, *, kind: str = "invalid", details: dict[str, Any] | None = None) -> NoReturn:
+    if not capturing():
+        print(f"ERROR: {msg}", file=sys.stderr)
+    raise KaalError(msg, code=code, kind=kind, details=details)
+
+
+def emit(payload: Any, *, indent: int | None = None, ensure_ascii: bool = True) -> None:
+    """Deliver a handler's result: printed as JSON on the CLI, captured by the server."""
+    sink = _RESULT_SINK.get()
+    if sink is not None:
+        sink.append((payload, {"indent": indent, "ensure_ascii": ensure_ascii}))
+        return
+    print(json.dumps(payload, indent=indent, ensure_ascii=ensure_ascii))
+
+
+def call_captured(handler: Callable[[Any], None], args: Any) -> tuple[Any, dict[str, Any]]:
+    """Run a command handler and return (result, json options) instead of printing."""
+    sink: list[tuple[Any, dict[str, Any]]] = []
+    token = _RESULT_SINK.set(sink)
+    try:
+        handler(args)
+    finally:
+        _RESULT_SINK.reset(token)
+    if len(sink) != 1:
+        raise RuntimeError(f"{getattr(handler, '__name__', 'handler')} produced {len(sink)} results; expected one")
+    return sink[0]
 
 
 def now_iso() -> str:
@@ -85,7 +141,7 @@ def key_provider() -> key_providers.KeyProvider:
     try:
         return key_providers.provider_from_env()
     except key_providers.KeyProviderError as error:
-        die(str(error))
+        die(str(error), kind="unavailable")
 
 
 def get_key(create: bool = False) -> bytes:
@@ -93,7 +149,7 @@ def get_key(create: bool = False) -> bytes:
     try:
         return provider.get_key(create=create)
     except key_providers.KeyProviderError as error:
-        die(str(error))
+        die(str(error), kind="unavailable")
 
 
 def import_crypto():
@@ -154,18 +210,57 @@ def secure_write_json(path: Path, data: Any) -> None:
             pass
 
 
+_VAULT_THREAD_LOCK = threading.RLock()
+_VAULT_LOCK_STATE = threading.local()
+
+
+def vault_lock_held() -> bool:
+    return getattr(_VAULT_LOCK_STATE, "depth", 0) > 0
+
+
 @contextmanager
 def vault_capture_lock():
-    """Serialize multi-file browser captures that update the shared index."""
-    lock_path = VAULT / ".medical-capture.lock"
-    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with lock_path.open("a+") as lock_file:
-        os.chmod(lock_path, 0o600)
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    """Serialize every change to the vault.
+
+    The lock is an flock on ``.medical-capture.lock`` (the name predates its
+    wider use), so separate processes such as the CLI, kaal-server and the
+    nightly backup exclude each other. Within one process it is also guarded
+    by a thread lock, and nested use in the same thread is allowed.
+    """
+    if vault_lock_held():
+        _VAULT_LOCK_STATE.depth += 1
         try:
             yield
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            _VAULT_LOCK_STATE.depth -= 1
+        return
+    with _VAULT_THREAD_LOCK:
+        lock_path = VAULT / ".medical-capture.lock"
+        lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with lock_path.open("a+") as lock_file:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            _VAULT_LOCK_STATE.depth = 1
+            try:
+                yield
+            finally:
+                _VAULT_LOCK_STATE.depth = 0
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+vault_lock = vault_capture_lock
+
+
+def holds_vault_lock(handler: Callable[[Any], None]) -> Callable[[Any], None]:
+    """Run a write handler under the vault lock, after checking the vault exists."""
+
+    @functools.wraps(handler)
+    def wrapper(args: Any) -> None:
+        init_if_needed()
+        with vault_capture_lock():
+            handler(args)
+
+    return wrapper
 
 
 def load_index() -> dict[str, Any]:
@@ -200,7 +295,7 @@ def init_vault(args: argparse.Namespace) -> None:
     else:
         result["key_file"] = described["path"]
     result["key_sha256_prefix"] = hashlib.sha256(key).hexdigest()[:12]
-    print(json.dumps(result, indent=2))
+    emit(result, indent=2)
 
 
 def parse_tags(raw: str) -> list[str]:
@@ -465,6 +560,8 @@ def read_stdin_or_arg(value: str | None, body_file: str | None = None) -> str:
         return safe_read_text(Path(body_file).expanduser().resolve())
     if value is not None:
         return value
+    if capturing():
+        die("A body is required.")
     if not sys.stdin.isatty():
         return sys.stdin.read()
     print("Enter note body. Finish with Ctrl-D:", file=sys.stderr)
@@ -493,8 +590,11 @@ def attachment_note_dir(note_id: str) -> Path:
 def find_notes(query: str) -> list[dict[str, Any]]:
     index = load_index()
     notes = index.get("notes", [])
+    by_id = [n for n in notes if n.get("id") == query]
+    if by_id:
+        return by_id
     q = query.lower()
-    matches = [n for n in notes if n.get("id") == query or q in n.get("title", "").lower()]
+    matches = [n for n in notes if q in n.get("title", "").lower()]
     if len(matches) == 1:
         return matches
     exact_title = [n for n in notes if n.get("title", "").lower() == q]
@@ -504,13 +604,18 @@ def find_notes(query: str) -> list[dict[str, Any]]:
 def require_one_note(query: str) -> dict[str, Any]:
     matches = find_notes(query)
     if not matches:
-        die(f"No note found matching: {query}")
+        die(f"No note found matching: {query}", kind="not_found")
     if len(matches) > 1:
-        print("Multiple notes match:", file=sys.stderr)
-        for n in matches:
-            print(f"  {n['id']}  {n.get('title','')}", file=sys.stderr)
-        die("Use the note id to disambiguate.")
+        if not capturing():
+            print_ambiguous_matches(matches)
+        die("Use the note id to disambiguate.", kind="conflict", details={"matches": [{"id": n["id"], "title": n.get("title", "")} for n in matches]})
     return matches[0]
+
+
+def print_ambiguous_matches(matches: list[dict[str, Any]]) -> None:
+    print("Multiple notes match:", file=sys.stderr)
+    for n in matches:
+        print(f"  {n['id']}  {n.get('title','')}", file=sys.stderr)
 
 
 def redact_value(match: re.Match[str]) -> str:
@@ -582,11 +687,12 @@ def create_note(title: str, body: str, *, tags: list[str] | None = None, sensiti
     return meta
 
 
+@holds_vault_lock
 def add_note(args: argparse.Namespace) -> None:
     init_if_needed()
     body = read_stdin_or_arg(args.body, getattr(args, "body_file", None))
     meta = create_note(args.title, body, tags=parse_tags(args.tags), sensitivity=getattr(args, "sensitivity", "auto"))
-    print(json.dumps({
+    emit({
         "status": "created",
         "id": meta["id"],
         "title": meta["title"],
@@ -595,12 +701,12 @@ def add_note(args: argparse.Namespace) -> None:
         "sensitivity": meta["sensitivity"],
         "storage": meta["storage"],
         "classification_reasons": meta.get("classification", {}).get("reasons", []),
-    }, indent=2, ensure_ascii=False))
+    }, indent=2, ensure_ascii=False)
 
 
 def init_if_needed() -> None:
     if not VAULT.exists() or not INDEX_PATH.exists():
-        die("Vault not initialized. Run: secure-notes init")
+        die("Vault not initialized. Run: secure-notes init", kind="unavailable")
 
 
 def load_note(note_meta: dict[str, Any]) -> dict[str, Any]:
@@ -633,9 +739,13 @@ def list_notes(args: argparse.Namespace) -> None:
     notes = load_index().get("notes", [])
     if args.tag:
         notes = [n for n in notes if args.tag.lstrip("#") in n.get("tags", [])]
-    if args.json:
-        print(json.dumps(notes, indent=2, ensure_ascii=False))
+    if args.json or capturing():
+        emit(notes, indent=2, ensure_ascii=False)
         return
+    print_note_lines(notes)
+
+
+def print_note_lines(notes: list[dict[str, Any]]) -> None:
     for n in notes:
         tags = " ".join(f"#{t}" for t in n.get("tags", []))
         att = len(n.get("attachments", []))
@@ -656,7 +766,7 @@ def library_note_meta(index: dict[str, Any], note_id: str, *, allow_trashed: boo
         if not allow_trashed and note.get("trashed_at"):
             die("Restore this Library note before changing it.")
         return note
-    die("Library note not found.")
+    die("Library note not found.", kind="not_found")
 
 
 def library_attachment_summary(attachment: dict[str, Any]) -> dict[str, Any]:
@@ -678,14 +788,14 @@ def library_list(args: argparse.Namespace) -> None:
     trash = bool(getattr(args, "trash", False))
     notes = [note for note in load_index().get("notes", []) if not is_medical_receipt(note) and bool(note.get("trashed_at")) == trash]
     notes.sort(key=lambda note: note.get("updated", note.get("created", "")), reverse=True)
-    print(json.dumps([library_note_summary(note) for note in notes[:limit]], ensure_ascii=False))
+    emit([library_note_summary(note) for note in notes[:limit]], ensure_ascii=False)
 
 
 def library_show(args: argparse.Namespace) -> None:
     init_if_needed()
     meta = library_note_meta(load_index(), args.note_id)
     note = load_note(meta)
-    print(json.dumps({"status": "ok", "note": {**library_note_summary(meta), "body": note.get("body", "")}}, ensure_ascii=False))
+    emit({"status": "ok", "note": {**library_note_summary(meta), "body": note.get("body", "")}}, ensure_ascii=False)
 
 
 def library_create(args: argparse.Namespace) -> None:
@@ -700,7 +810,7 @@ def library_create(args: argparse.Namespace) -> None:
         source["title"] = source_title
     with vault_capture_lock():
         meta = create_note(args.title.strip(), body, tags=parse_tags(args.tags), sensitivity="auto", source=source if len(source) > 1 else None)
-    print(json.dumps({"status": "created", "note": library_note_summary(meta)}, ensure_ascii=False))
+    emit({"status": "created", "note": library_note_summary(meta)}, ensure_ascii=False)
 
 
 def write_library_note(meta: dict[str, Any], note: dict[str, Any]) -> None:
@@ -738,7 +848,7 @@ def library_update(args: argparse.Namespace) -> None:
         note["updated"] = now_iso()
         write_library_note(meta, note)
         save_index(index)
-    print(json.dumps({"status": "updated", "note": library_note_summary(meta)}, ensure_ascii=False))
+    emit({"status": "updated", "note": library_note_summary(meta)}, ensure_ascii=False)
 
 
 def library_trash(args: argparse.Namespace) -> None:
@@ -751,7 +861,7 @@ def library_trash(args: argparse.Namespace) -> None:
         meta["trashed_at"] = now_iso()
         meta["updated"] = meta["trashed_at"]
         save_index(index)
-    print(json.dumps({"status": "trashed", "id": meta["id"], "title": meta["title"]}, ensure_ascii=False))
+    emit({"status": "trashed", "id": meta["id"], "title": meta["title"]}, ensure_ascii=False)
 
 
 def library_restore(args: argparse.Namespace) -> None:
@@ -764,7 +874,7 @@ def library_restore(args: argparse.Namespace) -> None:
         meta.pop("trashed_at", None)
         meta["updated"] = now_iso()
         save_index(index)
-    print(json.dumps({"status": "restored", "id": meta["id"], "title": meta["title"]}, ensure_ascii=False))
+    emit({"status": "restored", "id": meta["id"], "title": meta["title"]}, ensure_ascii=False)
 
 
 def library_purge(args: argparse.Namespace) -> None:
@@ -807,7 +917,7 @@ def library_purge(args: argparse.Namespace) -> None:
             purge_dir.parent.rmdir()
         except OSError:
             pass
-    print(json.dumps({"status": "purged", "id": note_id, "title": meta["title"]}, ensure_ascii=False))
+    emit({"status": "purged", "id": note_id, "title": meta["title"]}, ensure_ascii=False)
 
 
 def library_attach(args: argparse.Namespace) -> None:
@@ -819,7 +929,7 @@ def library_attach(args: argparse.Namespace) -> None:
         index = load_index()
         meta = library_note_meta(index, args.note_id, allow_trashed=False)
         attachment = attach_file_to_note(meta, src, sensitivity="auto", extract=True, ocr=True, receipt=False)
-    print(json.dumps({"status": "attached", "id": meta["id"], "attachment": library_attachment_summary(attachment)}, ensure_ascii=False))
+    emit({"status": "attached", "id": meta["id"], "attachment": library_attachment_summary(attachment)}, ensure_ascii=False)
 
 
 def library_extracted_text(args: argparse.Namespace) -> None:
@@ -839,7 +949,7 @@ def library_extracted_text(args: argparse.Namespace) -> None:
         text = decrypt_payload(payload["encrypted"], aad=f"{meta['id']}:{att['id']}:extracted.md".encode()).decode()
     else:
         die("No extracted text is available. Run extraction first.")
-    print(json.dumps({"status": "ok", "id": meta["id"], "attachment_id": att["id"], "text": text}, ensure_ascii=False))
+    emit({"status": "ok", "id": meta["id"], "attachment_id": att["id"], "text": text}, ensure_ascii=False)
 
 
 def library_extract(args: argparse.Namespace) -> None:
@@ -858,19 +968,23 @@ def show_note(args: argparse.Namespace) -> None:
     body = note.get("body", "")
     if not args.full:
         body = redact_text(body)
-    if args.json:
-        out = {**{k: note.get(k) for k in ["id", "title", "tags", "created", "updated"]}, "body": body, "redacted": not args.full, "attachments": meta.get("attachments", [])}
-        print(json.dumps(out, indent=2, ensure_ascii=False))
+    out = {**{k: note.get(k) for k in ["id", "title", "tags", "created", "updated"]}, "body": body, "redacted": not args.full, "attachments": meta.get("attachments", [])}
+    if args.json or capturing():
+        emit(out, indent=2, ensure_ascii=False)
     else:
-        print(f"# {note.get('title','')} ({note.get('id','')})")
-        if note.get("tags"):
-            print("Tags: " + ", ".join(note["tags"]))
-        if meta.get("attachments"):
-            print("Attachments: " + ", ".join(a.get("name", "") for a in meta.get("attachments", [])))
-        print()
-        print(body)
-        if not args.full:
-            print("\n[redacted output; use --full only when you explicitly need plaintext]", file=sys.stderr)
+        print_note_text(out)
+
+
+def print_note_text(out: dict[str, Any]) -> None:
+    print(f"# {out.get('title') or ''} ({out.get('id') or ''})")
+    if out.get("tags"):
+        print("Tags: " + ", ".join(out["tags"]))
+    if out.get("attachments"):
+        print("Attachments: " + ", ".join(a.get("name", "") for a in out["attachments"]))
+    print()
+    print(out.get("body", ""))
+    if out.get("redacted"):
+        print("\n[redacted output; use --full only when you explicitly need plaintext]", file=sys.stderr)
 
 
 def search_notes(args: argparse.Namespace) -> None:
@@ -878,9 +992,10 @@ def search_notes(args: argparse.Namespace) -> None:
     q = args.query.lower()
     notes = load_index().get("notes", [])
     results = [n for n in notes if q in n.get("title", "").lower() or any(q in t.lower() for t in n.get("tags", []))]
-    print(json.dumps(results, indent=2, ensure_ascii=False))
+    emit(results, indent=2, ensure_ascii=False)
 
 
+@holds_vault_lock
 def append_note(args: argparse.Namespace) -> None:
     init_if_needed()
     meta = require_one_note(args.query)
@@ -917,7 +1032,7 @@ def append_note(args: argparse.Namespace) -> None:
             n["sensitivity"] = classification["sensitivity"]
             n["classification"] = classification
     save_index(index)
-    print(json.dumps({"status": "appended", "id": note["id"], "title": note.get("title", ""), "storage": storage, "sensitivity": classification["sensitivity"]}, indent=2, ensure_ascii=False))
+    emit({"status": "appended", "id": note["id"], "title": note.get("title", ""), "storage": storage, "sensitivity": classification["sensitivity"]}, indent=2, ensure_ascii=False)
 
 
 def extract_field(body: str, field: str) -> str:
@@ -938,16 +1053,21 @@ def extract_field(body: str, field: str) -> str:
     return m.group(1).strip()
 
 
-def copy_field(args: argparse.Namespace) -> None:
+def note_field_value(query: str, field: str) -> tuple[str, str]:
+    """Return (note id, value) for a ``field: value`` line in one note."""
     init_if_needed()
-    meta = require_one_note(args.query)
+    meta = require_one_note(query)
     note = load_note(meta)
-    value = extract_field(note.get("body", ""), args.field)
+    return note.get("id") or meta["id"], extract_field(note.get("body", ""), field)
+
+
+def copy_field(args: argparse.Namespace) -> None:
+    note_id, value = note_field_value(args.query, args.field)
     pbcopy = shutil.which("pbcopy")
     if not pbcopy:
         die("pbcopy not found; cannot copy to clipboard.")
     subprocess.run([pbcopy], input=value, text=True, check=True)
-    print(json.dumps({"status": "copied", "note": note.get("id"), "field": args.field, "characters": len(value)}, indent=2))
+    emit({"status": "copied", "note": note_id, "field": args.field, "characters": len(value)}, indent=2)
 
 
 def safe_attachment_filename(name: str, att_id: str, *, max_bytes: int = 180) -> str:
@@ -1036,6 +1156,7 @@ def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "
     return attachment_meta
 
 
+@holds_vault_lock
 def attach_file(args: argparse.Namespace) -> None:
     init_if_needed()
     src = Path(args.file).expanduser().resolve()
@@ -1049,7 +1170,7 @@ def attach_file(args: argparse.Namespace) -> None:
         extract=getattr(args, "extract", False),
         ocr=getattr(args, "ocr", False),
     )
-    print(json.dumps({
+    emit({
         "status": "attached",
         "note": meta["id"],
         "attachmentId": attachment_meta["id"],
@@ -1059,29 +1180,38 @@ def attach_file(args: argparse.Namespace) -> None:
         "sensitivity": attachment_meta["sensitivity"],
         "extracted_markdown": attachment_meta["extracted_markdown"],
         "classification_reasons": attachment_meta.get("classification", {}).get("reasons", []),
-    }, indent=2, ensure_ascii=False))
+    }, indent=2, ensure_ascii=False)
+
+
+def match_attachment(meta: dict[str, Any], query: str) -> dict[str, Any]:
+    """Find one attachment of a note by exact id, else by unique name substring."""
+    attachments = meta.get("attachments", [])
+    by_id = [a for a in attachments if a.get("id") == query]
+    if by_id:
+        return by_id[0]
+    matches = [a for a in attachments if query.lower() in a.get("name", "").lower()]
+    if not matches:
+        die(f"No attachment matching: {query}", kind="not_found")
+    if len(matches) > 1:
+        die("Multiple attachments match; use attachment id.", kind="conflict")
+    return matches[0]
 
 
 def export_attachment(args: argparse.Namespace) -> None:
     init_if_needed()
     meta = require_one_note(args.query)
     nid = meta["id"]
-    attachments = meta.get("attachments", [])
-    matches = [a for a in attachments if a.get("id") == args.attachment or args.attachment.lower() in a.get("name", "").lower()]
-    if not matches:
-        die(f"No attachment matching: {args.attachment}")
-    if len(matches) > 1:
-        die("Multiple attachments match; use attachment id.")
-    att = matches[0]
+    att = match_attachment(meta, args.attachment)
     plaintext = attachment_original_bytes(meta, att)
     out = Path(args.output).expanduser().resolve() if args.output else Path.cwd() / att.get("name", "attachment")
     if out.exists() and not args.force:
         die(f"Output exists: {out}; pass --force to overwrite.")
     out.write_bytes(plaintext)
     os.chmod(out, 0o600)
-    print(json.dumps({"status": "exported", "path": str(out), "bytes": len(plaintext), "sha256": hashlib.sha256(plaintext).hexdigest()}, indent=2))
+    emit({"status": "exported", "path": str(out), "bytes": len(plaintext), "sha256": hashlib.sha256(plaintext).hexdigest()}, indent=2)
 
 
+@holds_vault_lock
 def ocr_attachments(args: argparse.Namespace) -> None:
     init_if_needed()
     index = load_index()
@@ -1160,7 +1290,7 @@ def ocr_attachments(args: argparse.Namespace) -> None:
                 errors.append({"note_id": note.get("id", ""), "attachment_id": att.get("id", ""), "name": att.get("name", ""), "error": str(e)})
     if not dry_run and (extracted or no_text or skipped_existing or errors):
         save_index(index)
-    print(json.dumps({
+    emit({
         "status": "dry-run" if dry_run else "updated",
         "scanned_attachments": scanned,
         "eligible_attachments": eligible,
@@ -1169,7 +1299,7 @@ def ocr_attachments(args: argparse.Namespace) -> None:
         "skipped_existing": skipped_existing,
         "skipped_unsupported": skipped_unsupported,
         "errors": errors,
-    }, indent=2, ensure_ascii=False))
+    }, indent=2, ensure_ascii=False)
 
 
 def infer_receipt_fields(extracted_text: str) -> dict[str, str]:
@@ -1371,7 +1501,7 @@ def browser_capture(args: argparse.Namespace) -> None:
             index["notes"] = [note for note in index.get("notes", []) if note.get("id") != meta["id"]]
             save_index(index)
             raise
-    print(json.dumps({
+    emit({
         "status": "captured",
         "id": meta["id"],
         "title": meta["title"],
@@ -1380,14 +1510,17 @@ def browser_capture(args: argparse.Namespace) -> None:
         "attachment_id": attachment["id"],
         "attachment_name": attachment["name"],
         "extracted_markdown": attachment["extracted_markdown"],
-    }, indent=2, ensure_ascii=False))
+    }, indent=2, ensure_ascii=False)
 
 
 def browser_capture_text(args: argparse.Namespace) -> None:
     """Store browser-selected text as a normal Kaal note read from stdin."""
     init_if_needed()
     max_chars = 100_000
-    selected_text = sys.stdin.read(max_chars + 1).strip()
+    given = getattr(args, "text", None)
+    if given is None and capturing():
+        die("Selected browser text is required")
+    selected_text = (given if given is not None else sys.stdin.read(max_chars + 1)).strip()
     if not selected_text:
         die("Selected browser text is required")
     if len(selected_text) > max_chars:
@@ -1413,14 +1546,14 @@ def browser_capture_text(args: argparse.Namespace) -> None:
     body_lines.extend(["", "## Selected text", "", selected_text, ""])
     with vault_capture_lock():
         meta = create_note(title, "\n".join(body_lines), tags=["browser-capture", "browser-selection"], sensitivity="auto", source=source)
-    print(json.dumps({
+    emit({
         "status": "captured",
         "type": "browser-selection",
         "id": meta["id"],
         "title": meta["title"],
         "storage": meta["storage"],
         "sensitivity": meta["sensitivity"],
-    }, indent=2, ensure_ascii=False))
+    }, indent=2, ensure_ascii=False)
 
 
 def medical_capture(args: argparse.Namespace) -> None:
@@ -1498,7 +1631,7 @@ def medical_capture(args: argparse.Namespace) -> None:
         saved["receipt"] = build_receipt_state(extracted_text, docling_json)
         saved["updated"] = now_iso()
         save_index(index)
-    print(json.dumps({
+    emit({
         "status": "captured",
         "id": meta["id"],
         "title": meta["title"],
@@ -1507,7 +1640,7 @@ def medical_capture(args: argparse.Namespace) -> None:
         "attachment_id": attachment["id"],
         "attachment_name": attachment["name"],
         "extracted_markdown": attachment["extracted_markdown"],
-    }, indent=2, ensure_ascii=False))
+    }, indent=2, ensure_ascii=False)
 
 
 def medical_list(args: argparse.Namespace) -> None:
@@ -1524,12 +1657,10 @@ def medical_list(args: argparse.Namespace) -> None:
     limit = getattr(args, "limit", 0) or 0
     if limit:
         notes = notes[:limit]
-    if getattr(args, "json", False):
-        print(json.dumps(notes, indent=2, ensure_ascii=False))
+    if getattr(args, "json", False) or capturing():
+        emit(notes, indent=2, ensure_ascii=False)
         return
-    for note in notes:
-        tags = " ".join(f"#{tag}" for tag in note.get("tags", []))
-        print(f"{note['id']}  {note.get('updated', '')}  {note.get('title', '')}  {tags}  attachments:{len(note.get('attachments', []))}")
+    print_note_lines(notes)
 
 
 def medical_receipt_meta(index: dict[str, Any], note_id: str) -> dict[str, Any]:
@@ -1538,7 +1669,7 @@ def medical_receipt_meta(index: dict[str, Any], note_id: str) -> dict[str, Any]:
             if "medical" not in note.get("tags", []) or "receipt" not in note.get("tags", []):
                 die("That note is not a medical receipt.")
             return note
-    die("Medical receipt not found.")
+    die("Medical receipt not found.", kind="not_found")
 
 
 def medical_review(args: argparse.Namespace) -> None:
@@ -1558,7 +1689,7 @@ def medical_review(args: argparse.Namespace) -> None:
         meta["reviewed_at"] = now_iso()
         meta["updated"] = meta["reviewed_at"]
         save_index(index)
-    print(json.dumps({"status": "reviewed", "id": meta["id"], "title": meta["title"]}, indent=2, ensure_ascii=False))
+    emit({"status": "reviewed", "id": meta["id"], "title": meta["title"]}, indent=2, ensure_ascii=False)
 
 
 def medical_reopen(args: argparse.Namespace) -> None:
@@ -1570,7 +1701,7 @@ def medical_reopen(args: argparse.Namespace) -> None:
         meta.pop("reviewed_at", None)
         meta["updated"] = now_iso()
         save_index(index)
-    print(json.dumps({"status": "inbox", "id": meta["id"], "title": meta["title"]}, indent=2, ensure_ascii=False))
+    emit({"status": "inbox", "id": meta["id"], "title": meta["title"]}, indent=2, ensure_ascii=False)
 
 
 def medical_extracted_text(args: argparse.Namespace) -> None:
@@ -1590,7 +1721,7 @@ def medical_extracted_text(args: argparse.Namespace) -> None:
         text = decrypt_payload(payload["encrypted"], aad=f"{meta['id']}:{att['id']}:extracted.md".encode()).decode()
     else:
         die("No extracted text is available. Run extraction first.")
-    print(json.dumps({"status": "ok", "id": meta["id"], "attachment_id": att["id"], "text": text}, ensure_ascii=False))
+    emit({"status": "ok", "id": meta["id"], "attachment_id": att["id"], "text": text}, ensure_ascii=False)
 
 
 def medical_export_original(args: argparse.Namespace) -> None:
@@ -1618,14 +1749,14 @@ def medical_export_original(args: argparse.Namespace) -> None:
             os.close(file_descriptor)
         output.unlink(missing_ok=True)
         raise
-    print(json.dumps({
+    emit({
         "status": "exported",
         "id": meta["id"],
         "attachment_id": attachment["id"],
         "path": str(output),
         "bytes": len(plaintext),
         "sha256": hashlib.sha256(plaintext).hexdigest(),
-    }, ensure_ascii=False))
+    }, ensure_ascii=False)
 
 
 def medical_update(args: argparse.Namespace) -> None:
@@ -1652,7 +1783,7 @@ def medical_update(args: argparse.Namespace) -> None:
         receipt["manually_updated_at"] = now_iso()
         meta["updated"] = receipt["manually_updated_at"]
         save_index(index)
-    print(json.dumps({"status": "updated", "id": meta["id"], "fields": receipt["fields"]}, ensure_ascii=False))
+    emit({"status": "updated", "id": meta["id"], "fields": receipt["fields"]}, ensure_ascii=False)
 
 
 def medical_report(args: argparse.Namespace) -> None:
@@ -1672,7 +1803,7 @@ def medical_report(args: argparse.Namespace) -> None:
         try: total += float(fields.get("amount") or 0)
         except ValueError: pass
         rows.append({"id": note["id"], "title": note.get("title", ""), "fields": fields})
-    print(json.dumps({"status": "ok", "count": len(rows), "total_amount": f"{total:.2f}", "receipts": rows}, ensure_ascii=False))
+    emit({"status": "ok", "count": len(rows), "total_amount": f"{total:.2f}", "receipts": rows}, ensure_ascii=False)
 
 
 def medical_trash(args: argparse.Namespace) -> None:
@@ -1686,7 +1817,7 @@ def medical_trash(args: argparse.Namespace) -> None:
         meta["trashed_at"] = now_iso()
         meta["updated"] = meta["trashed_at"]
         save_index(index)
-    print(json.dumps({"status": "trashed", "id": meta["id"], "title": meta["title"], "attachments": len(meta.get("attachments", []))}, indent=2, ensure_ascii=False))
+    emit({"status": "trashed", "id": meta["id"], "title": meta["title"], "attachments": len(meta.get("attachments", []))}, indent=2, ensure_ascii=False)
 
 
 def medical_restore(args: argparse.Namespace) -> None:
@@ -1700,7 +1831,7 @@ def medical_restore(args: argparse.Namespace) -> None:
         meta.pop("trashed_at", None)
         meta["updated"] = now_iso()
         save_index(index)
-    print(json.dumps({"status": "restored", "id": meta["id"], "title": meta["title"]}, indent=2, ensure_ascii=False))
+    emit({"status": "restored", "id": meta["id"], "title": meta["title"]}, indent=2, ensure_ascii=False)
 
 
 def medical_purge(args: argparse.Namespace) -> None:
@@ -1754,7 +1885,7 @@ def medical_purge(args: argparse.Namespace) -> None:
             purge_dir.parent.rmdir()
         except OSError:
             pass
-    print(json.dumps({"status": "purged", "id": note_id, "title": meta["title"]}, indent=2, ensure_ascii=False))
+    emit({"status": "purged", "id": note_id, "title": meta["title"]}, indent=2, ensure_ascii=False)
 
 
 def medical_purge_bulk(args: argparse.Namespace) -> None:
@@ -1812,9 +1943,10 @@ def medical_purge_bulk(args: argparse.Namespace) -> None:
             batch_dir.parent.rmdir()
         except OSError:
             pass
-    print(json.dumps({"status": "purged", "count": len(note_ids), "ids": note_ids}, indent=2, ensure_ascii=False))
+    emit({"status": "purged", "count": len(note_ids), "ids": note_ids}, indent=2, ensure_ascii=False)
 
 
+@holds_vault_lock
 def delete_note(args: argparse.Namespace) -> None:
     init_if_needed()
     meta = require_one_note(args.query)
@@ -1827,7 +1959,7 @@ def delete_note(args: argparse.Namespace) -> None:
     index = load_index()
     index["notes"] = [n for n in index.get("notes", []) if n.get("id") != nid]
     save_index(index)
-    print(json.dumps({"status": "deleted", "id": nid}, indent=2))
+    emit({"status": "deleted", "id": nid}, indent=2)
 
 
 def status(args: argparse.Namespace) -> None:
@@ -1837,7 +1969,7 @@ def status(args: argparse.Namespace) -> None:
         has_key = provider.key_exists()
     except key_providers.KeyProviderError:
         provider_name, has_key = "unconfigured", False
-    print(json.dumps({
+    emit({
         "vault": str(VAULT),
         "vault_exists": VAULT.exists(),
         "index_exists": INDEX_PATH.exists(),
@@ -1845,7 +1977,7 @@ def status(args: argparse.Namespace) -> None:
         "key_exists": has_key,
         "keychain_key_exists": has_key if provider_name == "keychain" else False,
         "notes": len(load_index().get("notes", [])) if INDEX_PATH.exists() else 0,
-    }, indent=2))
+    }, indent=2)
 
 
 def classify_command(args: argparse.Namespace) -> None:
@@ -1855,7 +1987,7 @@ def classify_command(args: argparse.Namespace) -> None:
     else:
         text = read_stdin_or_arg(None)
         context = ""
-    print(json.dumps(classify_text(text, context=context), indent=2, ensure_ascii=False))
+    emit(classify_text(text, context=context), indent=2, ensure_ascii=False)
 
 
 JOPLIN_RESOURCE_LINK_RE = re.compile(r":/([0-9a-fA-F]{32})")
@@ -2031,6 +2163,7 @@ def note_has_resource_attachment(note_meta: dict[str, Any], rid: str, blob: Path
     return False
 
 
+@holds_vault_lock
 def import_joplin_raw(args: argparse.Namespace) -> None:
     init_if_needed()
     export_dir = Path(args.path).expanduser().resolve()
@@ -2084,7 +2217,7 @@ def import_joplin_raw(args: argparse.Namespace) -> None:
             "pending_attachments": planned_attachments,
         })
     if args.dry_run:
-        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        emit(summary, indent=2, ensure_ascii=False)
         return
 
     imported_notes = 0
@@ -2130,7 +2263,7 @@ def import_joplin_raw(args: argparse.Namespace) -> None:
     if incremental:
         summary["skipped_existing_notes"] = skipped_notes
         summary["skipped_existing_attachments"] = skipped_attachments
-    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    emit(summary, indent=2, ensure_ascii=False)
 
 
 def build_parser() -> argparse.ArgumentParser:
