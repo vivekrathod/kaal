@@ -2203,6 +2203,85 @@ def import_vault(args: argparse.Namespace) -> None:
     verify, _ = call_captured(verify_vault, SimpleNamespace(deep=False))
     emit({"status": "imported", "vault": str(VAULT), "files": files, "notes": verify["notes"], "verify": verify}, indent=2)
 
+
+BACKUP_NAME_RE = re.compile(r"^\d{8}T\d{6}Z$")
+
+
+def _mkdir_700(path: Path) -> None:
+    path.mkdir(mode=0o700)
+    os.chmod(path, 0o700)
+
+
+def backup_vault(args: argparse.Namespace) -> None:
+    """Copy the vault, as stored, into a new dated folder under --dest.
+
+    Runs under the vault lock so the copy is consistent. Files unchanged since
+    the newest earlier backup (same size and modification time) are hard links
+    to it, so each night costs only what changed. Keeps the newest --keep
+    backups and deletes older ones; only folders named like a backup
+    (YYYYMMDDTHHMMSSZ) are ever removed. Prints counts, never names.
+    """
+    init_if_needed()
+    raw_dest = getattr(args, "dest", "") or os.environ.get("KAAL_BACKUP_DIR", "")
+    if not raw_dest:
+        die("Pass --dest or set KAAL_BACKUP_DIR.")
+    dest = Path(raw_dest).expanduser().resolve()
+    if dest.is_relative_to(VAULT.resolve()):
+        die("Backups must live outside the vault.")
+    keep = int(getattr(args, "keep", 14))
+    if keep < 1:
+        die("--keep must be at least 1.")
+    if not dest.exists():
+        dest.mkdir(mode=0o700, parents=True)
+    os.chmod(dest, 0o700)
+    for stale in dest.glob(".incomplete-*"):
+        if stale.is_dir() and BACKUP_NAME_RE.match(stale.name.removeprefix(".incomplete-")):
+            shutil.rmtree(stale)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    final = dest / stamp
+    if final.exists():
+        die("A backup with this timestamp already exists; run it again in a second.", kind="conflict")
+    work = dest / f".incomplete-{stamp}"
+    files = copied = linked = total_bytes = 0
+    with vault_capture_lock():
+        complete = sorted(p for p in dest.iterdir() if p.is_dir() and BACKUP_NAME_RE.match(p.name))
+        previous = complete[-1] if complete else None
+        _mkdir_700(work)
+        for root, dirs, names in os.walk(VAULT):
+            rel_root = Path(root).relative_to(VAULT)
+            top = rel_root == Path(".")
+            dirs[:] = sorted(d for d in dirs if not (top and d in EXPORT_EXCLUDED) and not os.path.islink(os.path.join(root, d)))
+            for name in dirs:
+                _mkdir_700(work / rel_root / name)
+            for name in sorted(names):
+                source = Path(root) / name
+                if (top and name in EXPORT_EXCLUDED) or source.is_symlink() or not source.is_file():
+                    continue
+                rel = rel_root / name
+                target = work / rel
+                info = source.stat()
+                earlier = previous / rel if previous else None
+                if earlier is not None and earlier.is_file() and not earlier.is_symlink():
+                    earlier_info = earlier.stat()
+                    if (earlier_info.st_size, earlier_info.st_mtime_ns) == (info.st_size, info.st_mtime_ns):
+                        os.link(earlier, target)
+                        linked += 1
+                        files += 1
+                        total_bytes += info.st_size
+                        continue
+                shutil.copy2(source, target)
+                os.chmod(target, 0o600)
+                copied += 1
+                files += 1
+                total_bytes += info.st_size
+    os.rename(work, final)
+    complete = sorted(p for p in dest.iterdir() if p.is_dir() and BACKUP_NAME_RE.match(p.name))
+    expired = complete[:-keep]
+    for old in expired:
+        shutil.rmtree(old)
+    emit({"status": "ok", "backup": str(final), "files": files, "bytes": total_bytes, "copied": copied, "linked": linked,
+          "kept": len(complete) - len(expired), "pruned": len(expired)}, indent=2)
+
 @holds_vault_lock
 def delete_note(args: argparse.Namespace) -> None:
     init_if_needed()

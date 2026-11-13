@@ -211,6 +211,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--deep", action="store_true", help="Also decrypt every encrypted note and attachment and check attachment hashes")
     sp.set_defaults(func=core.verify_vault)
 
+    sp = sub.add_parser("backup", help="Copy the vault into a new dated folder, hard-linking unchanged files, and prune old copies")
+    sp.add_argument("--dest", default="", help="Backup folder (default: KAAL_BACKUP_DIR)")
+    sp.add_argument("--keep", type=int, default=14, help="How many backups to keep (default 14)")
+    sp.set_defaults(func=core.backup_vault)
+
     sp = sub.add_parser("export", help="Write the whole vault as stored (encrypted parts stay encrypted) to a new tar file")
     sp.add_argument("--output", required=True)
     sp.set_defaults(func=core.export_vault)
