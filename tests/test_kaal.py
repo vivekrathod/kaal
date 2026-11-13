@@ -12,10 +12,7 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("kaal_module", ROOT / "bin" / "secure-notes.py")
-kaal = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(kaal)
+import kaal.core as kaal  # noqa: E402
 
 
 DUMMY_SSN = "078-05-1120"

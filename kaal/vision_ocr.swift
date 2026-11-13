@@ -6,7 +6,7 @@ import Vision
 
 let arguments = CommandLine.arguments
 if arguments.count != 2 {
-    FileHandle.standardError.write(Data("usage: kaal-vision-ocr.swift <pdf>\n".utf8))
+    FileHandle.standardError.write(Data("usage: vision_ocr.swift <pdf>\n".utf8))
     exit(64)
 }
 let url = URL(fileURLWithPath: arguments[1])

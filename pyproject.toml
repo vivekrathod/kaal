@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kaal"
+dynamic = ["version"]
+description = "A small encrypted notes vault with a local CLI and an HTTP API"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "cryptography>=42",
+]
+
+[project.optional-dependencies]
+server = [
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "python-multipart>=0.0.9",
+]
+extract = [
+  "docling>=2",
+  "markitdown>=0.1",
+]
+dev = [
+  "pytest>=8",
+  "httpx>=0.27",
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "python-multipart>=0.0.9",
+]
+
+[project.scripts]
+kaal = "kaal.cli:main"
+kaal-server = "kaal.server:main"
+
+[tool.setuptools]
+packages = ["kaal"]
+
+[tool.setuptools.dynamic]
+version = { attr = "kaal.__version__" }
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
