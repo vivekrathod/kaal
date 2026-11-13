@@ -39,6 +39,13 @@ from kaal import __version__, core
 
 DEFAULT_CONFIG = "~/.config/kaal/config.toml"
 TIMEOUT_SECONDS = 600
+# Used when Python's own defaults load no CA certificates, as with python.org
+# builds on macOS until their "Install Certificates" step has been run.
+SYSTEM_CA_BUNDLES = (
+    "/etc/ssl/cert.pem",                    # macOS, Alpine
+    "/etc/ssl/certs/ca-certificates.crt",   # Debian, Ubuntu
+    "/etc/pki/tls/certs/ca-bundle.crt",     # Fedora, RHEL
+)
 
 
 class ClientConfigError(Exception):
@@ -105,10 +112,24 @@ def remote_config(environ: Mapping[str, str] | None = None) -> Remote | None:
     return Remote(url=url, token=token, ca_file=str(Path(ca_file).expanduser()) if ca_file else None)
 
 
+def tls_context(ca_file: str | None, *, base: ssl.SSLContext | None = None, bundles: tuple[str, ...] = SYSTEM_CA_BUNDLES) -> ssl.SSLContext:
+    """A verifying TLS context: an explicit CA file, else Python's defaults,
+    else the first system CA bundle found when the defaults hold no CAs."""
+    if ca_file:
+        return ssl.create_default_context(cafile=ca_file)
+    context = base or ssl.create_default_context()
+    if context.cert_store_stats().get("x509_ca", 0) == 0:
+        for bundle in bundles:
+            if os.path.isfile(bundle):
+                context.load_verify_locations(cafile=bundle)
+                break
+    return context
+
+
 class Api:
     def __init__(self, remote: Remote) -> None:
         self.remote = remote
-        self._ssl = ssl.create_default_context(cafile=remote.ca_file) if remote.url.startswith("https") else None
+        self._ssl = tls_context(remote.ca_file) if remote.url.startswith("https") else None
 
     def call(self, method: str, path: str, *, params: dict[str, Any] | None = None, json_body: Any = None,
              file: Path | None = None, form: dict[str, Any] | None = None, raw: bool = False) -> Any:

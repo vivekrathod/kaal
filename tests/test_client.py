@@ -237,3 +237,36 @@ class RemoteConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TlsContextTests(unittest.TestCase):
+    """python.org builds on macOS ship with no CA certificates loaded."""
+
+    def ca_bundle(self):
+        import certifi
+        return certifi.where()
+
+    def test_falls_back_to_a_system_bundle_when_python_has_no_cas(self):
+        import ssl
+        empty = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        self.assertEqual(empty.cert_store_stats()["x509_ca"], 0)
+        context = client.tls_context(None, base=empty, bundles=("/nonexistent/ca.pem", self.ca_bundle()))
+        self.assertGreater(context.cert_store_stats()["x509_ca"], 0)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+
+    def test_keeps_python_defaults_when_they_have_cas(self):
+        import ssl
+        base = ssl.create_default_context(cafile=self.ca_bundle())
+        before = base.cert_store_stats()["x509_ca"]
+        context = client.tls_context(None, base=base, bundles=("/nonexistent/ca.pem",))
+        self.assertIs(context, base)
+        self.assertEqual(context.cert_store_stats()["x509_ca"], before)
+
+    def test_explicit_ca_file_wins(self):
+        context = client.tls_context(self.ca_bundle(), bundles=())
+        self.assertGreater(context.cert_store_stats()["x509_ca"], 0)
+
+    def test_https_api_uses_the_fallback(self):
+        api = client.Api(client.Remote(url="https://storage.example.ts.net", token="kaal_a_b"))
+        self.assertGreater(api._ssl.cert_store_stats()["x509_ca"], 0)
