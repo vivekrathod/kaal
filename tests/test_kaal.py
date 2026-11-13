@@ -1,4 +1,3 @@
-import importlib.util
 import hashlib
 import io
 import json
@@ -12,6 +11,7 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
+import kaal.cli as kaal_cli  # noqa: E402
 import kaal.core as kaal  # noqa: E402
 
 
@@ -1233,7 +1233,7 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(reviewed["receipt"]["field_sources"]["service_date"], "confirmed")
 
     def test_build_parser_parses_representative_commands(self):
-        parser = kaal.build_parser()
+        parser = kaal_cli.build_parser()
         self.assertEqual(parser.parse_args(["add", "--title", "T", "--body", "B"]).func, kaal.add_note)
         self.assertEqual(parser.parse_args(["classify", "file.txt"]).func, kaal.classify_command)
         self.assertEqual(parser.parse_args(["list", "--json"]).func, kaal.list_notes)
@@ -1260,7 +1260,7 @@ class KaalFeatureTests(unittest.TestCase):
         original_argv = sys.argv
         try:
             sys.argv = ["kaal", "list", "--json"]
-            _result, stdout, _stderr = self.capture_call(kaal.main)
+            _result, stdout, _stderr = self.capture_call(kaal_cli.main)
         finally:
             sys.argv = original_argv
         self.assertEqual(json.loads(stdout), [])

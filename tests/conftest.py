@@ -20,9 +20,12 @@ _KEY_FILE.write_text(base64.b64encode(os.urandom(32)).decode() + "\n", encoding=
 os.chmod(_KEY_FILE, 0o600)
 atexit.register(shutil.rmtree, _KEY_DIR, True)
 
-_CLIENT_VARS = ("KAAL_URL", "KAAL_TOKEN", "KAAL_TOKEN_FILE", "KAAL_CONFIG", "KAAL_LOCAL")
+_CLIENT_VARS = ("KAAL_URL", "KAAL_TOKEN", "KAAL_TOKEN_FILE", "KAAL_LOCAL")
+# Never read a real ~/.config/kaal/config.toml: it could point tests at a live server.
+_NO_CONFIG = _KEY_DIR / "no-config.toml"
 os.environ["KAAL_KEY_PROVIDER"] = "file"
 os.environ["KAAL_KEY_FILE"] = str(_KEY_FILE)
+os.environ["KAAL_CONFIG"] = str(_NO_CONFIG)
 for _name in _CLIENT_VARS:
     os.environ.pop(_name, None)
 
@@ -31,6 +34,7 @@ for _name in _CLIENT_VARS:
 def isolated_vault_key(monkeypatch):
     monkeypatch.setenv("KAAL_KEY_PROVIDER", "file")
     monkeypatch.setenv("KAAL_KEY_FILE", str(_KEY_FILE))
+    monkeypatch.setenv("KAAL_CONFIG", str(_NO_CONFIG))
     for name in _CLIENT_VARS:
         monkeypatch.delenv(name, raising=False)
     yield _KEY_FILE
