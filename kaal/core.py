@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Local encrypted secure notes for sensitive personal data.
+"""Kaal core: the encrypted notes vault and its command handlers.
 
-Vault default: ~/.secure-notes
-Key storage: macOS Keychain
-Encryption: AES-256-GCM via Python cryptography when available, otherwise OpenSSL enc/CLI is NOT used.
+Vault default: ~/.secure-notes (override with SECURE_NOTES_VAULT)
+Key storage: kaal.keys (macOS Keychain or an owner-only key file)
+Encryption: AES-256-GCM via Python cryptography.
 
 This script intentionally keeps plaintext out of the vault. Index metadata contains
 only ids, titles, tags, timestamps, and attachment filenames.
@@ -32,13 +32,15 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from kaal import keys as key_providers
+
 VAULT = Path(os.environ.get("SECURE_NOTES_VAULT", str(Path.home() / ".secure-notes"))).expanduser()
 NOTES_DIR = VAULT / "notes"
 ATTACH_DIR = VAULT / "attachments"
 INDEX_PATH = VAULT / "index.json"
-SERVICE = "Hermes Secure Notes"
-ACCOUNT = "vault-key-v1"
-KEY_BYTES = 32
+SERVICE = key_providers.DEFAULT_KEYCHAIN_SERVICE
+ACCOUNT = key_providers.DEFAULT_KEYCHAIN_ACCOUNT
+KEY_BYTES = key_providers.KEY_BYTES
 
 SENSITIVE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("SSN", re.compile(r"\b(?!000|666|9\d\d)(\d{3})[- ]?(?!00)(\d{2})[- ]?(?!0000)(\d{4})\b")),
@@ -79,42 +81,19 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def ensure_macos_keychain() -> None:
-    if not shutil.which("security"):
-        die("macOS security CLI not found; this tool currently requires macOS Keychain.")
-
-
-def run_security(args: list[str], *, input_text: str | None = None, check: bool = False) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["security", *args], input=input_text, text=True, capture_output=True, check=check)
+def key_provider() -> key_providers.KeyProvider:
+    try:
+        return key_providers.provider_from_env()
+    except key_providers.KeyProviderError as error:
+        die(str(error))
 
 
 def get_key(create: bool = False) -> bytes:
-    ensure_macos_keychain()
-    proc = run_security(["find-generic-password", "-s", SERVICE, "-a", ACCOUNT, "-w"])
-    if proc.returncode == 0:
-        try:
-            key = base64.b64decode(proc.stdout.strip(), validate=True)
-        except Exception as e:
-            die(f"Keychain item exists but is not a valid key: {e}")
-        if len(key) != KEY_BYTES:
-            die(f"Keychain key has wrong size ({len(key)} bytes); expected {KEY_BYTES}.")
-        return key
-    if not create:
-        die("Vault key not found. Run: secure-notes init")
-    key = secrets.token_bytes(KEY_BYTES)
-    encoded = base64.b64encode(key).decode()
-    add = run_security([
-        "add-generic-password",
-        "-U",
-        "-s", SERVICE,
-        "-a", ACCOUNT,
-        "-w", encoded,
-        "-T", "/usr/bin/security",
-        "-T", sys.executable,
-    ])
-    if add.returncode != 0:
-        die(f"Could not store key in Keychain: {add.stderr.strip() or add.stdout.strip()}")
-    return key
+    provider = key_provider()
+    try:
+        return provider.get_key(create=create)
+    except key_providers.KeyProviderError as error:
+        die(str(error))
 
 
 def import_crypto():
@@ -210,10 +189,18 @@ def init_vault(args: argparse.Namespace) -> None:
     os.chmod(VAULT, 0o700)
     os.chmod(NOTES_DIR, 0o700)
     os.chmod(ATTACH_DIR, 0o700)
+    provider = key_provider()
     key = get_key(create=True)
     if not INDEX_PATH.exists():
         save_index({"version": 1, "created": now_iso(), "notes": []})
-    print(json.dumps({"status": "initialized", "vault": str(VAULT), "keychain_service": SERVICE, "key_sha256_prefix": hashlib.sha256(key).hexdigest()[:12]}, indent=2))
+    described = provider.describe()
+    result = {"status": "initialized", "vault": str(VAULT), "key_provider": described["provider"]}
+    if described["provider"] == "keychain":
+        result["keychain_service"] = described["service"]
+    else:
+        result["key_file"] = described["path"]
+    result["key_sha256_prefix"] = hashlib.sha256(key).hexdigest()[:12]
+    print(json.dumps(result, indent=2))
 
 
 def parse_tags(raw: str) -> list[str]:
@@ -1844,12 +1831,19 @@ def delete_note(args: argparse.Namespace) -> None:
 
 
 def status(args: argparse.Namespace) -> None:
-    has_key = run_security(["find-generic-password", "-s", SERVICE, "-a", ACCOUNT, "-w"]).returncode == 0 if shutil.which("security") else False
+    try:
+        provider = key_providers.provider_from_env()
+        provider_name = provider.name
+        has_key = provider.key_exists()
+    except key_providers.KeyProviderError:
+        provider_name, has_key = "unconfigured", False
     print(json.dumps({
         "vault": str(VAULT),
         "vault_exists": VAULT.exists(),
         "index_exists": INDEX_PATH.exists(),
-        "keychain_key_exists": has_key,
+        "key_provider": provider_name,
+        "key_exists": has_key,
+        "keychain_key_exists": has_key if provider_name == "keychain" else False,
         "notes": len(load_index().get("notes", [])) if INDEX_PATH.exists() else 0,
     }, indent=2))
 
