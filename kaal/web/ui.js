@@ -18,6 +18,32 @@ export function h(tag, attributes = {}, ...children) {
   return element;
 }
 
+// Turn the Markdown renderer's tree into page elements. Only these tags and
+// attributes can ever be created, and addresses must be web, mail or Kaal's own.
+const TREE_TAGS = {
+  p: [], br: [], hr: [], strong: [], em: [], del: [], code: [], pre: [], blockquote: [],
+  h1: [], h2: [], h3: [], h4: [], h5: [], h6: [], ul: [], ol: ["start"], li: [],
+  table: [], thead: [], tbody: [], tr: [], th: [], td: [],
+  a: ["href", "target", "rel", "download", "class"], img: ["src", "alt", "loading", "class"], input: ["type", "checked", "disabled"],
+};
+const SAFE_HREF = /^(https?:\/\/|mailto:|\/v1\/)/i;
+
+export function fromTree(node) {
+  if (typeof node === "string") return document.createTextNode(node);
+  const allowed = node && TREE_TAGS[node.tag];
+  if (!allowed) return document.createTextNode("");
+  const attributes = {};
+  for (const name of allowed) {
+    const value = (node.attrs || {})[name];
+    if (value === undefined) continue;
+    if (name === "href" && !SAFE_HREF.test(String(value))) continue;
+    if (name === "src" && !String(value).startsWith("/v1/")) continue;
+    if (node.tag === "input" && name === "type" && value !== "checkbox") continue;
+    attributes[name] = value;
+  }
+  return h(node.tag, attributes, (node.children || []).map(fromTree));
+}
+
 export function replace(container, ...children) {
   container.replaceChildren(...children.flat().filter((child) => child instanceof Node));
 }

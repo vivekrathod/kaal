@@ -592,7 +592,7 @@
   "info": {
     "description": "An encrypted notes vault. Every request needs `Authorization: Bearer <token>` except /v1/health.",
     "title": "Kaal",
-    "version": "0.13.0"
+    "version": "0.14.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -2474,6 +2474,108 @@
           }
         },
         "summary": "Attachment Content",
+        "tags": [
+          "notes"
+        ]
+      }
+    },
+    "/v1/notes/{note_id}/attachments/{attachment_id}/preview": {
+      "get": {
+        "description": "A picture of a note's file, shrunk for the page: an image itself, or a PDF's page.",
+        "operationId": "preview_attachment_v1_notes__note_id__attachments__attachment_id__preview_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "note_id",
+            "required": true,
+            "schema": {
+              "title": "Note Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "attachment_id",
+            "required": true,
+            "schema": {
+              "title": "Attachment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "maximum": 20,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Attachment",
+        "tags": [
+          "notes"
+        ]
+      }
+    },
+    "/v1/notes/{note_id}/attachments/{attachment_id}/view": {
+      "get": {
+        "description": "A picture, PDF or plain-text file, served so the browser shows it; other kinds are refused.",
+        "operationId": "view_attachment_v1_notes__note_id__attachments__attachment_id__view_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "note_id",
+            "required": true,
+            "schema": {
+              "title": "Note Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "attachment_id",
+            "required": true,
+            "schema": {
+              "title": "Attachment Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "View Attachment",
         "tags": [
           "notes"
         ]

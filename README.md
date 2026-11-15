@@ -70,7 +70,16 @@ still needs review, check each value against a picture of the receipt (with
 where it came from and how far to trust it), mark receipts reviewed or
 reimbursed, see totals per person and year, and restore or permanently delete
 what is in the Trash. It also covers notes (search, read, write, trash) and
-settings: the family list and the provider names Kaal has learnt. Permanent
+settings: the family list and the provider names Kaal has learnt. Notes are
+shown as formatted Markdown; pictures inside a note appear in place, each PDF
+shows its first page with the text read from it, and a "Show source" switch
+shows the raw note. HTML inside a note is displayed as text, never run.
+
+A picture, PDF or plain-text file can be opened in the browser
+(`GET /v1/notes/{id}/attachments/{attachment}/view`); the server checks that
+the file really is what its name says. Every other kind of file, such as a
+saved web page, is download-only, because opened from Kaal's own address it
+could act with your sign-in. Permanent
 deletion needs a token with the `delete` scope. It is plain files in
 `kaal/web/` with no build step, and it only talks to the API below. The server
 tells the browser to run nothing but those files and never to show them inside

@@ -1,5 +1,6 @@
-import { api, noteFileUrl } from "/web/api.js";
-import { h, replace, notice, actionButton, twoStepButton } from "/web/ui.js";
+import { api, noteFileUrl, noteViewUrl, notePreviewUrl } from "/web/api.js";
+import { h, replace, notice, actionButton, twoStepButton, fromTree } from "/web/ui.js";
+import { renderMarkdown } from "/web/markdown.js";
 
 const PAGE = 50;
 
@@ -8,6 +9,46 @@ const when = (iso) => {
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
 };
 const size = (bytes) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round((bytes || 0) / 1024))} KB`);
+// Kinds the server will show in the browser; anything else is download-only.
+const isPicture = (file) => /\.(png|jpe?g|gif|webp)$/i.test(file.name || "");
+const isPdf = (file) => /\.pdf$/i.test(file.name || "");
+const isViewable = (file) => isPicture(file) || isPdf(file) || /\.(txt|md|markdown|csv|log)$/i.test(file.name || "");
+
+// A link that opens a file in the browser when that is safe, and downloads it otherwise.
+const fileLink = (noteId, file, label, className) => (isViewable(file)
+  ? h("a", { href: noteViewUrl(noteId, file.id), target: "_blank", rel: "noopener", class: className }, label)
+  : h("a", { href: noteFileUrl(noteId, file.id), download: file.name || "attachment", class: className }, label));
+
+function pdfCard(noteId, file) {
+  const page = h("img", { src: notePreviewUrl(noteId, file.id), alt: `First page of ${file.name || "the PDF"}`, loading: "lazy", class: "file-page" });
+  page.addEventListener("error", () => page.replaceWith(h("p", { class: "empty" }, "No preview for this PDF.")));
+  const text = h("details", { class: "file-text" }, h("summary", {}, "Text in this file"));
+  if (file.extracted_markdown) {
+    let asked = false;
+    text.addEventListener("toggle", async () => {
+      if (!text.open || asked) return;
+      asked = true;
+      const holder = h("pre", { class: "body" }, "Loading…");
+      text.append(holder);
+      try {
+        // The stored text begins with a heading and a note of how it was read.
+        holder.textContent = (await api.noteFileText(noteId, file.id)).replace(/^# Extracted text:.*\n+Method:.*\n+```text\n/, "").replace(/\n```\s*$/, "");
+      } catch (error) {
+        holder.textContent = error.message;
+      }
+    });
+  }
+  return h("div", { class: "file-card" },
+    h("a", { href: noteViewUrl(noteId, file.id), target: "_blank", rel: "noopener", title: "Open the PDF" }, page),
+    h("div", { class: "file-meta" },
+      h("span", { class: "file-name" }, file.name || "PDF"),
+      h("span", { class: "muted-text" }, size(file.size)),
+      h("span", { class: "file-actions" },
+        h("a", { href: noteViewUrl(noteId, file.id), target: "_blank", rel: "noopener", class: "button small" }, "Open"),
+        h("a", { href: noteFileUrl(noteId, file.id), download: file.name || "file.pdf", class: "button small" }, "Download"))),
+    file.extracted_markdown ? text : null);
+}
+
 const tagList = (text) => [...new Set(text.split(",").map((tag) => tag.trim().replace(/^#/, "")).filter(Boolean))];
 
 export function notesView(container, params, { expired }) {
@@ -89,16 +130,51 @@ export function noteView(container, noteId, { go, expired }) {
     const note = await api.note(noteId);
     if (!alive) return;
     const trashed = Boolean(note.trashed_at);
-    const files = (note.attachments || []).map((file) => h("li", { class: "line" },
-      h("a", { href: noteFileUrl(note.id, file.id), download: file.name || "attachment" }, file.name || "Attachment"),
-      h("span", { class: "muted-text" }, size(file.size))));
+    const attachments = note.attachments || [];
+    // A note imported from Joplin refers to its files by an id; each file records which.
+    const byResource = new Map(attachments.filter((file) => (file.source || {}).resource_id).map((file) => [String(file.source.resource_id).toLowerCase(), file]));
+    const shownInText = new Set();
+    const resource = (resourceId, label) => {
+      const file = byResource.get(resourceId);
+      if (!file) return null;
+      shownInText.add(file.id);
+      if (isPicture(file)) {
+        return { tag: "a", attrs: { href: noteViewUrl(note.id, file.id), target: "_blank", rel: "noopener", class: "picture" },
+          children: [{ tag: "img", attrs: { src: notePreviewUrl(note.id, file.id), alt: label || file.name || "Picture", loading: "lazy" }, children: [] }] };
+      }
+      return { tag: "a", attrs: isViewable(file)
+        ? { href: noteViewUrl(note.id, file.id), target: "_blank", rel: "noopener", class: "file-link" }
+        : { href: noteFileUrl(note.id, file.id), download: file.name || "attachment", class: "file-link" },
+        children: [label || file.name || "File"] };
+    };
+
+    const rendered = h("div", { class: "markdown" }, renderMarkdown(note.body || "", { resource }).map(fromTree));
+    const source = h("pre", { class: "body", hidden: true }, note.body || "");
+    const toggle = h("button", { type: "button", class: "link" }, "Show source");
+    toggle.addEventListener("click", () => {
+      const showSource = source.hidden;
+      source.hidden = !showSource;
+      rendered.hidden = showSource;
+      toggle.textContent = showSource ? "Show formatted" : "Show source";
+    });
+
+    const pdfs = attachments.filter(isPdf);
+    const loosePictures = attachments.filter((file) => isPicture(file) && !shownInText.has(file.id));
+    const others = attachments.filter((file) => !isPdf(file) && !isPicture(file));
+    const files = [
+      pdfs.length ? h("div", { class: "file-cards" }, pdfs.map((file) => pdfCard(note.id, file))) : null,
+      loosePictures.length ? h("div", { class: "gallery" }, loosePictures.map((file) => h("a", { href: noteViewUrl(note.id, file.id), target: "_blank", rel: "noopener", class: "picture", title: file.name || "" },
+        h("img", { src: notePreviewUrl(note.id, file.id), alt: file.name || "Picture", loading: "lazy" })))) : null,
+      others.length ? h("ul", { class: "plain" }, others.map((file) => h("li", { class: "line" }, fileLink(note.id, file, file.name || "Attachment"), h("span", { class: "muted-text" }, size(file.size))))) : null,
+    ].filter(Boolean);
+
     replace(container,
       h("a", { href: trashed ? "#/notes?trash=1" : "#/notes", class: "back" }, "‹ Notes"),
       h("article", { class: "card section" },
         h("h1", {}, note.title || "Untitled"),
-        h("p", { class: "muted" }, [when(note.updated) && `Updated ${when(note.updated)}`, ...(note.tags || []).map((tag) => `#${tag}`)].filter(Boolean).join("  ")),
-        h("pre", { class: "body" }, note.body || ""),
-        files.length ? h("div", {}, h("h2", {}, "Files"), h("ul", { class: "plain" }, files)) : null,
+        h("p", { class: "muted" }, [when(note.updated) && `Updated ${when(note.updated)}`, ...(note.tags || []).map((tag) => `#${tag}`)].filter(Boolean).join("  "), " ", toggle),
+        rendered, source,
+        files.length ? h("div", {}, h("h2", {}, attachments.length === 1 ? "File" : "Files"), files) : null,
         status,
         h("div", { class: "actions" }, trashed
           ? [actionButton("Restore", () => attempt(async () => { await api.restoreNote(note.id); await load(); })),

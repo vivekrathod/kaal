@@ -64,7 +64,7 @@ class Settings:
     tokens_file: Path
     tmp_dir: Path
     max_upload_bytes: int = 100 * MiB
-    rate_per_minute: int = 240
+    rate_per_minute: int = 600
     host: str = "127.0.0.1"
     port: int = DEFAULT_PORT
     # Read captured receipts after the capture request has returned. `serve`
@@ -85,7 +85,7 @@ class Settings:
             tokens_file=Path(env.get("KAAL_TOKENS_FILE") or home / "tokens.json").expanduser(),
             tmp_dir=Path(env.get("KAAL_TMP_DIR") or home / "tmp").expanduser(),
             max_upload_bytes=int(env.get("KAAL_MAX_UPLOAD_BYTES") or 100 * MiB),
-            rate_per_minute=int(env.get("KAAL_RATE_PER_MINUTE") or 240),
+            rate_per_minute=int(env.get("KAAL_RATE_PER_MINUTE") or 600),
             host=env.get("KAAL_BIND") or "127.0.0.1",
             port=int(env.get("KAAL_PORT") or DEFAULT_PORT),
             background_extraction=(env.get("KAAL_BACKGROUND_EXTRACTION") or "1").strip() != "0",
@@ -240,6 +240,31 @@ WEB_HEADERS = {
     "Referrer-Policy": "no-referrer",
 }
 WEB_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json", ".png": "image/png"}
+
+# Files a browser may show in place, each with the bytes it must start with.
+# Anything else is download-only: a saved web page, an SVG or a script opened
+# from Kaal's own address could act with the signed-in user's session.
+VIEWABLE = {
+    ".pdf": ("application/pdf", b"%PDF-"),
+    ".png": ("image/png", b"\x89PNG\r\n\x1a\n"),
+    ".jpg": ("image/jpeg", b"\xff\xd8\xff"),
+    ".jpeg": ("image/jpeg", b"\xff\xd8\xff"),
+    ".gif": ("image/gif", b"GIF8"),
+    ".webp": ("image/webp", b"RIFF"),
+}
+VIEWABLE_TEXT = {".txt", ".md", ".markdown", ".csv", ".log"}
+
+
+def viewable_type(name: str, data: bytes) -> str | None:
+    """The media type to show a file as in the browser, or None when it must be downloaded."""
+    suffix = Path(name or "").suffix.lower()
+    if suffix in VIEWABLE_TEXT:
+        return "text/plain; charset=utf-8"
+    media_type, magic = VIEWABLE.get(suffix, (None, b""))
+    if media_type is None or not data.startswith(magic) or (suffix == ".webp" and data[8:12] != b"WEBP"):
+        return None
+    return media_type
+
 
 SESSION_COOKIE = "kaal_session"
 SESSION_SECONDS = 30 * 24 * 3600
@@ -610,6 +635,45 @@ def create_app(settings: Settings) -> FastAPI:
         return _content_response(S(request), note_id, attachment_id)
 
     # --- browser captures
+
+    def note_attachment(state: AppState, note_id: str, attachment_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        with state.vault_lock:
+            meta = core.note_by_id(note_id)
+            matches = [att for att in meta.get("attachments", []) if att.get("id") == attachment_id]
+            if not matches:
+                core.die("Attachment not found.", kind="not_found")
+            return meta, matches[0]
+
+    @app.get("/v1/notes/{note_id}/attachments/{attachment_id}/view", tags=["notes"], dependencies=[require("read", "reveal")], response_class=Response)
+    def view_attachment(request: Request, note_id: str, attachment_id: str):
+        """A picture, PDF or plain-text file, served so the browser shows it; other kinds are refused."""
+        try:
+            meta, attachment = note_attachment(S(request), note_id, attachment_id)
+            data = core.attachment_original_bytes(meta, attachment)
+        except core.KaalError as error:
+            return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind, error.details)
+        media_type = viewable_type(attachment.get("name", ""), data)
+        if media_type is None:
+            return _error(415, "This kind of file can only be downloaded.", "invalid")
+        headers = {
+            "Content-Disposition": f"inline; filename*=UTF-8''{quote(attachment.get('name', 'file'), safe='')}",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+        }
+        if media_type != "application/pdf":
+            # A PDF needs the browser's own viewer, which a sandbox would block.
+            headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+        return Response(content=data, media_type=media_type, headers=headers)
+
+    @app.get("/v1/notes/{note_id}/attachments/{attachment_id}/preview", tags=["notes"], dependencies=[require("read", "reveal")], response_class=Response)
+    def preview_attachment(request: Request, note_id: str, attachment_id: str, page: int = Query(1, ge=1, le=20)):
+        """A picture of a note's file, shrunk for the page: an image itself, or a PDF's page."""
+        try:
+            meta, attachment = note_attachment(S(request), note_id, attachment_id)
+            media_type, data = core.attachment_preview(meta, attachment, page)
+        except core.KaalError as error:
+            return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind, error.details)
+        return Response(content=data, media_type=media_type, headers={"X-Content-Type-Options": "nosniff"})
 
     @app.post("/v1/captures", tags=["captures"], dependencies=[require("write")])
     def capture(request: Request, file: UploadFile = File(...), title: str = Form(""), source_url: str = Form(""), source_title: str = Form(""), captured_at: str = Form("")):

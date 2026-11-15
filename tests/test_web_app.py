@@ -54,6 +54,7 @@ def test_the_page_has_no_inline_script_or_style_for_that_policy_to_block():
     ("/web/api.js", "text/javascript; charset=utf-8"),
     ("/web/views/review.js", "text/javascript; charset=utf-8"),
     ("/web/views/notes.js", "text/javascript; charset=utf-8"),
+    ("/web/markdown.js", "text/javascript; charset=utf-8"),
     ("/web/views/settings.js", "text/javascript; charset=utf-8"),
     ("/web/views/trash.js", "text/javascript; charset=utf-8"),
     ("/web/app.css", "text/css; charset=utf-8"),
@@ -88,10 +89,11 @@ def test_every_request_the_app_makes_is_in_the_published_api():
     made |= {("GET", re.sub(r"\$\{[^}]+\}", "{}", url).split("?")[0]) for url in urls}
     assert len(made) >= 25
     assert made - published == set()
-    # No other file reaches the API directly.
+    # No other file makes requests of its own.
     for script in SCRIPTS:
         if script.name != "api.js":
-            assert "/v1/" not in script.read_text(), f"{script.name} calls the API itself"
+            text = script.read_text()
+            assert "fetch(" not in text and "XMLHttpRequest" not in text and "sendBeacon" not in text, f"{script.name} makes requests itself"
 
 
 def test_vault_text_is_never_written_into_the_page_as_markup():

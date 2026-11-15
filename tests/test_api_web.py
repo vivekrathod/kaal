@@ -166,3 +166,76 @@ def test_note_lists_can_be_searched_and_paged(service):
     assert len(body["result"]) == 1 and body["meta"] == {"total": 2, "offset": 1, "limit": 1}
     assert service.client.get("/v1/library/notes", headers=service.bearer(), params={"q": "HOME"}).json()["meta"]["total"] == 3
     assert service.client.get("/v1/library/notes", headers=service.bearer()).json()["meta"]["total"] == 3
+
+
+# --- files inside notes
+
+def note_with(service, name, content):
+    note = service.client.post("/v1/library/notes", headers=service.bearer(), json={"title": "With a file", "body": "text"}).json()["result"]["note"]
+    attached = service.client.post(f"/v1/library/notes/{note['id']}/attachments", headers=service.bearer(), files={"file": (name, content, "application/octet-stream")})
+    assert attached.status_code == 200, attached.text
+    shown = service.client.get(f"/v1/library/notes/{note['id']}", headers=service.bearer()).json()["result"]["note"]
+    return f"/v1/notes/{note['id']}/attachments/{shown['attachments'][0]['id']}"
+
+
+@pytest.mark.parametrize("name, content, media_type, sandboxed", [
+    ("scan.pdf", MINIMAL_PDF, "application/pdf", False),
+    ("pixel.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 16, "image/png", True),
+    ("photo.JPG", b"\xff\xd8\xff\xe0" + b"\x00" * 16, "image/jpeg", True),
+    ("moving.gif", b"GIF89a" + b"\x00" * 16, "image/gif", True),
+    ("readings.csv", b"date,value\n", "text/plain; charset=utf-8", True),
+    ("notes.txt", b"<script>alert(1)</script>", "text/plain; charset=utf-8", True),
+])
+def test_pictures_pdfs_and_plain_text_open_in_the_browser(service, name, content, media_type, sandboxed):
+    response = service.client.get(note_with(service, name, content) + "/view", headers=service.bearer())
+    assert (response.status_code, response.headers["content-type"]) == (200, media_type)
+    assert response.content == content
+    assert response.headers["content-disposition"].startswith("inline;")
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert ("sandbox" in response.headers.get("content-security-policy", "")) is sandboxed
+
+
+@pytest.mark.parametrize("name, content", [
+    ("saved.htm", b"<html><script>alert(1)</script></html>"),
+    ("page.html", b"<html></html>"),
+    ("drawing.svg", b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>"),
+    ("code.js", b"alert(1)"),
+    ("letter.odt", b"PK\x03\x04"),
+    ("pretend.pdf", b"<html><script>alert(1)</script></html>"),
+    ("pretend.png", b"<svg onload=alert(1)>"),
+    ("noextension", b"%PDF-1.4"),
+])
+def test_anything_that_could_run_or_is_not_what_it_claims_is_download_only(service, name, content):
+    base = note_with(service, name, content)
+    refused = service.client.get(base + "/view", headers=service.bearer())
+    assert refused.status_code == 415
+    assert content not in refused.content
+    download = service.client.get(base + "/content", headers=service.bearer())
+    assert (download.status_code, download.headers["content-type"], download.content) == (200, "application/octet-stream", content)
+
+
+def test_note_file_views_and_previews_need_the_reveal_scope_and_a_real_file(service):
+    base = note_with(service, "readings.csv", b"a,b\n")
+    assert service.client.get(base + "/view", headers=service.bearer("reader")).status_code == 403
+    assert service.client.get(base + "/preview", headers=service.bearer("reader")).status_code == 403
+    assert service.client.get(base + "/preview", headers=service.bearer()).status_code == 404  # nothing to picture
+    missing = base.rsplit("/", 1)[0] + "/nope"
+    assert service.client.get(missing + "/view", headers=service.bearer()).status_code == 404
+    assert service.client.get("/v1/notes/nope/attachments/nope/view", headers=service.bearer()).status_code == 404
+
+
+def test_a_note_picture_preview_is_shrunk_for_the_page(service):
+    image_module = pytest.importorskip("PIL.Image")
+    photo = io.BytesIO()
+    image_module.new("RGB", (4000, 3000), "white").save(photo, format="JPEG")
+    response = service.client.get(note_with(service, "photo.jpg", photo.getvalue()) + "/preview", headers=service.bearer())
+    assert (response.status_code, response.headers["content-type"]) == (200, "image/jpeg")
+    with image_module.open(io.BytesIO(response.content)) as shown:
+        assert shown.size == (1568, 1176)
+    assert len(response.content) < len(photo.getvalue())
+
+
+@pytest.mark.skipif(not shutil.which("pdftoppm"), reason="needs pdftoppm")
+def test_a_note_pdf_preview_is_its_first_page(service):
+    response = service.client.get(note_with(service, "scan.pdf", MINIMAL_PDF) + "/preview", headers=service.bearer())
+    assert (response.status_code, response.headers["content-type"]) == (200, "image/png")

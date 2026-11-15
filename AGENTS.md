@@ -65,7 +65,7 @@ Receipt dates are stored as `YYYY-MM-DD` and amounts as plain decimals; `kaal me
 
 Code lives in the `kaal` package: `core.py` (vault, encryption, command handlers), `receipts.py` (receipt value normalisation, family-member matching, and checking model values against receipt text), `receipt_ai.py` (the optional model call for receipt fields; off unless `KAAL_RECEIPT_AI` is set), `keys.py` (Keychain and key-file providers), `cli.py` (argument parsing, local or remote), `client.py` (remote mode), `server.py` (kaal-server) and `tokens.py`. `bin/secure-notes.py` is a launcher. Install dev dependencies with `pip install -e '.[dev]'` (add `extract` for Docling).
 
-The web app is static files in `kaal/web/` (plain ES modules, no build step, no dependencies). It must stay free of inline script and style, must never write vault text as HTML, and may only call the API through `kaal/web/api.js`; `tests/test_web_app.py` enforces all three.
+The web app is static files in `kaal/web/` (plain ES modules, no build step, no dependencies). It must stay free of inline script and style, must never write vault text as HTML, and may only call the API through `kaal/web/api.js`; `tests/test_web_app.py` enforces all three. Notes are rendered by `kaal/web/markdown.js`, which returns a tree of plain objects and never HTML text (`tests/test_markdown.py` runs it under Node).
 
 Tests use a throwaway key file and never the Keychain, and never a real `~/.config/kaal/config.toml` (see `tests/conftest.py`); keep it that way. Run the full verification suite before reporting a code change complete:
 

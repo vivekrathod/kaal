@@ -81,8 +81,11 @@ export const api = {
   trashNote: (noteId) => result(request("POST", `/v1/library/notes/${id(noteId)}/trash`)),
   restoreNote: (noteId) => result(request("POST", `/v1/library/notes/${id(noteId)}/restore`)),
   purgeNote: (noteId) => result(request("DELETE", `/v1/library/notes/${id(noteId)}`, { params: { confirm: true } })),
+  noteFileText: (noteId, attachmentId) => result(request("GET", `/v1/library/notes/${id(noteId)}/attachments/${id(attachmentId)}/extracted-text`)).then((data) => data.text || ""),
 };
 
 export const previewUrl = (noteId, attachmentId, page = 1) => `/v1/medical/receipts/${id(noteId)}/attachments/${id(attachmentId)}/preview?page=${page}`;
 export const originalUrl = (noteId, attachmentId) => `/v1/medical/receipts/${id(noteId)}/attachments/${id(attachmentId)}/content`;
 export const noteFileUrl = (noteId, attachmentId) => `/v1/notes/${id(noteId)}/attachments/${id(attachmentId)}/content`;
+export const noteViewUrl = (noteId, attachmentId) => `/v1/notes/${id(noteId)}/attachments/${id(attachmentId)}/view`;
+export const notePreviewUrl = (noteId, attachmentId, page = 1) => `/v1/notes/${id(noteId)}/attachments/${id(attachmentId)}/preview?page=${page}`;
