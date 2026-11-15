@@ -21,6 +21,10 @@ TRUSTED_SOURCES = frozenset({"manual", "confirmed"})
 SOURCE_RULES = "labelled-text"
 SOURCE_AI_GROUNDED = "ai-grounded"
 SOURCE_AI_UNVERIFIED = "ai-unverified"
+# The model found no payment, only what a bill says the patient owes.
+SOURCE_AI_AMOUNT_DUE = "ai-amount-due"
+# Values that do not count in totals until a person confirms them.
+UNVERIFIED_SOURCES = frozenset({SOURCE_AI_UNVERIFIED, SOURCE_AI_AMOUNT_DUE})
 _CLINICIAN = re.compile(r"(?:dr\.?|doctor)\s+", re.IGNORECASE)
 STATUS_NEEDS_REVIEW = "needs_review"
 STATUS_REVIEWED = "reviewed"
@@ -164,7 +168,15 @@ def ground(name: str, value: str, text: str) -> bool:
     return bool(wanted) and f" {wanted} " in f" {_squashed(text)} "
 
 
-def merge_model_fields(fields: dict[str, str], sources: dict[str, str], model_fields: dict[str, str], text: str) -> dict[str, dict[str, str]]:
+def sum_of_payments(value: str) -> tuple[str, str]:
+    """Read "$3.22 + $60.00" as (total, parts); ("", "") unless it is two or more plain amounts."""
+    parts = [normalize_amount(part) for part in (value or "").split("+")]
+    if len(parts) < 2 or not all(parts):
+        return "", ""
+    return str(sum(Decimal(part) for part in parts).quantize(Decimal("0.01"))), " + ".join(parts)
+
+
+def merge_model_fields(fields: dict[str, str], sources: dict[str, str], model_fields: dict[str, str], text: str, raw: dict[str, str] | None = None) -> dict[str, dict[str, str]]:
     """Fold a model's candidates into rule-based ``fields`` in place; return the disagreements.
 
     A model value found in the receipt text is ``ai-grounded``; one that is not
@@ -177,6 +189,10 @@ def merge_model_fields(fields: dict[str, str], sources: dict[str, str], model_fi
       - names: the model's value is taken, because it reads the whole receipt
         while the rules match by position and are often wrong.
     Every disagreement is returned so a reviewer sees both values.
+
+    Two kinds of amount are never counted until confirmed, whatever the text
+    says: a total Kaal added up from several payments the model listed, and
+    an amount a bill says is owed when the model found no payment at all.
     """
     conflicts: dict[str, dict[str, str]] = {}
     for name in EVALUATED_FIELDS:
@@ -185,18 +201,28 @@ def merge_model_fields(fields: dict[str, str], sources: dict[str, str], model_fi
             continue
         if name == "provider" and _CLINICIAN.match(value):
             continue
+        added_up = ""
         if name in NORMALISED_FIELDS:
             normalised = normalize_date(value) if name in DATE_FIELDS else normalize_amount(value)
+            if not normalised and name == "amount":
+                value, added_up = sum_of_payments(value)
+                normalised = value
             if not normalised:
                 continue
-        grounded = ground(name, value, text)
+        grounded = not added_up and ground(name, value, text)
         source = SOURCE_AI_GROUNDED if grounded else SOURCE_AI_UNVERIFIED
         current = fields.get(name) or ""
+        if name in NORMALISED_FIELDS and current:
+            current_normalised = normalize_date(current) if name in DATE_FIELDS else normalize_amount(current)
+            if not current_normalised:
+                # The rule caught text that is not a date or amount at all, so it found nothing.
+                current = ""
         if not current:
             fields[name], sources[name] = value, source
+            if added_up and raw is not None:
+                raw[name] = added_up
             continue
         if name in NORMALISED_FIELDS:
-            current_normalised = normalize_date(current) if name in DATE_FIELDS else normalize_amount(current)
             agree = compare_field(name, current_normalised, value) == "correct"
         else:
             agree = _squashed(current) == _squashed(value)
@@ -207,6 +233,9 @@ def merge_model_fields(fields: dict[str, str], sources: dict[str, str], model_fi
         conflicts[name] = {SOURCE_RULES: current, "ai": value}
         if name not in NORMALISED_FIELDS:
             fields[name], sources[name] = value, source
+    owed = normalize_amount((model_fields.get("amount_due") or "").strip())
+    if owed and not normalize_amount(fields.get("amount") or ""):
+        fields["amount"], sources["amount"] = owed, SOURCE_AI_AMOUNT_DUE
     return conflicts
 
 

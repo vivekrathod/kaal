@@ -131,7 +131,7 @@ denial-of-service protection.
 - A non-empty text layer is not automatically considered adequate: medical PDF receipts use the small ordered route `pdftotext -layout` → macOS Vision OCR → Docling, stopping when explicit paid-amount and date evidence is present. MarkItDown and Tesseract remain available only for generic, non-receipt attachment extraction.
 - Kaal never guesses the paid amount or date from an unlabelled total, balance, or date-like value. Ambiguous fields stay blank for review.
 - The narrow exception is an explicitly **SALE/PAYMENT - APPROVED** card receipt with a labelled **Total Amount**: that is recorded as the completed card payment. A bare `Total` or `Total Amount` is still rejected.
-- Kaal records field provenance (`labelled-text`, `docling-structured`, `ai-grounded`, `ai-unverified`, `manual`, or `confirmed`). Manual corrections and confirmed values survive re-extraction.
+- Kaal records field provenance (`labelled-text`, `docling-structured`, `ai-grounded`, `ai-unverified`, `ai-amount-due`, `manual`, or `confirmed`). Manual corrections and confirmed values survive re-extraction.
 - A receipt cannot be marked reviewed until it has a paid amount and at least one receipt date (service date or payment date). Marking it reviewed confirms non-manual values currently shown in the review screen.
 
 ### Reading receipt fields with a model (optional, off by default)
@@ -162,6 +162,12 @@ The model only labels; Kaal decides what to trust:
 - Where a label rule and the model disagree on an amount or a date, the rule's
   value stays; for names the model's value is used. Both are kept under
   `conflicts` for you to see, and reviewing or correcting the field settles it.
+- When a receipt lists several payments and no total (two prescriptions on one
+  pharmacy receipt), Kaal adds them up, keeps the parts in `field_raw`, and
+  marks the total `ai-unverified` because that number is printed nowhere.
+- When the document is a bill that shows no payment, the amount it says you owe
+  is offered as `ai-amount-due`. Like any unverified amount it stays out of the
+  totals until you review the receipt.
 - An individual clinician is never accepted as the provider.
 
 If the model is unreachable, signed out or rate-limited, the receipt is still

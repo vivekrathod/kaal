@@ -1529,7 +1529,7 @@ def build_receipt_state(extracted_text: str, docling_json: dict[str, Any] | None
     if ai_fields:
         if receipt["state"] == "no_text":
             receipt["state"] = "extracted"
-        conflicts = receipts.merge_model_fields(receipt["fields"], receipt["field_sources"], ai_fields, extracted_plain_text(extracted_text))
+        conflicts = receipts.merge_model_fields(receipt["fields"], receipt["field_sources"], ai_fields, extracted_plain_text(extracted_text), receipt.setdefault("field_raw", {}))
         if conflicts:
             receipt["conflicts"] = conflicts
     if ai_info:
@@ -1996,7 +1996,7 @@ def medical_report(args: argparse.Namespace) -> None:
         sources = receipt.get("field_sources", {})
         # A value the model read but Kaal could not find in the receipt text
         # does not count until a person confirms it.
-        when = next((fields[name] for name in receipts.DATE_FIELDS if fields.get(name) and sources.get(name) != receipts.SOURCE_AI_UNVERIFIED), "")
+        when = next((fields[name] for name in receipts.DATE_FIELDS if fields.get(name) and sources.get(name) not in receipts.UNVERIFIED_SOURCES), "")
         if not when:
             undated.append(note["id"])
             if dated_filter:
@@ -2007,7 +2007,7 @@ def medical_report(args: argparse.Namespace) -> None:
         if amount is None:
             missing_amount.append(note["id"])
             amount = zero
-        elif sources.get("amount") == receipts.SOURCE_AI_UNVERIFIED:
+        elif sources.get("amount") in receipts.UNVERIFIED_SOURCES:
             unverified_amount.append(note["id"])
             amount = zero
         reviewed = receipt.get("status") == receipts.STATUS_REVIEWED

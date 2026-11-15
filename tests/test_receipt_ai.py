@@ -329,3 +329,46 @@ def test_status_and_evaluate_say_which_model_is_in_use(vault, monkeypatch):
     assert call(kaal.medical_evaluate, ids=[], limit=0)["receipt_ai"]["backend"] == "claude-cli"
     monkeypatch.setenv("KAAL_RECEIPT_AI", "something-else")
     assert call(kaal.status)["receipt_ai"]["backend"] == "misconfigured"
+
+
+# --- cases found on real receipts
+
+def test_a_rule_match_that_is_not_a_date_does_not_block_the_models_date():
+    state = kaal.build_receipt_state("Paid on:   Payment Method\nAug 7, 2026 at 10:20 AM\n", ai_fields={"paid_date": "Aug 7, 2026"})
+    assert state["fields"]["paid_date"] == "Aug 7, 2026"
+    assert state["field_sources"]["paid_date"] == "ai-grounded"
+    assert "conflicts" not in state
+
+
+def test_several_payments_are_added_up_and_left_unverified():
+    assert receipts.sum_of_payments("$3.22 + $60.00") == ("63.22", "3.22 + 60.00")
+    assert receipts.sum_of_payments("1,000 + 0.5 + 2") == ("1002.50", "1000.00 + 0.50 + 2.00")
+    for not_a_sum in ("$3.22", "$3.22 + lots", "$3.22 (RX# 1); $60.00 (RX# 2)", ""):
+        assert receipts.sum_of_payments(not_a_sum) == ("", "")
+
+    text = "RX 1 PRICE: $3.22\nRX 2 PRICE: $60.00\n"
+    state = kaal.build_receipt_state(text, ai_fields={"amount": "$3.22 + $60.00"})
+    assert state["fields"]["amount"] == "63.22"
+    assert state["field_sources"]["amount"] == "ai-unverified"
+    assert state["field_raw"]["amount"] == "3.22 + 60.00"
+    assert kaal.build_receipt_state(text, ai_fields={"amount": "$3.22 (RX# 1); $60.00 (RX# 2)"})["fields"]["amount"] == ""
+
+
+def test_an_amount_owed_on_a_bill_is_suggested_but_never_replaces_a_payment():
+    bill = kaal.build_receipt_state("TOTAL CHARGES 509.00\nPatient responsibility $12.84\n", ai_fields={"amount": "", "amount_due": "$12.84"})
+    assert (bill["fields"]["amount"], bill["field_sources"]["amount"]) == ("12.84", "ai-amount-due")
+    paid = kaal.build_receipt_state("anything", ai_fields={"amount": "$40.00", "amount_due": "$12.84"})
+    assert (paid["fields"]["amount"], paid["field_sources"]["amount"]) == ("$40.00", "ai-unverified")
+    labelled = kaal.build_receipt_state("Amount paid: $20.00\n", ai_fields={"amount_due": "$12.84"})
+    assert (labelled["fields"]["amount"], labelled["field_sources"]["amount"]) == ("20.00", "labelled-text")
+    assert kaal.build_receipt_state("x", ai_fields={"amount_due": "see statement"})["fields"]["amount"] == ""
+
+
+def test_an_amount_owed_stays_out_of_the_totals_until_reviewed(vault, model):
+    model.answer = {"amount_due": "$12.84", "service_date": "3/14/25"}
+    note_id = capture(vault, "STATEMENT\nDate of visit 3/14/25\nPlease pay $12.84\n")
+    assert stored(note_id)["field_sources"]["amount"] == "ai-amount-due"
+    totals = call(kaal.medical_report, year="2025", patient_name="", from_date="", to_date="", reimbursed="all")
+    assert (totals["count"], totals["total_amount"], totals["unverified_amount"]) == (1, "0.00", [note_id])
+    call(kaal.medical_review, note_id=note_id)
+    assert call(kaal.medical_report, year="2025", patient_name="", from_date="", to_date="", reimbursed="all")["total_amount"] == "12.84"
