@@ -63,7 +63,7 @@ Receipt dates are stored as `YYYY-MM-DD` and amounts as plain decimals; `kaal me
 
 ## Development
 
-Code lives in the `kaal` package: `core.py` (vault, encryption, command handlers), `receipts.py` (receipt value normalisation and family-member matching), `keys.py` (Keychain and key-file providers), `cli.py` (argument parsing, local or remote), `client.py` (remote mode), `server.py` (kaal-server) and `tokens.py`. `bin/secure-notes.py` is a launcher. Install dev dependencies with `pip install -e '.[dev]'` (add `extract` for Docling).
+Code lives in the `kaal` package: `core.py` (vault, encryption, command handlers), `receipts.py` (receipt value normalisation, family-member matching, and checking model values against receipt text), `receipt_ai.py` (the optional model call for receipt fields; off unless `KAAL_RECEIPT_AI` is set), `keys.py` (Keychain and key-file providers), `cli.py` (argument parsing, local or remote), `client.py` (remote mode), `server.py` (kaal-server) and `tokens.py`. `bin/secure-notes.py` is a launcher. Install dev dependencies with `pip install -e '.[dev]'` (add `extract` for Docling).
 
 Tests use a throwaway key file and never the Keychain, and never a real `~/.config/kaal/config.toml` (see `tests/conftest.py`); keep it that way. Run the full verification suite before reporting a code change complete:
 

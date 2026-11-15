@@ -1149,12 +1149,17 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertIn("Method: docling", extracted)
         self.assertEqual(calls, {"markitdown": 0, "tesseract": 0})
 
-    def test_receipt_state_uses_local_ai_only_for_safe_missing_fields(self):
-        state = kaal.receipt_extraction_state("Patient Name          Example Patient\n", ai_fields={"patient_name": "Wrong Person", "provider": "Example Medical Center"})
-        self.assertEqual(state["fields"]["patient_name"], "Example Patient")
-        self.assertEqual(state["field_sources"]["patient_name"], "labelled-text")
-        self.assertEqual(state["fields"]["provider"], "")
-        self.assertNotIn("provider", state["field_sources"])
+    def test_model_names_replace_labelled_ones_and_the_disagreement_is_kept(self):
+        state = kaal.build_receipt_state("Patient Name          Example Patient\n", ai_fields={"patient_name": "Other Person", "provider": "Example Medical Center"})
+        self.assertEqual(state["fields"]["patient_name"], "Other Person")
+        self.assertEqual(state["field_sources"]["patient_name"], "ai-unverified")
+        self.assertEqual(state["conflicts"], {"patient_name": {"labelled-text": "Example Patient", "ai": "Other Person"}})
+        self.assertEqual(state["fields"]["provider"], "Example Medical Center")
+        self.assertEqual(state["field_sources"]["provider"], "ai-unverified")
+        agreed = kaal.build_receipt_state("Patient Name          Example Patient\n", ai_fields={"patient_name": "EXAMPLE PATIENT"})
+        self.assertEqual(agreed["fields"]["patient_name"], "Example Patient")
+        self.assertEqual(agreed["field_sources"]["patient_name"], "ai-grounded")
+        self.assertNotIn("conflicts", agreed)
 
     def test_receipt_amount_requires_an_explicit_payment_label(self):
         self.assertEqual(kaal.infer_receipt_fields("Total: $500.00\n")["amount"], "")
@@ -1194,21 +1199,38 @@ class KaalFeatureTests(unittest.TestCase):
             receipt = kaal.build_receipt_state(extracted)
             self.assertEqual(receipt["fields"].get("amount"), expected_amount, name)
 
-    def test_receipt_state_does_not_accept_an_unverified_ai_amount(self):
-        state = kaal.receipt_extraction_state("Total: $500.00\n", ai_fields={"amount": "500.00"})
-        self.assertEqual(state["fields"]["amount"], "")
-        self.assertNotIn("amount", state["field_sources"])
+    def test_a_model_amount_is_grounded_only_when_the_receipt_prints_it(self):
+        printed = kaal.build_receipt_state("Total: $1,500.00\n", ai_fields={"amount": "1500.00"})
+        self.assertEqual(printed["fields"]["amount"], "1500.00")
+        self.assertEqual(printed["field_sources"]["amount"], "ai-grounded")
+        absent = kaal.build_receipt_state("Total: $1,500.00\n", ai_fields={"amount": "500.00"})
+        self.assertEqual(absent["fields"]["amount"], "500.00")
+        self.assertEqual(absent["field_sources"]["amount"], "ai-unverified")
+        unreadable = kaal.build_receipt_state("Total: $1,500.00\n", ai_fields={"amount": "about fifteen hundred"})
+        self.assertEqual(unreadable["fields"]["amount"], "")
+
+    def test_a_labelled_amount_or_date_is_not_replaced_by_a_different_model_value(self):
+        text = "Amount paid: $12.00\nBalance: $30.00\nDate of Service: 01/02/2026\nStatement date: 02/03/2026\n"
+        state = kaal.build_receipt_state(text, ai_fields={"amount": "$30.00", "service_date": "02/03/2026"})
+        self.assertEqual(state["fields"]["amount"], "12.00")
+        self.assertEqual(state["field_sources"]["amount"], "labelled-text")
+        self.assertEqual(state["fields"]["service_date"], "01/02/2026")
+        self.assertEqual(state["conflicts"], {
+            "amount": {"labelled-text": "12.00", "ai": "$30.00"},
+            "service_date": {"labelled-text": "01/02/2026", "ai": "02/03/2026"},
+        })
 
     def test_receipt_provider_rejects_individual_clinician_candidates(self):
         self.assertEqual(kaal.infer_receipt_fields("Provider: Dr. Example\n")["provider"], "")
-        state = kaal.receipt_extraction_state("", ai_fields={"provider": "Dr. Example"})
+        state = kaal.build_receipt_state("", ai_fields={"provider": "Dr. Example"})
         self.assertEqual(state["fields"].get("provider", ""), "")
         self.assertNotIn("provider", state["field_sources"])
 
-    def test_receipt_state_rejects_semantic_guesses_for_amount_and_dates(self):
-        state = kaal.receipt_extraction_state("", ai_fields={"amount": "500.00", "service_date": "2026-01-01", "paid_date": "2026-01-02"})
-        self.assertEqual(state["fields"], {})
-        self.assertEqual(state["field_sources"], {})
+    def test_model_values_with_no_text_to_check_against_are_kept_as_unverified(self):
+        state = kaal.build_receipt_state("", ai_fields={"amount": "500.00", "service_date": "2026-01-01", "paid_date": "2026-01-02"})
+        self.assertEqual(state["fields"], {"amount": "500.00", "service_date": "2026-01-01", "paid_date": "2026-01-02"})
+        self.assertEqual(set(state["field_sources"].values()), {"ai-unverified"})
+        self.assertEqual(state["state"], "extracted")
 
     def test_build_receipt_state_preserves_manual_critical_fields_on_reextraction(self):
         prior = {

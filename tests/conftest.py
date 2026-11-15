@@ -20,7 +20,8 @@ _KEY_FILE.write_text(base64.b64encode(os.urandom(32)).decode() + "\n", encoding=
 os.chmod(_KEY_FILE, 0o600)
 atexit.register(shutil.rmtree, _KEY_DIR, True)
 
-_CLIENT_VARS = ("KAAL_URL", "KAAL_TOKEN", "KAAL_TOKEN_FILE", "KAAL_LOCAL")
+# KAAL_RECEIPT_AI is cleared too, so no test can reach a real model by accident.
+_CLIENT_VARS = ("KAAL_URL", "KAAL_TOKEN", "KAAL_TOKEN_FILE", "KAAL_LOCAL", "KAAL_RECEIPT_AI", "KAAL_RECEIPT_AI_COMMAND", "KAAL_RECEIPT_AI_MODEL", "KAAL_RECEIPT_AI_TIMEOUT")
 # Never read a real ~/.config/kaal/config.toml: it could point tests at a live server.
 _NO_CONFIG = _KEY_DIR / "no-config.toml"
 os.environ["KAAL_KEY_PROVIDER"] = "file"

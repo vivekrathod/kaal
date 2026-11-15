@@ -40,7 +40,7 @@ from typing import Any, Callable, NoReturn
 from urllib.parse import urlsplit, urlunsplit
 
 from kaal import keys as key_providers
-from kaal import receipts
+from kaal import receipt_ai, receipts
 
 VAULT = Path(os.environ.get("KAAL_VAULT") or os.environ.get("SECURE_NOTES_VAULT") or str(Path.home() / ".secure-notes")).expanduser()
 NOTES_DIR = VAULT / "notes"
@@ -499,7 +499,7 @@ def run_pdf_ocr(path: Path, *, max_pages: int = 10) -> str:
         return ""
     with tempfile.TemporaryDirectory(prefix="kaal-pdf-ocr-") as td:
         prefix = Path(td) / "page"
-        proc = subprocess.run([pdftoppm, "-png", "-r", "200", "-f", "1", "-l", str(max_pages), str(path), str(prefix)], text=True, capture_output=True)
+        proc = subprocess.run([pdftoppm, "-png", "-r", "300", "-f", "1", "-l", str(max_pages), str(path), str(prefix)], text=True, capture_output=True)
         if proc.returncode != 0:
             return ""
         return "\n\n".join(text for image in sorted(Path(td).glob("page-*.png")) if (text := run_tesseract(image)).strip())
@@ -518,6 +518,42 @@ def run_macos_vision_pdf_ocr(path: Path) -> str:
     return proc.stdout if proc.returncode == 0 else ""
 
 
+def text_layer_is_real(text: str) -> bool:
+    """Whether a PDF's own text is worth using: more than a stray header, and mostly letters and digits."""
+    solid = re.sub(r"\s+", "", text or "")
+    return len(solid) >= 50 and sum(char.isalnum() for char in solid) / len(solid) >= 0.5
+
+
+def receipt_pdf_text(path: Path, *, ocr: bool) -> tuple[str, str]:
+    """Text of a receipt PDF as (method, text).
+
+    A real text layer is used as it is. Whether the label rules can find
+    fields in it does not matter here: reading fields is a later step. A PDF
+    with no usable text layer is a scan, so it is read by OCR.
+    """
+    text = run_pdftotext(path)
+    if text_layer_is_real(text):
+        return "pdftotext-layout", text
+    if ocr:
+        for method, reader in (("macos-vision", run_macos_vision_pdf_ocr), ("tesseract-pdf", run_pdf_ocr)):
+            read = reader(path)
+            if read.strip():
+                return method, read
+    return ("pdftotext-layout", text) if text.strip() else ("", "")
+
+
+def receipt_ai_enabled() -> bool:
+    try:
+        return receipt_ai.settings_from_env().enabled
+    except receipt_ai.ReceiptAIError:
+        return False
+
+
+def extracted_plain_text(extracted_md: str) -> str:
+    """The text inside an ``extracted.md`` sidecar, without its heading and code fence."""
+    return re.sub(r"```(?:text)?|# Extracted text:.*|Method:.*", "", extracted_md or "", flags=re.IGNORECASE).strip()
+
+
 def receipt_nonnegotiable_evidence_score(text: str) -> int:
     """Score only explicit paid-amount and date evidence from one extractor."""
     fields = infer_receipt_fields(text)
@@ -533,6 +569,11 @@ def extract_attachment_markdown(path: Path, *, ocr: bool = False, extract: bool 
     if extract and suffix in TEXT_ATTACHMENT_SUFFIXES:
         text = safe_read_text(path)
         method = "text"
+    elif extract and suffix in PDF_ATTACHMENT_SUFFIXES and receipt and receipt_ai_enabled():
+        # With a model reading the fields, the text only has to be the receipt's
+        # text. Without one, the cascade below still hunts for a rendering the
+        # label rules can match, exactly as before.
+        method, text = receipt_pdf_text(path, ocr=ocr)
     elif extract and suffix in PDF_ATTACHMENT_SUFFIXES:
         candidates = [("pdftotext-layout", run_pdftotext(path))]
         # A non-empty native PDF text layer is not enough if it lacks one of the
@@ -1312,6 +1353,7 @@ def ocr_attachments(args: argparse.Namespace) -> None:
                     extracted_md = extract_attachment_markdown(tmp, ocr=ocr, extract=extract, receipt=is_medical_receipt)
                     if extracted_md and tmp.suffix.lower() in PDF_ATTACHMENT_SUFFIXES and "Method: docling" in extracted_md:
                         docling_json = run_docling_json(tmp)
+                    ai_fields, ai_info = receipt_ai_candidates(tmp, extracted_md) if is_medical_receipt else ({}, {})
                 if extracted_md:
                     write_attachment_extracted_sidecar(note, att, extracted_md)
                     att["extracted_markdown"] = True
@@ -1332,11 +1374,14 @@ def ocr_attachments(args: argparse.Namespace) -> None:
                     no_text += 1
                 if "medical" in note.get("tags", []) and "receipt" in note.get("tags", []):
                     prior_receipt = note.get("receipt", {})
-                    note["receipt"] = build_receipt_state(extracted_md, docling_json, prior_receipt)
+                    note["receipt"] = build_receipt_state(extracted_md, docling_json, prior_receipt, ai_fields=ai_fields, ai_info=ai_info)
                 secure_write_json(attachment_note_dir(note["id"]) / att["id"] / "metadata.json", att)
             except Exception as e:
                 if "medical" in note.get("tags", []) and "receipt" in note.get("tags", []):
-                    note["receipt"] = receipt_extraction_state("", str(e))
+                    # A failed re-extraction must not cost the user what they typed or confirmed.
+                    failed = build_receipt_state("", {}, note.get("receipt", {}))
+                    failed["state"], failed["error"] = "error", str(e)[:500]
+                    note["receipt"] = failed
                 errors.append({"note_id": note.get("id", ""), "attachment_id": att.get("id", ""), "name": att.get("name", ""), "error": str(e)})
     if not dry_run and (extracted or no_text or skipped_existing or errors):
         save_index(index)
@@ -1445,14 +1490,31 @@ def infer_docling_fields(document: dict[str, Any]) -> dict[str, str]:
     return result
 
 
-def receipt_extraction_state(extracted_text: str = "", error: str = "", ai_fields: dict[str, str] | None = None) -> dict[str, Any]:
-    """Create candidates only from explicit receipt evidence, never semantic guesses."""
+def receipt_extraction_state(extracted_text: str = "", error: str = "") -> dict[str, Any]:
+    """Candidates from the label rules alone: explicit receipt evidence, never semantic guesses."""
     fields = infer_receipt_fields(extracted_text) if extracted_text else {}
     sources: dict[str, str] = {key: "labelled-text" for key, value in fields.items() if value}
     return {"state": "error" if error else "extracted" if extracted_text.strip() else "no_text", "attempted_at": now_iso(), "error": error[:500], "fields": fields, "field_sources": sources}
 
 
-def build_receipt_state(extracted_text: str, docling_json: dict[str, Any] | None = None, prior_receipt: dict[str, Any] | None = None) -> dict[str, Any]:
+def receipt_ai_candidates(path: Path, extracted_md: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Ask the configured model for a receipt's fields.
+
+    Returns (candidates, info). With the model off, both are empty. When the
+    model cannot be asked or fails, candidates are empty and info names the
+    kind of failure, so extraction carries on with the label rules alone.
+    """
+    try:
+        settings = receipt_ai.settings_from_env()
+        if not settings.enabled:
+            return {}, {}
+        info = {"backend": settings.backend, "model": settings.model}
+        return receipt_ai.extract(extracted_plain_text(extracted_md), receipt_ai.receipt_images(path), settings), info
+    except receipt_ai.ReceiptAIError as error:
+        return {}, {"backend": os.environ.get("KAAL_RECEIPT_AI", "") or "off", "error": error.kind}
+
+
+def build_receipt_state(extracted_text: str, docling_json: dict[str, Any] | None = None, prior_receipt: dict[str, Any] | None = None, *, ai_fields: dict[str, str] | None = None, ai_info: dict[str, str] | None = None) -> dict[str, Any]:
     """Use one conservative field path for capture and re-extraction.
 
     Text/layout candidates are suggestions. Only values a person typed or
@@ -1464,6 +1526,14 @@ def build_receipt_state(extracted_text: str, docling_json: dict[str, Any] | None
         if value and not receipt["fields"].get(field):
             receipt["fields"][field] = value
             receipt["field_sources"][field] = "docling-structured"
+    if ai_fields:
+        if receipt["state"] == "no_text":
+            receipt["state"] = "extracted"
+        conflicts = receipts.merge_model_fields(receipt["fields"], receipt["field_sources"], ai_fields, extracted_plain_text(extracted_text))
+        if conflicts:
+            receipt["conflicts"] = conflicts
+    if ai_info:
+        receipt["ai"] = dict(ai_info)
     prior = prior_receipt or {}
     prior_fields = prior.get("fields", {})
     prior_sources = prior.get("field_sources", {})
@@ -1472,11 +1542,14 @@ def build_receipt_state(extracted_text: str, docling_json: dict[str, Any] | None
         if source in {"manual", "confirmed"} and prior_fields.get(field):
             receipt["fields"][field] = prior_fields[field]
             receipt["field_sources"][field] = source
+            receipt.get("conflicts", {}).pop(field, None)
             if prior_raw.get(field):
                 receipt.setdefault("field_raw", {})[field] = prior_raw[field]
     for key in ("manually_updated_at", "reimbursed_at", "reimbursement_note"):
         if prior.get(key):
             receipt[key] = prior[key]
+    if not receipt.get("conflicts"):
+        receipt.pop("conflicts", None)
     return receipt
 
 
@@ -1683,7 +1756,8 @@ def medical_capture(args: argparse.Namespace) -> None:
                 docling_json = json.loads(docling_sidecar.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 docling_json = {}
-        saved["receipt"] = build_receipt_state(extracted_text, docling_json)
+        ai_fields, ai_info = receipt_ai_candidates(src, extracted_text)
+        saved["receipt"] = build_receipt_state(extracted_text, docling_json, ai_fields=ai_fields, ai_info=ai_info)
         saved["updated"] = now_iso()
         save_index(index)
     emit({
@@ -1737,9 +1811,10 @@ def medical_review(args: argparse.Namespace) -> None:
             die("Cannot mark reviewed until the paid amount and a date are confirmed.")
         fields = receipt.setdefault("fields", {})
         sources = receipt.setdefault("field_sources", {})
-        for field in ("amount", "service_date", "paid_date"):
+        for field in receipts.EVALUATED_FIELDS:
             if fields.get(field) and sources.get(field) != "manual":
                 sources[field] = "confirmed"
+        receipt.pop("conflicts", None)
         meta["tags"] = [tag for tag in meta.get("tags", []) if tag != "inbox"]
         meta["reviewed_at"] = now_iso()
         meta["updated"] = meta["reviewed_at"]
@@ -1841,6 +1916,7 @@ def medical_update(args: argparse.Namespace) -> None:
         raw = receipt.setdefault("field_raw", {})
         for key, value in stored.items():
             fields[key] = value
+            receipt.get("conflicts", {}).pop(key, None)
             typed = updates[key].strip()
             if typed != value:
                 raw[key] = typed
@@ -1894,6 +1970,7 @@ def medical_report(args: argparse.Namespace) -> None:
     rows: list[dict[str, Any]] = []
     undated: list[str] = []
     missing_amount: list[str] = []
+    unverified_amount: list[str] = []
     zero = Decimal("0")
     totals = {"total": zero, "reimbursed": zero, "unreimbursed": zero, "needs_review": zero}
     needs_review_count = 0
@@ -1916,7 +1993,10 @@ def medical_report(args: argparse.Namespace) -> None:
         reimbursed = bool(receipt.get("reimbursed_at"))
         if reimbursed_filter != "all" and reimbursed != (reimbursed_filter == "yes"):
             continue
-        when = fields.get("service_date") or fields.get("paid_date") or ""
+        sources = receipt.get("field_sources", {})
+        # A value the model read but Kaal could not find in the receipt text
+        # does not count until a person confirms it.
+        when = next((fields[name] for name in receipts.DATE_FIELDS if fields.get(name) and sources.get(name) != receipts.SOURCE_AI_UNVERIFIED), "")
         if not when:
             undated.append(note["id"])
             if dated_filter:
@@ -1926,6 +2006,9 @@ def medical_report(args: argparse.Namespace) -> None:
         amount = receipts.amount_value(fields.get("amount") or "")
         if amount is None:
             missing_amount.append(note["id"])
+            amount = zero
+        elif sources.get("amount") == receipts.SOURCE_AI_UNVERIFIED:
+            unverified_amount.append(note["id"])
             amount = zero
         reviewed = receipt.get("status") == receipts.STATUS_REVIEWED
         totals["total"] += amount
@@ -1961,6 +2044,7 @@ def medical_report(args: argparse.Namespace) -> None:
         "by_year": grouped(by_year, "year"),
         "undated": undated,
         "missing_amount": missing_amount,
+        "unverified_amount": unverified_amount,
         "receipts": rows,
     }, ensure_ascii=False)
 
@@ -1975,7 +2059,8 @@ def extract_receipt_fields(path: Path) -> tuple[dict[str, str], str]:
     docling_json: dict[str, Any] = {}
     if extracted and path.suffix.lower() in PDF_ATTACHMENT_SUFFIXES and "Method: docling" in extracted:
         docling_json = run_docling_json(path)
-    receipt = build_receipt_state(extracted, docling_json)
+    ai_fields, ai_info = receipt_ai_candidates(path, extracted)
+    receipt = build_receipt_state(extracted, docling_json, ai_fields=ai_fields, ai_info=ai_info)
     receipts.upgrade(receipt, reviewed=False, people=[])
     method = re.search(r"^Method: (.+)$", extracted, flags=re.MULTILINE)
     return receipt["fields"], method.group(1).strip() if method else "none"
@@ -2072,6 +2157,7 @@ def medical_evaluate(args: argparse.Namespace) -> None:
 
     emit({
         "status": "ok",
+        "receipt_ai": receipt_ai_status(),
         "evaluated": len(evaluated),
         "seconds": round((datetime.now(timezone.utc) - started).total_seconds(), 1),
         "overall": summarise(overall),
@@ -2631,6 +2717,14 @@ def delete_note(args: argparse.Namespace) -> None:
     emit({"status": "deleted", "id": nid}, indent=2)
 
 
+def receipt_ai_status() -> dict[str, Any]:
+    """Whether a model is configured for receipts and its command exists. Does not call the model."""
+    try:
+        return receipt_ai.describe(receipt_ai.settings_from_env())
+    except receipt_ai.ReceiptAIError as error:
+        return {"backend": "misconfigured", "usable": False, "problem": str(error)}
+
+
 def status(args: argparse.Namespace) -> None:
     try:
         provider = key_providers.provider_from_env()
@@ -2646,6 +2740,7 @@ def status(args: argparse.Namespace) -> None:
         "key_exists": has_key,
         "keychain_key_exists": has_key if provider_name == "keychain" else False,
         "notes": len(load_index().get("notes", [])) if INDEX_PATH.exists() else 0,
+        "receipt_ai": receipt_ai_status(),
     }, indent=2)
 
 

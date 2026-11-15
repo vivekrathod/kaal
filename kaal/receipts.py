@@ -18,6 +18,10 @@ DATE_FIELDS = ("service_date", "paid_date")
 NORMALISED_FIELDS = (*DATE_FIELDS, "amount")
 EVALUATED_FIELDS = ("amount", "service_date", "paid_date", "patient_name", "provider", "insurer")
 TRUSTED_SOURCES = frozenset({"manual", "confirmed"})
+SOURCE_RULES = "labelled-text"
+SOURCE_AI_GROUNDED = "ai-grounded"
+SOURCE_AI_UNVERIFIED = "ai-unverified"
+_CLINICIAN = re.compile(r"(?:dr\.?|doctor)\s+", re.IGNORECASE)
 STATUS_NEEDS_REVIEW = "needs_review"
 STATUS_REVIEWED = "reviewed"
 
@@ -118,6 +122,92 @@ def compare_field(name: str, truth: str, candidate: str) -> str:
     if wanted <= found or (found < wanted and len(found) >= 2):
         return "correct"
     return "wrong"
+
+
+def dates_in_text(text: str) -> set[str]:
+    """Every date printed in ``text``, normalised."""
+    found: set[str] = set()
+    for pattern in (_ISO_DATE, _US_DATE, _MONTH_FIRST, _DAY_FIRST):
+        for match in pattern.finditer(text or ""):
+            normalised = normalize_date(match.group(0))
+            if normalised:
+                found.add(normalised)
+    return found
+
+
+def amount_in_text(amount: str, text: str) -> bool:
+    """Whether a normalised amount such as "1234.50" is printed in ``text``, with or without thousands separators."""
+    whole, _, cents = amount.partition(".")
+    grouped = "".join(digit + (",?" if index and index % 3 == 0 else "") for index, digit in zip(range(len(whole) - 1, -1, -1), whole))
+    decimals = r"(?:\.00)?" if cents == "00" else r"\." + cents
+    return re.search(r"(?<![\d.,])" + grouped + decimals + r"(?!\d|[.,]\d)", text or "") is not None
+
+
+def _squashed(value: str) -> str:
+    return " ".join(re.sub(r"[\W_]+", " ", (value or "").casefold()).split())
+
+
+def ground(name: str, value: str, text: str) -> bool:
+    """Whether ``value`` can be found in the text read from the receipt.
+
+    Amounts and dates are matched by value, so "$1,234.50" grounds "1234.50"
+    and "10/16/2026" grounds "2026-10-16". Names must appear as the same run
+    of words, ignoring case and punctuation.
+    """
+    if name == "amount":
+        normalised = normalize_amount(value)
+        return bool(normalised) and amount_in_text(normalised, text)
+    if name in DATE_FIELDS:
+        normalised = normalize_date(value)
+        return bool(normalised) and normalised in dates_in_text(text)
+    wanted = _squashed(value)
+    return bool(wanted) and f" {wanted} " in f" {_squashed(text)} "
+
+
+def merge_model_fields(fields: dict[str, str], sources: dict[str, str], model_fields: dict[str, str], text: str) -> dict[str, dict[str, str]]:
+    """Fold a model's candidates into rule-based ``fields`` in place; return the disagreements.
+
+    A model value found in the receipt text is ``ai-grounded``; one that is not
+    (a name read from a logo, anything from a blurry photo) is ``ai-unverified``.
+    Where the rules found nothing, the model's value is taken either way.
+    Where both found something and disagree:
+      - amounts and dates: the rule's value stays. A rule only fires on an
+        explicit printed label such as "Amount paid", and on real receipts it
+        has been sparse but not wrong;
+      - names: the model's value is taken, because it reads the whole receipt
+        while the rules match by position and are often wrong.
+    Every disagreement is returned so a reviewer sees both values.
+    """
+    conflicts: dict[str, dict[str, str]] = {}
+    for name in EVALUATED_FIELDS:
+        value = (model_fields.get(name) or "").strip()
+        if not value:
+            continue
+        if name == "provider" and _CLINICIAN.match(value):
+            continue
+        if name in NORMALISED_FIELDS:
+            normalised = normalize_date(value) if name in DATE_FIELDS else normalize_amount(value)
+            if not normalised:
+                continue
+        grounded = ground(name, value, text)
+        source = SOURCE_AI_GROUNDED if grounded else SOURCE_AI_UNVERIFIED
+        current = fields.get(name) or ""
+        if not current:
+            fields[name], sources[name] = value, source
+            continue
+        if name in NORMALISED_FIELDS:
+            current_normalised = normalize_date(current) if name in DATE_FIELDS else normalize_amount(current)
+            agree = compare_field(name, current_normalised, value) == "correct"
+        else:
+            agree = _squashed(current) == _squashed(value)
+        if agree:
+            if grounded:
+                sources[name] = SOURCE_AI_GROUNDED
+            continue
+        conflicts[name] = {SOURCE_RULES: current, "ai": value}
+        if name not in NORMALISED_FIELDS:
+            fields[name], sources[name] = value, source
+    return conflicts
 
 
 def upgrade(receipt: dict[str, Any], *, reviewed: bool, people: list[str]) -> bool:

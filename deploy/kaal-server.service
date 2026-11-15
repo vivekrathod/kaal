@@ -18,6 +18,14 @@ Environment=TMPDIR=/srv/kaal/tmp
 Environment=KAAL_KEY_PROVIDER=file
 Environment=KAAL_KEY_FILE=/etc/kaal/master.key
 Environment=KAAL_PORT=8765
+# Optional: read receipt fields with a model (see README). The login for the
+# command belongs in a root-only file, never in this unit.
+#Environment=KAAL_RECEIPT_AI=claude-cli
+#Environment=KAAL_RECEIPT_AI_COMMAND=/path/to/claude
+#Environment=HOME=/srv/kaal
+#Environment=CLAUDE_CONFIG_DIR=/srv/kaal/claude
+#Environment=DISABLE_AUTOUPDATER=1
+#EnvironmentFile=/etc/kaal/receipt-ai.env
 ExecStart=/opt/kaal/venv/bin/kaal-server serve
 Restart=on-failure
 RestartSec=5

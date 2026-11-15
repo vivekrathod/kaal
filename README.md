@@ -111,6 +111,13 @@ status, token name and duration only, never bodies, query strings, file
 contents or tokens. Validation errors name the bad fields without echoing the
 values. Uploads go to a private folder that is removed after each request.
 
+**What leaves the server.** Nothing, unless `KAAL_RECEIPT_AI` is set. With it
+set, each captured or re-extracted medical receipt's text and page images are
+sent to the model provider behind the configured command (for `claude-cli`,
+Anthropic), under that account's terms and data settings. Notes and other
+attachments are never sent. The login for that command is a credential on the
+server: keep it readable only by root and the service.
+
 **Not defended against.** A compromised client can do whatever its token allows
 until you revoke it, and a token with `admin` can export everything. A
 compromised server host exposes everything. The classifier can miss sensitive
@@ -124,8 +131,44 @@ denial-of-service protection.
 - A non-empty text layer is not automatically considered adequate: medical PDF receipts use the small ordered route `pdftotext -layout` → macOS Vision OCR → Docling, stopping when explicit paid-amount and date evidence is present. MarkItDown and Tesseract remain available only for generic, non-receipt attachment extraction.
 - Kaal never guesses the paid amount or date from an unlabelled total, balance, or date-like value. Ambiguous fields stay blank for review.
 - The narrow exception is an explicitly **SALE/PAYMENT - APPROVED** card receipt with a labelled **Total Amount**: that is recorded as the completed card payment. A bare `Total` or `Total Amount` is still rejected.
-- Kaal records field provenance (`labelled-text`, `docling-structured`, `manual`, or `confirmed`). Manual corrections survive re-extraction.
+- Kaal records field provenance (`labelled-text`, `docling-structured`, `ai-grounded`, `ai-unverified`, `manual`, or `confirmed`). Manual corrections and confirmed values survive re-extraction.
 - A receipt cannot be marked reviewed until it has a paid amount and at least one receipt date (service date or payment date). Marking it reviewed confirms non-manual values currently shown in the review screen.
+
+### Reading receipt fields with a model (optional, off by default)
+
+The label rules above only recognise a few fixed layouts. A server can instead
+ask a language model which values on a receipt are which:
+
+```bash
+KAAL_RECEIPT_AI=claude-cli            # default: off
+KAAL_RECEIPT_AI_COMMAND=/path/to/claude   # default: claude on PATH
+KAAL_RECEIPT_AI_MODEL=haiku           # default
+KAAL_RECEIPT_AI_TIMEOUT=90            # seconds, default
+```
+
+With this on, a receipt PDF's own text layer is used as it is (a scan with no
+text layer is read by OCR; Docling is not used), and the model is given that
+text plus an image of the first pages, or the photo itself. It runs with no
+tools, no saved session, no user or project settings and an empty working
+directory, so nothing printed on a receipt can make it do anything.
+
+The model only labels; Kaal decides what to trust:
+
+- A value found in the text read from the receipt is `ai-grounded`. Amounts and
+  dates are matched by value, so `$1,234.50` grounds `1234.50`.
+- A value not found there (a provider name that exists only as a logo, anything
+  from a blurry photo) is kept as `ai-unverified`. Unverified amounts and dates
+  are left out of report totals until you review the receipt.
+- Where a label rule and the model disagree on an amount or a date, the rule's
+  value stays; for names the model's value is used. Both are kept under
+  `conflicts` for you to see, and reviewing or correcting the field settles it.
+- An individual clinician is never accepted as the provider.
+
+If the model is unreachable, signed out or rate-limited, the receipt is still
+captured with whatever the label rules find, and the reason is recorded on it.
+`kaal status` shows whether the model is configured and its command exists.
+This sends receipt text and page images to the model's provider: see the
+threat model.
 
 Current installed support on this machine:
 
