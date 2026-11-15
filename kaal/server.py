@@ -67,6 +67,9 @@ class Settings:
     rate_per_minute: int = 240
     host: str = "127.0.0.1"
     port: int = DEFAULT_PORT
+    # Read captured receipts after the capture request has returned. `serve`
+    # turns this on (KAAL_BACKGROUND_EXTRACTION=0 turns it off).
+    background_extraction: bool = False
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "Settings":
@@ -82,7 +85,60 @@ class Settings:
             rate_per_minute=int(env.get("KAAL_RATE_PER_MINUTE") or 240),
             host=env.get("KAAL_BIND") or "127.0.0.1",
             port=int(env.get("KAAL_PORT") or DEFAULT_PORT),
+            background_extraction=(env.get("KAAL_BACKGROUND_EXTRACTION") or "1").strip() != "0",
         )
+
+
+class ExtractionWorker:
+    """Reads receipts that were captured or queued but not yet read.
+
+    Capture only stores the original and marks the receipt pending; this
+    worker does the slow part afterwards, so a capture returns at once and the
+    request lock is held only while a result is written. Pending receipts are
+    found in the vault itself, so work left over from a restart is picked up.
+    """
+
+    def __init__(self, vault_lock: threading.Lock, idle_seconds: float = 300.0) -> None:
+        self.vault_lock = vault_lock
+        self.idle_seconds = idle_seconds
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def wake(self) -> None:
+        self._wake.set()
+
+    def drain(self) -> int:
+        """Read every pending receipt once; return how many were attempted."""
+        attempted = 0
+        for note_id in core.pending_receipt_ids():
+            if self._stop.is_set():
+                break
+            attempted += 1
+            try:
+                outcome = core.reextract_receipt(note_id, outer_lock=self.vault_lock)
+                log.info("receipt read: %s", outcome)
+            except (Exception, core.KaalError) as error:
+                # Leave it pending for the next pass; never log a receipt's contents.
+                log.error("receipt read failed: %s", type(error).__name__)
+        return attempted
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._wake.clear()
+            self.drain()
+            self._wake.wait(self.idle_seconds)
+
+    def start(self) -> None:
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._run, name="kaal-receipt-extraction", daemon=True)
+            self._thread.start()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._stop.set()
+        self._wake.set()
+        if self._thread is not None:
+            self._thread.join(timeout)
 
 
 class RateLimiter:
@@ -161,6 +217,7 @@ class AppState:
     tokens: tokens.TokenStore
     limiter: RateLimiter
     vault_lock: threading.Lock
+    worker: Any = None
 
 
 def _error(status: int, message: str, kind: str | None = None, details: dict | None = None, headers: dict | None = None) -> JSONResponse:
@@ -333,6 +390,15 @@ class ReportFilter(BaseModel):
     reimbursed: str = Field(default="all", max_length=3)
 
 
+class Reextract(BaseModel):
+    ids: list[str] = Field(default_factory=list, max_length=100)
+    unreviewed: bool = False
+
+
+class ProviderForget(BaseModel):
+    forget: list[str] = Field(min_length=1, max_length=50)
+
+
 class Reimburse(BaseModel):
     ids: list[str] = Field(min_length=1, max_length=100)
     date: str = Field(default="", max_length=32)
@@ -360,6 +426,7 @@ def create_app(settings: Settings) -> FastAPI:
     app = FastAPI(title="Kaal", version=__version__, docs_url=None, redoc_url=None, openapi_url=None,
                   description="An encrypted notes vault. Every request needs `Authorization: Bearer <token>` except /v1/health.")
     app.state.kaal = AppState(settings, tokens.TokenStore(settings.tokens_file), RateLimiter(settings.rate_per_minute), threading.Lock())
+    app.state.kaal.worker = ExtractionWorker(app.state.kaal.vault_lock)
     app.add_middleware(BodyLimitMiddleware, limit=settings.max_upload_bytes + MiB)
 
     @app.middleware("http")
@@ -523,8 +590,13 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.post("/v1/medical/receipts", tags=["medical"], dependencies=[require("write")])
     def medical_capture(request: Request, file: UploadFile = File(...), title: str = Form(""), source_url: str = Form(""), source_title: str = Form(""), captured_at: str = Form("")):
-        with _saved_upload(S(request), file) as path:
-            return _run(S(request), core.medical_capture, file=str(path), title=title, source_url=source_url, source_title=source_title, captured_at=captured_at)
+        state = S(request)
+        defer = state.settings.background_extraction
+        with _saved_upload(state, file) as path:
+            response = _run(state, core.medical_capture, file=str(path), title=title, source_url=source_url, source_title=source_title, captured_at=captured_at, defer=defer)
+        if defer:
+            state.worker.wake()
+        return response
 
     @app.get("/v1/medical/receipts", tags=["medical"], dependencies=[require("read", "reveal")])
     def medical_list(request: Request, inbox: bool = False, trash: bool = False, limit: int = Query(0, ge=0)):
@@ -539,6 +611,23 @@ def create_app(settings: Settings) -> FastAPI:
     @app.post("/v1/medical/receipts/reimburse", tags=["medical"], dependencies=[require("write")])
     def medical_reimburse(request: Request, body: Reimburse):
         return _run(S(request), core.medical_reimburse, note_ids=body.ids, date=body.date, note=body.note, undo=body.undo)
+
+    @app.post("/v1/medical/receipts/reextract", tags=["medical"], dependencies=[require("write")])
+    def medical_reextract(request: Request, body: Reextract):
+        state = S(request)
+        defer = state.settings.background_extraction
+        response = _run(state, core.medical_reextract, note_ids=body.ids, unreviewed=body.unreviewed, defer=defer)
+        if defer:
+            state.worker.wake()
+        return response
+
+    @app.get("/v1/medical/providers", tags=["medical"], dependencies=[require("read", "reveal")])
+    def medical_providers(request: Request):
+        return _run(S(request), core.medical_providers, forget=[])
+
+    @app.post("/v1/medical/providers/forget", tags=["medical"], dependencies=[require("write")])
+    def medical_providers_forget(request: Request, body: ProviderForget):
+        return _run(S(request), core.medical_providers, forget=body.forget)
 
     @app.get("/v1/medical/people", tags=["medical"], dependencies=[require("read", "reveal")])
     def medical_people(request: Request):
@@ -614,6 +703,8 @@ def _serve(args: argparse.Namespace) -> None:
     # Multipart parsing spools large uploads to disk: keep that in our private folder.
     tempfile.tempdir = str(settings.tmp_dir)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    if settings.background_extraction:
+        app.state.kaal.worker.start()
     uvicorn.run(app, host=host, port=port, access_log=False, server_header=False, proxy_headers=False, log_level="warning")
 
 

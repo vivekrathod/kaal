@@ -170,6 +170,18 @@ The model only labels; Kaal decides what to trust:
   totals until you review the receipt.
 - An individual clinician is never accepted as the provider.
 
+**Remembered provider names.** Receipts often print a billing company's legal
+name, or a short brand, where you would write the practice's name. When you
+type or confirm a provider on a receipt where the model read a different name,
+Kaal remembers the pair, and the next receipt printing that name shows your
+wording, marked `remembered`, with the printed name kept in `field_raw`. A
+provider you typed is never replaced.
+
+```bash
+kaal medical providers                          # what Kaal has learnt
+kaal medical providers --forget "Printed Name"  # stop replacing it; not relearnt
+```
+
 If the model is unreachable, signed out or rate-limited, the receipt is still
 captured with whatever the label rules find, and the reason is recorded on it.
 `kaal status` shows whether the model is configured and its command exists.
@@ -366,6 +378,17 @@ kaal medical reimburse NOTE_ID --undo
 kaal medical report --year 2026
 kaal medical report --reimbursed no
 ```
+
+`kaal medical reextract NOTE_ID…` reads stored receipts again, and
+`kaal medical reextract --unreviewed` does it for everything still awaiting
+review. Values you typed or confirmed are kept, and so is the reimbursement.
+
+On a server, a captured receipt is stored at once and read afterwards: it shows
+status `extracting` until the background worker has read it, then
+`needs_review`, or `failed` if it could not be read. A re-read is queued the
+same way. Work left unfinished by a restart is picked up when the server
+starts. Set `KAAL_BACKGROUND_EXTRACTION=0` to read during the capture request
+instead.
 
 `kaal medical evaluate` measures how well extraction is doing. It runs on the
 server, re-extracts each receipt that has values you typed or confirmed,

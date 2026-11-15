@@ -30,7 +30,7 @@ import tempfile
 import textwrap
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -299,6 +299,7 @@ def load_index() -> dict[str, Any]:
 
 
 def save_index(index: dict[str, Any]) -> None:
+    learn_provider_names(index)
     upgrade_receipts(index)
     index["updated"] = now_iso()
     secure_write_json(INDEX_PATH, index)
@@ -310,16 +311,51 @@ def medical_people_names(index: dict[str, Any]) -> list[str]:
     return [name for name in people if isinstance(name, str) and name]
 
 
+def medical_provider_names(index: dict[str, Any]) -> dict[str, str]:
+    """Printed provider name (as ``receipts.name_key``) -> the wording the user chose for it."""
+    names = index.get("medical", {}).get("provider_names", {}) if isinstance(index.get("medical"), dict) else {}
+    return {key: value for key, value in names.items() if isinstance(key, str) and isinstance(value, str) and key and value} if isinstance(names, dict) else {}
+
+
+def learn_provider_names(index: dict[str, Any]) -> None:
+    """Remember how the user words a provider the model read differently.
+
+    A receipt whose provider a person typed or confirmed, and for which the
+    model read some other name, is evidence that this printed name should be
+    shown the user's way. Names the user told Kaal to forget are not relearnt.
+    """
+    medical = index.get("medical") if isinstance(index.get("medical"), dict) else {}
+    forgotten = {key for key in medical.get("provider_names_forgotten", []) if isinstance(key, str)}
+    names = medical_provider_names(index)
+    learnt = False
+    for note in index.get("notes", []):
+        if not isinstance(note, dict) or not is_medical_receipt(note) or not isinstance(note.get("receipt"), dict):
+            continue
+        receipt = note["receipt"]
+        chosen = (receipt.get("fields") or {}).get("provider") or ""
+        printed = receipts.name_key(receipt.get("model_provider") or "")
+        if not chosen or not printed or (receipt.get("field_sources") or {}).get("provider") not in receipts.TRUSTED_SOURCES:
+            continue
+        if printed in forgotten or printed == receipts.name_key(chosen) or names.get(printed) == chosen:
+            continue
+        names[printed] = chosen
+        learnt = True
+    if learnt:
+        medical["provider_names"] = names
+        index["medical"] = medical
+
+
 def upgrade_receipts(index: dict[str, Any]) -> bool:
     """Normalise every medical receipt record in an index; True if any changed."""
     people = medical_people_names(index)
+    provider_names = medical_provider_names(index)
     changed = False
     for note in index.get("notes", []):
         if not isinstance(note, dict) or not is_medical_receipt(note):
             continue
         if not isinstance(note.get("receipt"), dict):
             note["receipt"] = {}
-        changed |= receipts.upgrade(note["receipt"], reviewed="inbox" not in note.get("tags", []), people=people)
+        changed |= receipts.upgrade(note["receipt"], reviewed="inbox" not in note.get("tags", []), people=people, provider_names=provider_names)
     return changed
 
 
@@ -1535,6 +1571,13 @@ def build_receipt_state(extracted_text: str, docling_json: dict[str, Any] | None
     if ai_info:
         receipt["ai"] = dict(ai_info)
     prior = prior_receipt or {}
+    # What the model read as the provider, kept even when a person's wording is
+    # shown instead: it is how Kaal learns the user's name for this provider.
+    model_provider = ((ai_fields or {}).get("provider") or "").strip()
+    if model_provider and not re.match(r"(?:dr\.?|doctor)\s+", model_provider, flags=re.IGNORECASE):
+        receipt["model_provider"] = model_provider[:200]
+    elif prior.get("model_provider"):
+        receipt["model_provider"] = prior["model_provider"]
     prior_fields = prior.get("fields", {})
     prior_sources = prior.get("field_sources", {})
     prior_raw = prior.get("field_raw", {})
@@ -1720,6 +1763,9 @@ def medical_capture(args: argparse.Namespace) -> None:
         "Captured from the browser. Review or enrich this record later if needed.",
         "",
     ])
+    # With ``defer``, capture only stores the original; reading it happens
+    # afterwards, outside the vault lock (see reextract_receipt).
+    defer = bool(getattr(args, "defer", False))
     with vault_capture_lock():
         meta = create_note(title, "\n".join(body_lines), tags=["medical", "receipt", "inbox"], sensitivity="public", source=source)
         try:
@@ -1727,8 +1773,8 @@ def medical_capture(args: argparse.Namespace) -> None:
                 meta,
                 src,
                 sensitivity="public",
-                extract=True,
-                ocr=True,
+                extract=not defer,
+                ocr=not defer,
                 source=source,
                 receipt=True,
             )
@@ -1756,8 +1802,11 @@ def medical_capture(args: argparse.Namespace) -> None:
                 docling_json = json.loads(docling_sidecar.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 docling_json = {}
-        ai_fields, ai_info = receipt_ai_candidates(src, extracted_text)
-        saved["receipt"] = build_receipt_state(extracted_text, docling_json, ai_fields=ai_fields, ai_info=ai_info)
+        if defer:
+            saved["receipt"] = {"state": receipts.STATE_PENDING, "attempted_at": now_iso(), "fields": {}, "field_sources": {}}
+        else:
+            ai_fields, ai_info = receipt_ai_candidates(src, extracted_text)
+            saved["receipt"] = build_receipt_state(extracted_text, docling_json, ai_fields=ai_fields, ai_info=ai_info)
         saved["updated"] = now_iso()
         save_index(index)
     emit({
@@ -1769,7 +1818,146 @@ def medical_capture(args: argparse.Namespace) -> None:
         "attachment_id": attachment["id"],
         "attachment_name": attachment["name"],
         "extracted_markdown": attachment["extracted_markdown"],
+        "extraction": "pending" if defer else "done",
     }, indent=2, ensure_ascii=False)
+
+
+def pending_receipt_ids() -> list[str]:
+    """Active receipts whose original is stored but has not been read yet."""
+    return [
+        note["id"] for note in load_index().get("notes", [])
+        if is_medical_receipt(note) and not note.get("trashed_at") and note.get("receipt", {}).get("state") == receipts.STATE_PENDING
+    ]
+
+
+def reextract_receipt(note_id: str, outer_lock: Any = None) -> str:
+    """Read one stored receipt again and save the result; "done", "error" or "gone".
+
+    The slow part (text, OCR, the model) runs without any lock, on a private
+    copy of the original. The vault lock is taken only to write the result, and
+    the receipt is read afresh at that point, so anything a person changed in
+    the meantime is kept. ``outer_lock`` is a lock the caller's other writers
+    hold around vault changes (kaal-server's request lock).
+    """
+    note = next((item for item in load_index().get("notes", []) if item.get("id") == note_id and is_medical_receipt(item)), None)
+    attachment = (note.get("attachments") or [None])[0] if note else None
+    extracted_md, docling_json, ai_fields, ai_info, failure = "", {}, {}, {}, ""
+    if note is not None and attachment is not None:
+        try:
+            with tempfile.TemporaryDirectory(prefix="kaal-receipt-") as directory:
+                os.chmod(directory, 0o700)
+                copy = Path(directory) / (attachment.get("stored_name") or attachment.get("name") or f"attachment-{attachment['id']}")
+                copy.write_bytes(attachment_original_bytes(note, attachment))
+                os.chmod(copy, 0o600)
+                extracted_md = extract_attachment_markdown(copy, ocr=True, extract=True, receipt=True)
+                if extracted_md and copy.suffix.lower() in PDF_ATTACHMENT_SUFFIXES and "Method: docling" in extracted_md:
+                    docling_json = run_docling_json(copy)
+                ai_fields, ai_info = receipt_ai_candidates(copy, extracted_md)
+        except (Exception, KaalError) as error:
+            failure = type(error).__name__
+    with (outer_lock or nullcontext()), vault_capture_lock():
+        index = load_index()
+        current = next((item for item in index.get("notes", []) if item.get("id") == note_id and is_medical_receipt(item)), None)
+        if current is None:
+            return "gone"
+        stored = next((item for item in current.get("attachments", []) if attachment and item.get("id") == attachment["id"]), None)
+        prior = current.get("receipt", {})
+        if stored is None or failure:
+            # Keep whatever a person typed or confirmed; only the automatic part failed.
+            failed = build_receipt_state("", {}, prior)
+            failed["state"], failed["error"] = "error", failure or "the receipt has no stored original"
+            current["receipt"] = failed
+        else:
+            if extracted_md:
+                write_attachment_extracted_sidecar(current, stored, extracted_md)
+                stored["extracted_markdown"] = True
+                stored["extracted_at"] = now_iso()
+                if docling_json:
+                    out_dir = attachment_note_dir(current["id"]) / stored["id"]
+                    payload = json.dumps(docling_json, ensure_ascii=False).encode("utf-8")
+                    if stored.get("storage") == "encrypted":
+                        secure_write_json(out_dir / "docling.json.enc", {"encrypted": encrypt_bytes(payload, aad=f"{current['id']}:{stored['id']}:docling.json".encode())})
+                    else:
+                        (out_dir / "docling.json").write_bytes(payload)
+                        os.chmod(out_dir / "docling.json", 0o600)
+                    stored["docling_json"] = True
+            else:
+                stored["extracted_markdown"] = False
+                stored["extraction_attempted_at"] = now_iso()
+            secure_write_json(attachment_note_dir(current["id"]) / stored["id"] / "metadata.json", stored)
+            current["receipt"] = build_receipt_state(extracted_md, docling_json, prior, ai_fields=ai_fields, ai_info=ai_info)
+        current["updated"] = now_iso()
+        save_index(index)
+    return "error" if stored is None or failure else "done"
+
+
+def medical_reextract(args: argparse.Namespace) -> None:
+    """Read stored receipts again: the ones named, or every one not yet reviewed.
+
+    Values a person typed or confirmed are kept. With ``defer`` the receipts
+    are only queued, for kaal-server's background worker to read.
+    """
+    init_if_needed()
+    ids = list(dict.fromkeys(getattr(args, "note_ids", None) or []))
+    unreviewed = bool(getattr(args, "unreviewed", False))
+    if bool(ids) == unreviewed:
+        die("Give receipt ids, or --unreviewed, but not both.")
+    with vault_capture_lock():
+        index = load_index()
+        if ids:
+            chosen = [medical_receipt_meta(index, note_id) for note_id in ids]
+            if any(meta.get("trashed_at") for meta in chosen):
+                die("A receipt in Trash cannot be read again; restore it first.")
+        else:
+            chosen = [note for note in index.get("notes", []) if is_medical_receipt(note) and not note.get("trashed_at") and "inbox" in note.get("tags", [])]
+        for meta in chosen:
+            meta["receipt"]["state"] = receipts.STATE_PENDING
+        if chosen:
+            save_index(index)
+    queued = [meta["id"] for meta in chosen]
+    if getattr(args, "defer", False):
+        emit({"status": "queued", "count": len(queued), "ids": queued}, ensure_ascii=False)
+        return
+    outcomes: dict[str, str] = {}
+    for position, note_id in enumerate(queued, start=1):
+        if not capturing():
+            print(f"reading {position} of {len(queued)}: {note_id}", file=sys.stderr, flush=True)
+        outcomes[note_id] = reextract_receipt(note_id)
+    emit({
+        "status": "updated",
+        "count": len(queued),
+        "done": [note_id for note_id, outcome in outcomes.items() if outcome == "done"],
+        "errors": [note_id for note_id, outcome in outcomes.items() if outcome != "done"],
+    }, ensure_ascii=False)
+
+
+def medical_providers(args: argparse.Namespace) -> None:
+    """List the provider names Kaal has learnt to show the user's way, or forget some."""
+    init_if_needed()
+    forget = [receipts.name_key(name) for name in (getattr(args, "forget", None) or [])]
+    if any(not key for key in forget):
+        die("A provider name cannot be empty.")
+
+    def listing(names: dict[str, str]) -> list[dict[str, str]]:
+        return [{"printed": printed, "shown_as": shown} for printed, shown in sorted(names.items())]
+
+    if not forget:
+        emit({"status": "ok", "providers": listing(medical_provider_names(load_index()))}, ensure_ascii=False)
+        return
+    with vault_capture_lock():
+        index = load_index()
+        medical = index.get("medical") if isinstance(index.get("medical"), dict) else {}
+        names = medical_provider_names(index)
+        unknown = [key for key in forget if key not in names]
+        if unknown:
+            die("Kaal has not learnt that provider name.", kind="not_found", details={"printed": unknown})
+        for key in forget:
+            names.pop(key)
+        medical["provider_names"] = names
+        medical["provider_names_forgotten"] = sorted({*medical.get("provider_names_forgotten", []), *forget})
+        index["medical"] = medical
+        save_index(index)
+    emit({"status": "updated", "providers": listing(names)}, ensure_ascii=False)
 
 
 def medical_list(args: argparse.Namespace) -> None:
@@ -2061,7 +2249,7 @@ def extract_receipt_fields(path: Path) -> tuple[dict[str, str], str]:
         docling_json = run_docling_json(path)
     ai_fields, ai_info = receipt_ai_candidates(path, extracted)
     receipt = build_receipt_state(extracted, docling_json, ai_fields=ai_fields, ai_info=ai_info)
-    receipts.upgrade(receipt, reviewed=False, people=[])
+    receipts.upgrade(receipt, reviewed=False, people=[], provider_names=medical_provider_names(load_index()))
     method = re.search(r"^Method: (.+)$", extracted, flags=re.MULTILINE)
     return receipt["fields"], method.group(1).strip() if method else "none"
 

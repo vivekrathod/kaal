@@ -415,6 +415,17 @@ class Commands:
         body = {"ids": list(args.note_ids), "date": getattr(args, "date", "") or "", "note": getattr(args, "note", "") or "", "undo": bool(getattr(args, "undo", False))}
         _print(self.api.call("POST", "/v1/medical/receipts/reimburse", json_body=body))
 
+    def medical_reextract(self, args: Any) -> None:
+        body = {"ids": list(getattr(args, "note_ids", None) or []), "unreviewed": bool(getattr(args, "unreviewed", False))}
+        _print(self.api.call("POST", "/v1/medical/receipts/reextract", json_body=body))
+
+    def medical_providers(self, args: Any) -> None:
+        forget = list(getattr(args, "forget", None) or [])
+        if forget:
+            _print(self.api.call("POST", "/v1/medical/providers/forget", json_body={"forget": forget}))
+        else:
+            _print(self.api.call("GET", "/v1/medical/providers"))
+
     def medical_people(self, args: Any) -> None:
         add, remove = list(getattr(args, "add", None) or []), list(getattr(args, "remove", None) or [])
         if add or remove:

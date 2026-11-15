@@ -23,11 +23,17 @@ SOURCE_AI_GROUNDED = "ai-grounded"
 SOURCE_AI_UNVERIFIED = "ai-unverified"
 # The model found no payment, only what a bill says the patient owes.
 SOURCE_AI_AMOUNT_DUE = "ai-amount-due"
+# A provider name the user chose earlier for the name this receipt prints.
+SOURCE_REMEMBERED = "remembered"
 # Values that do not count in totals until a person confirms them.
 UNVERIFIED_SOURCES = frozenset({SOURCE_AI_UNVERIFIED, SOURCE_AI_AMOUNT_DUE})
 _CLINICIAN = re.compile(r"(?:dr\.?|doctor)\s+", re.IGNORECASE)
+STATUS_EXTRACTING = "extracting"
 STATUS_NEEDS_REVIEW = "needs_review"
 STATUS_REVIEWED = "reviewed"
+STATUS_FAILED = "failed"
+# ``receipt["state"]`` while the original is stored but has not been read yet.
+STATE_PENDING = "pending"
 
 _MONTHS = {name: number for number, names in enumerate(
     ("jan january", "feb february", "mar march", "apr april", "may", "jun june", "jul july",
@@ -151,6 +157,11 @@ def _squashed(value: str) -> str:
     return " ".join(re.sub(r"[\W_]+", " ", (value or "").casefold()).split())
 
 
+def name_key(value: str) -> str:
+    """A name reduced to lower-case words, for matching the same name written differently."""
+    return _squashed(value)
+
+
 def ground(name: str, value: str, text: str) -> bool:
     """Whether ``value`` can be found in the text read from the receipt.
 
@@ -239,12 +250,22 @@ def merge_model_fields(fields: dict[str, str], sources: dict[str, str], model_fi
     return conflicts
 
 
-def upgrade(receipt: dict[str, Any], *, reviewed: bool, people: list[str]) -> bool:
-    """Bring one receipt record to the current shape in place; return whether it changed."""
+def upgrade(receipt: dict[str, Any], *, reviewed: bool, people: list[str], provider_names: dict[str, str] | None = None) -> bool:
+    """Bring one receipt record to the current shape in place; return whether it changed.
+
+    ``provider_names`` maps a printed provider name (as ``name_key``) to the
+    wording the user chose for it before. It is applied only to a provider the
+    model read, never to one a person typed or confirmed.
+    """
     before = json.dumps(receipt, sort_keys=True)
     fields = receipt.setdefault("fields", {})
-    receipt.setdefault("field_sources", {})
+    sources = receipt.setdefault("field_sources", {})
     raw = receipt.setdefault("field_raw", {})
+    provider = fields.get("provider") or ""
+    if provider and provider_names and sources.get("provider") in (SOURCE_AI_GROUNDED, SOURCE_AI_UNVERIFIED):
+        preferred = provider_names.get(name_key(provider)) or ""
+        if preferred and name_key(preferred) != name_key(provider):
+            raw["provider"], fields["provider"], sources["provider"] = provider, preferred, SOURCE_REMEMBERED
     for name in NORMALISED_FIELDS:
         value = fields.get(name) or ""
         if not value:
@@ -262,6 +283,11 @@ def upgrade(receipt: dict[str, Any], *, reviewed: bool, people: list[str]) -> bo
     if patient and people and not receipt["person"]:
         flags["patient_name"] = "unknown_person"
     receipt["flags"] = flags
-    receipt["status"] = STATUS_REVIEWED if reviewed else STATUS_NEEDS_REVIEW
+    if receipt.get("state") == STATE_PENDING:
+        receipt["status"] = STATUS_EXTRACTING
+    elif reviewed:
+        receipt["status"] = STATUS_REVIEWED
+    else:
+        receipt["status"] = STATUS_FAILED if receipt.get("state") == "error" else STATUS_NEEDS_REVIEW
     receipt["schema"] = SCHEMA
     return json.dumps(receipt, sort_keys=True) != before

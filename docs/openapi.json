@@ -333,6 +333,24 @@
         "title": "PeopleChange",
         "type": "object"
       },
+      "ProviderForget": {
+        "properties": {
+          "forget": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Forget",
+            "type": "array"
+          }
+        },
+        "required": [
+          "forget"
+        ],
+        "title": "ProviderForget",
+        "type": "object"
+      },
       "QueryBody": {
         "properties": {
           "query": {
@@ -362,6 +380,25 @@
           "fields"
         ],
         "title": "ReceiptFields",
+        "type": "object"
+      },
+      "Reextract": {
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Ids",
+            "type": "array"
+          },
+          "unreviewed": {
+            "default": false,
+            "title": "Unreviewed",
+            "type": "boolean"
+          }
+        },
+        "title": "Reextract",
         "type": "object"
       },
       "Reimburse": {
@@ -540,7 +577,7 @@
   "info": {
     "description": "An encrypted notes vault. Every request needs `Authorization: Bearer <token>` except /v1/health.",
     "title": "Kaal",
-    "version": "0.7.1"
+    "version": "0.8.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -1162,6 +1199,64 @@
         ]
       }
     },
+    "/v1/medical/providers": {
+      "get": {
+        "operationId": "medical_providers_v1_medical_providers_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Medical Providers",
+        "tags": [
+          "medical"
+        ]
+      }
+    },
+    "/v1/medical/providers/forget": {
+      "post": {
+        "operationId": "medical_providers_forget_v1_medical_providers_forget_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderForget"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Medical Providers Forget",
+        "tags": [
+          "medical"
+        ]
+      }
+    },
     "/v1/medical/receipts": {
       "get": {
         "operationId": "medical_list_v1_medical_receipts_get",
@@ -1295,6 +1390,45 @@
           }
         },
         "summary": "Medical Purge Bulk",
+        "tags": [
+          "medical"
+        ]
+      }
+    },
+    "/v1/medical/receipts/reextract": {
+      "post": {
+        "operationId": "medical_reextract_v1_medical_receipts_reextract_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Reextract"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Medical Reextract",
         "tags": [
           "medical"
         ]
