@@ -379,6 +379,9 @@ class Commands:
         response = self.api.call("GET", "/v1/medical/receipts", params=params)
         _print(response) if getattr(args, "json", False) else core.print_note_lines(response["result"])
 
+    def medical_show(self, args: Any) -> None:
+        _print(self.api.call("GET", f"/v1/medical/receipts/{_id(args.note_id)}"))
+
     def medical_review(self, args: Any) -> None:
         _print(self.api.call("POST", f"/v1/medical/receipts/{_id(args.note_id)}/review"))
 

@@ -1,0 +1,168 @@
+"""What the web app needs from the API: browser sign-in, receipt detail, previews and paged lists."""
+import io
+import json
+import shutil
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from fastapi.testclient import TestClient
+
+import kaal.core as kaal
+from kaal import server, tokens
+
+RECEIPT = b"Patient: DOE, JANE\nAmount paid: $12.50\nService date: 01/02/2026\n"
+MINIMAL_PDF = (b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+               b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n")
+
+
+@pytest.fixture()
+def service(tmp_path):
+    saved = kaal.VAULT
+    kaal.configure_vault(tmp_path / "vault")
+    kaal.call_captured(kaal.init_vault, SimpleNamespace())
+    settings = server.Settings(home=tmp_path, vault=kaal.VAULT, tokens_file=tmp_path / "tokens.json", tmp_dir=tmp_path / "tmp", max_upload_bytes=8 * 1024 * 1024, rate_per_minute=1000)
+    store = tokens.TokenStore(settings.tokens_file)
+    secrets = {name: store.create(name, scopes)[1] for name, scopes in {"full": ["read", "reveal", "write", "delete", "admin"], "reader": ["read"]}.items()}
+    client = TestClient(server.create_app(settings))
+
+    def bearer(name="full"):
+        return {"Authorization": f"Bearer {secrets[name]}"}
+
+    def upload(content=RECEIPT, name="receipt.txt"):
+        response = client.post("/v1/medical/receipts", headers=bearer(), files={"file": (name, content, "application/octet-stream")})
+        assert response.status_code == 200, response.text
+        return response.json()["result"]
+
+    yield SimpleNamespace(client=client, bearer=bearer, upload=upload, secrets=secrets, store=store)
+    kaal.configure_vault(saved)
+
+
+# --- browser sign-in
+
+def test_signing_in_sets_a_cookie_scripts_cannot_read(service):
+    assert service.client.post("/v1/session", json={"token": "kaal_nope_nope"}).status_code == 401
+    assert service.client.post("/v1/session", json={}).status_code == 400
+
+    response = service.client.post("/v1/session", json={"token": f"  {service.secrets['full']} "})
+    assert response.status_code == 200
+    assert response.json()["result"] == {"name": "full", "scopes": ["read", "reveal", "write", "delete", "admin"]}
+    cookie = response.headers["set-cookie"]
+    assert cookie.startswith(f"kaal_session={service.secrets['full']};")
+    for attribute in ("HttpOnly", "Secure", "SameSite=strict", "Path=/", "Max-Age=2592000"):
+        assert attribute in cookie
+    assert service.secrets["full"] not in response.text
+
+
+def test_a_signed_in_browser_can_read_but_must_prove_writes_come_from_the_app(service):
+    cookie = {"Cookie": f"kaal_session={service.secrets['full']}"}
+    assert service.client.get("/v1/session", headers=cookie).json()["result"]["name"] == "full"
+    assert service.client.get("/v1/medical/receipts", headers=cookie).status_code == 200
+
+    # A request another site tricks the browser into sending carries the cookie but not this header.
+    forged = service.client.post("/v1/medical/people", headers=cookie, json={"add": ["Jane Doe"]})
+    assert forged.status_code == 403
+    assert service.client.get("/v1/medical/people", headers=cookie).json()["result"]["people"] == []
+
+    genuine = service.client.post("/v1/medical/people", headers={**cookie, "X-Kaal-Request": "1"}, json={"add": ["Jane Doe"]})
+    assert genuine.status_code == 200
+    # Tools that send the token themselves are not browsers and need no such header.
+    assert service.client.post("/v1/medical/people", headers=service.bearer(), json={"add": ["John Doe"]}).status_code == 200
+
+
+def test_sessions_follow_the_token_scopes_revocation_and_sign_out(service):
+    reader = {"Cookie": f"kaal_session={service.secrets['reader']}"}
+    assert service.client.get("/v1/session", headers=reader).json()["result"] == {"name": "reader", "scopes": ["read"]}
+    assert service.client.get("/v1/medical/receipts", headers=reader).status_code == 403
+    assert service.client.get("/v1/session").status_code == 401
+    assert service.client.get("/v1/session", headers={"Cookie": "kaal_session=kaal_made_up"}).status_code == 401
+
+    cleared = service.client.delete("/v1/session", headers=reader)
+    assert cleared.status_code == 200 and 'kaal_session="";' in cleared.headers["set-cookie"] and "Max-Age=0" in cleared.headers["set-cookie"]
+
+    service.store.revoke("reader")
+    assert service.client.get("/v1/session", headers=reader).status_code == 401
+
+
+# --- one receipt, with where each value came from
+
+def test_receipt_detail_shows_the_line_each_value_was_read_from(service):
+    captured = service.upload()
+    detail = service.client.get(f"/v1/medical/receipts/{captured['id']}", headers=service.bearer()).json()["result"]
+    assert detail["note"]["id"] == captured["id"]
+    assert detail["note"]["attachments"][0]["id"] == captured["attachment_id"]
+    assert (detail["receipt"]["fields"]["amount"], detail["receipt"]["fields"]["service_date"]) == ("12.50", "2026-01-02")
+    assert detail["evidence"] == {"amount": "Amount paid: $12.50", "service_date": "Service date: 01/02/2026", "patient_name": "Patient: DOE, JANE"}
+
+    service.client.patch(f"/v1/medical/receipts/{captured['id']}/fields", headers=service.bearer(), json={"fields": {"provider": "Typed Clinic"}})
+    after = service.client.get(f"/v1/medical/receipts/{captured['id']}", headers=service.bearer()).json()["result"]
+    assert "provider" not in after["evidence"]  # typed by hand: the receipt does not print it
+
+    assert service.client.get(f"/v1/medical/receipts/{captured['id']}", headers=service.bearer("reader")).status_code == 403
+    assert service.client.get("/v1/medical/receipts/nope", headers=service.bearer()).status_code == 404
+    assert kaal.call_captured(kaal.medical_show, SimpleNamespace(note_id=captured["id"]))[0]["evidence"]["amount"] == "Amount paid: $12.50"
+
+
+# --- previews
+
+def test_a_photo_preview_is_an_upright_image_small_enough_for_a_browser(service):
+    image_module = pytest.importorskip("PIL.Image")
+    photo = io.BytesIO()
+    image_module.new("RGB", (3000, 4000), "white").save(photo, format="PNG")
+    captured = service.upload(photo.getvalue(), name="photo.png")
+    url = f"/v1/medical/receipts/{captured['id']}/attachments/{captured['attachment_id']}/preview"
+
+    response = service.client.get(url, headers=service.bearer())
+    assert (response.status_code, response.headers["content-type"]) == (200, "image/jpeg")
+    with image_module.open(io.BytesIO(response.content)) as shown:
+        assert shown.size == (1176, 1568)
+    assert response.headers["cache-control"] == "no-store"
+
+    assert service.client.get(url, params={"page": 2}, headers=service.bearer()).status_code == 404
+    assert service.client.get(url, headers=service.bearer("reader")).status_code == 403
+    assert service.client.get(url.replace(captured["attachment_id"], "nope"), headers=service.bearer()).status_code == 404
+
+
+@pytest.mark.skipif(not shutil.which("pdftoppm"), reason="needs pdftoppm")
+def test_a_pdf_preview_is_its_page_rendered_and_text_files_have_none(service):
+    captured = service.upload(MINIMAL_PDF, name="receipt.pdf")
+    response = service.client.get(f"/v1/medical/receipts/{captured['id']}/attachments/{captured['attachment_id']}/preview", headers=service.bearer())
+    assert (response.status_code, response.headers["content-type"]) == (200, "image/png")
+    assert response.content.startswith(b"\x89PNG")
+
+    text = service.upload()
+    assert service.client.get(f"/v1/medical/receipts/{text['id']}/attachments/{text['attachment_id']}/preview", headers=service.bearer()).status_code == 404
+
+
+# --- lists
+
+def test_receipt_lists_can_be_filtered_searched_sorted_and_paged(service):
+    ids = {}
+    for label, amount, when in (("small", "5.00", "01/05/2026"), ("large", "500.00", "03/01/2026"), ("middle", "50.00", "02/01/2026")):
+        ids[label] = service.upload(f"Amount paid: ${amount}\nService date: {when}\n".encode(), name=f"{label}.txt")["id"]
+    service.client.patch(f"/v1/medical/receipts/{ids['large']}/fields", headers={**service.bearer(), }, json={"fields": {"provider": "Riverside Clinic"}})
+    service.client.post(f"/v1/medical/receipts/{ids['middle']}/review", headers=service.bearer())
+
+    def listed(**params):
+        body = service.client.get("/v1/medical/receipts", headers=service.bearer(), params=params).json()
+        return [note["id"] for note in body["result"]], body["meta"]
+
+    assert listed(sort="amount")[0] == [ids["large"], ids["middle"], ids["small"]]
+    assert listed(sort="date")[0] == [ids["large"], ids["middle"], ids["small"]]
+    assert listed(status="reviewed") == ([ids["middle"]], {"total": 1, "offset": 0, "limit": 0})
+    assert listed(status="needs_review")[1]["total"] == 2
+    assert listed(q="riverside")[0] == [ids["large"]]
+    assert listed(q=ids["small"][:6].upper())[0] == [ids["small"]]
+    page, meta = listed(sort="amount", limit=2, offset=1)
+    assert (page, meta) == ([ids["middle"], ids["small"]], {"total": 3, "offset": 1, "limit": 2})
+    assert listed(sort="amount", limit=2, offset=5) == ([], {"total": 3, "offset": 5, "limit": 2})
+    assert service.client.get("/v1/medical/receipts", headers=service.bearer(), params={"sort": "colour"}).status_code == 400
+
+
+def test_note_lists_can_be_searched_and_paged(service):
+    for title in ("Boiler manual", "Boiler service log", "Garden plan"):
+        service.client.post("/v1/library/notes", headers=service.bearer(), json={"title": title, "body": "text", "tags": ["home"]})
+    body = service.client.get("/v1/library/notes", headers=service.bearer(), params={"q": "boiler", "limit": 1, "offset": 1}).json()
+    assert len(body["result"]) == 1 and body["meta"] == {"total": 2, "offset": 1, "limit": 1}
+    assert service.client.get("/v1/library/notes", headers=service.bearer(), params={"q": "HOME"}).json()["meta"]["total"] == 3
+    assert service.client.get("/v1/library/notes", headers=service.bearer()).json()["meta"]["total"] == 3

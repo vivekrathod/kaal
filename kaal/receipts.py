@@ -187,6 +187,14 @@ def sum_of_payments(value: str) -> tuple[str, str]:
     return str(sum(Decimal(part) for part in parts).quantize(Decimal("0.01"))), " + ".join(parts)
 
 
+def evidence_line(name: str, value: str, text: str) -> str:
+    """The first line of the receipt's text that holds ``value``, tidied; "" when none does."""
+    for line in (text or "").splitlines():
+        if line.strip() and ground(name, value, line):
+            return " ".join(line.split())[:200]
+    return ""
+
+
 def merge_model_fields(fields: dict[str, str], sources: dict[str, str], model_fields: dict[str, str], text: str, raw: dict[str, str] | None = None) -> dict[str, dict[str, str]]:
     """Fold a model's candidates into rule-based ``fields`` in place; return the disagreements.
 

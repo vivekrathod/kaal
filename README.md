@@ -63,6 +63,22 @@ and stored only as SHA-256 hashes. `kaal-server token list` and
 | `delete` | Permanent deletion and purges |
 | `admin` | Whole-vault export |
 
+**Browsers.** A web page served from the same address signs in by sending a
+device token once to `POST /v1/session`. The server answers with a cookie that
+page scripts cannot read (`HttpOnly`, `Secure`, `SameSite=Strict`, 30 days), and
+`DELETE /v1/session` signs out. A request that changes anything and is
+authenticated by that cookie must also carry the header `X-Kaal-Request: 1`,
+which another website cannot make a browser send, so a forged request is
+refused. Tools that send `Authorization: Bearer` are unaffected. Revoking the
+token ends its browser sessions too.
+
+For a user interface the API also offers: one receipt with the line of its text
+each value came from (`GET /v1/medical/receipts/{id}`, or `kaal medical show`),
+a page image of a receipt
+(`GET /v1/medical/receipts/{id}/attachments/{attachment}/preview`), and
+`status`, `q`, `sort`, `offset` and `limit` on the receipt list, `q` and
+`offset` on the note list, with the total returned beside each page.
+
 **Clients.** Point the same `kaal` command at the server with
 `~/.config/kaal/config.toml` (or `KAAL_CONFIG`), mode 600:
 

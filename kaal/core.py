@@ -133,11 +133,15 @@ def die(msg: str, code: int = 1, *, kind: str = "invalid", details: dict[str, An
     raise KaalError(msg, code=code, kind=kind, details=details)
 
 
-def emit(payload: Any, *, indent: int | None = None, ensure_ascii: bool = True) -> None:
-    """Deliver a handler's result: printed as JSON on the CLI, captured by the server."""
+def emit(payload: Any, *, indent: int | None = None, ensure_ascii: bool = True, meta: dict[str, Any] | None = None) -> None:
+    """Deliver a handler's result: printed as JSON on the CLI, captured by the server.
+
+    ``meta`` is extra information about the result, such as the total behind a
+    page of a list. The server returns it beside the result; the CLI drops it.
+    """
     sink = _RESULT_SINK.get()
     if sink is not None:
-        sink.append((payload, {"indent": indent, "ensure_ascii": ensure_ascii}))
+        sink.append((payload, {"indent": indent, "ensure_ascii": ensure_ascii, **({"meta": meta} if meta else {})}))
         return
     print(json.dumps(payload, indent=indent, ensure_ascii=ensure_ascii))
 
@@ -1007,8 +1011,15 @@ def library_list(args: argparse.Namespace) -> None:
     limit = max(0, min(int(getattr(args, "limit", 100) or 100), 100))
     trash = bool(getattr(args, "trash", False))
     notes = [note for note in load_index().get("notes", []) if not is_medical_receipt(note) and bool(note.get("trashed_at")) == trash]
+    query = (getattr(args, "q", "") or "").strip().casefold()
+    if query:
+        notes = [
+            note for note in notes
+            if query in " ".join([note.get("id", ""), note.get("title", ""), *note.get("tags", []), (note.get("source") or {}).get("title", "") or ""]).casefold()
+        ]
     notes.sort(key=lambda note: note.get("updated", note.get("created", "")), reverse=True)
-    emit([library_note_summary(note) for note in notes[:limit]], ensure_ascii=False)
+    notes, paging = page_of(notes, SimpleNamespace(offset=getattr(args, "offset", 0), limit=limit))
+    emit([library_note_summary(note) for note in notes], ensure_ascii=False, meta=paging)
 
 
 def library_show(args: argparse.Namespace) -> None:
@@ -2048,8 +2059,28 @@ def medical_providers(args: argparse.Namespace) -> None:
     emit({"status": "updated", "providers": listing(names)}, ensure_ascii=False)
 
 
+def page_of(items: list[Any], args: Any) -> tuple[list[Any], dict[str, int]]:
+    """One page of ``items`` and the numbers a caller needs to ask for the next."""
+    offset = max(0, int(getattr(args, "offset", 0) or 0))
+    limit = max(0, int(getattr(args, "limit", 0) or 0))
+    return (items[offset:offset + limit] if limit else items[offset:]), {"total": len(items), "offset": offset, "limit": limit}
+
+
+RECEIPT_SORTS = {
+    "updated": lambda note: note.get("updated", ""),
+    "created": lambda note: note.get("created", ""),
+    "date": lambda note: next((note.get("receipt", {}).get("fields", {}).get(name) for name in receipts.DATE_FIELDS if note.get("receipt", {}).get("fields", {}).get(name)), ""),
+    "amount": lambda note: receipts.amount_value(note.get("receipt", {}).get("fields", {}).get("amount") or "") or Decimal("-1"),
+}
+
+
 def medical_list(args: argparse.Namespace) -> None:
-    """List receipt metadata without mixing in unrelated Kaal notes."""
+    """List receipt metadata without mixing in unrelated Kaal notes.
+
+    Optional filters: ``status`` (a receipt status), ``q`` (text found in the
+    title, person, patient, provider, insurer or id) and ``sort`` (updated,
+    created, date or amount; newest or largest first), then ``offset``/``limit``.
+    """
     init_if_needed()
     notes = [n for n in load_index().get("notes", []) if "medical" in n.get("tags", []) and "receipt" in n.get("tags", [])]
     if getattr(args, "trash", False):
@@ -2058,14 +2089,60 @@ def medical_list(args: argparse.Namespace) -> None:
         notes = [n for n in notes if not n.get("trashed_at")]
     if getattr(args, "inbox", False):
         notes = [n for n in notes if "inbox" in n.get("tags", [])]
-    notes.sort(key=lambda note: note.get("updated", ""), reverse=True)
-    limit = getattr(args, "limit", 0) or 0
-    if limit:
-        notes = notes[:limit]
+    status = (getattr(args, "status", "") or "").strip()
+    if status:
+        notes = [n for n in notes if n.get("receipt", {}).get("status") == status]
+    query = (getattr(args, "q", "") or "").strip().casefold()
+    if query:
+        def searchable(note: dict[str, Any]) -> str:
+            receipt = note.get("receipt", {})
+            fields = receipt.get("fields", {})
+            return " ".join([note.get("id", ""), note.get("title", ""), receipt.get("person") or "", *(fields.get(name) or "" for name in ("patient_name", "provider", "insurer"))]).casefold()
+        notes = [n for n in notes if query in searchable(n)]
+    sort = (getattr(args, "sort", "") or "updated").strip()
+    if sort not in RECEIPT_SORTS:
+        die(f"sort must be one of: {', '.join(RECEIPT_SORTS)}")
+    notes.sort(key=RECEIPT_SORTS[sort], reverse=True)
+    notes, paging = page_of(notes, args)
     if getattr(args, "json", False) or capturing():
-        emit(notes, indent=2, ensure_ascii=False)
+        emit(notes, indent=2, ensure_ascii=False, meta=paging)
         return
     print_note_lines(notes)
+
+
+def medical_show(args: argparse.Namespace) -> None:
+    """One receipt in full, with the line of its text that each value came from."""
+    init_if_needed()
+    meta = medical_receipt_meta(load_index(), args.note_id)
+    receipt = meta.get("receipt", {})
+    attachments = meta.get("attachments", [])
+    text = extracted_plain_text(read_attachment_extracted_sidecar(meta, attachments[0])) if attachments else ""
+    evidence: dict[str, str] = {}
+    for name in receipts.EVALUATED_FIELDS:
+        value = receipt.get("fields", {}).get(name) or ""
+        printed = receipt.get("field_raw", {}).get(name) or ""
+        line = (printed and receipts.evidence_line(name, printed, text)) or (value and receipts.evidence_line(name, value, text))
+        if line:
+            evidence[name] = line
+    emit({
+        "status": "ok",
+        "note": library_note_summary(meta) | {key: meta[key] for key in ("reviewed_at",) if key in meta},
+        "receipt": receipt,
+        "evidence": evidence,
+    }, ensure_ascii=False)
+
+
+def attachment_preview(note_meta: dict[str, Any], attachment_meta: dict[str, Any], page: int = 1) -> tuple[str, bytes]:
+    """A page of an attachment as an image a browser can show: (media type, bytes)."""
+    with tempfile.TemporaryDirectory(prefix="kaal-preview-") as directory:
+        os.chmod(directory, 0o700)
+        copy = Path(directory) / f"preview{Path(attachment_meta.get('name', '')).suffix.lower()}"
+        copy.write_bytes(attachment_original_bytes(note_meta, attachment_meta))
+        os.chmod(copy, 0o600)
+        images = receipt_ai.receipt_images(copy)
+    if page < 1 or page > len(images):
+        die("No preview is available for that page.", kind="not_found")
+    return images[page - 1]
 
 
 def medical_receipt_meta(index: dict[str, Any], note_id: str) -> dict[str, Any]:

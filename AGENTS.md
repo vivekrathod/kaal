@@ -47,7 +47,7 @@ kaal medical capture /absolute/path/receipt.pdf
 kaal medical report --year 2026 --reimbursed no
 ```
 
-`kaal medical reextract` re-reads stored receipts and keeps typed and confirmed values; on a server it only queues them. `kaal medical providers` lists provider names Kaal has learnt to show the user's way (medical data: reveal scope). `kaal medical evaluate` (server only, read-only) re-extracts receipts and prints per-field accuracy with ids and outcomes, never values; it is safe to show its output.
+`kaal medical show NOTE_ID` prints one receipt with the receipt lines its values came from (medical data: reveal scope, and do not echo it). `kaal medical reextract` re-reads stored receipts and keeps typed and confirmed values; on a server it only queues them. `kaal medical providers` lists provider names Kaal has learnt to show the user's way (medical data: reveal scope). `kaal medical evaluate` (server only, read-only) re-extracts receipts and prints per-field accuracy with ids and outcomes, never values; it is safe to show its output.
 
 Receipt dates are stored as `YYYY-MM-DD` and amounts as plain decimals; `kaal medical update` refuses values it cannot read. `kaal medical reimburse` and `kaal medical people --add/--remove` change the user's records: run them only when asked.
 

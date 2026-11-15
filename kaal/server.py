@@ -70,6 +70,9 @@ class Settings:
     # Read captured receipts after the capture request has returned. `serve`
     # turns this on (KAAL_BACKGROUND_EXTRACTION=0 turns it off).
     background_extraction: bool = False
+    # Browsers only send the session cookie over HTTPS. KAAL_COOKIE_SECURE=0
+    # allows plain http, for development against a non-loopback address.
+    cookie_secure: bool = True
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "Settings":
@@ -86,6 +89,7 @@ class Settings:
             host=env.get("KAAL_BIND") or "127.0.0.1",
             port=int(env.get("KAAL_PORT") or DEFAULT_PORT),
             background_extraction=(env.get("KAAL_BACKGROUND_EXTRACTION") or "1").strip() != "0",
+            cookie_secure=(env.get("KAAL_COOKIE_SECURE") or "1").strip() != "0",
         )
 
 
@@ -227,11 +231,25 @@ def _error(status: int, message: str, kind: str | None = None, details: dict | N
     return JSONResponse(payload, status_code=status, headers=headers)
 
 
+SESSION_COOKIE = "kaal_session"
+SESSION_SECONDS = 30 * 24 * 3600
+# A browser cannot add this header to a request made from another site without
+# the server's permission, which Kaal never gives.
+SAME_SITE_HEADER = "x-kaal-request"
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
 def require(*scopes: str) -> Callable:
     def dependency(request: Request) -> dict[str, Any]:
         state: AppState = request.app.state.kaal
         scheme, _, presented = request.headers.get("authorization", "").partition(" ")
-        record = state.tokens.authenticate(presented.strip()) if scheme.lower() == "bearer" else None
+        from_cookie = False
+        if scheme.lower() != "bearer":
+            # A signed-in browser: the token travels in a cookie page scripts cannot read.
+            presented, from_cookie = request.cookies.get(SESSION_COOKIE, ""), True
+        record = state.tokens.authenticate(presented.strip()) if presented.strip() else None
+        if record is not None and from_cookie and request.method not in SAFE_METHODS and request.headers.get(SAME_SITE_HEADER) != "1":
+            raise HTTPException(403, "This request did not come from the Kaal web app.")
         if record is None:
             if not state.limiter.allow("unauthenticated"):
                 raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
@@ -256,7 +274,8 @@ def _run(state: AppState, handler: Callable[[Any], None], *, exact_note: str | N
             result, options = core.call_captured(handler, SimpleNamespace(**params))
         except core.KaalError as error:
             return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind, error.details)
-    return JSONResponse({"result": result, "format": options})
+    meta = options.pop("meta", None)
+    return JSONResponse({"result": result, "format": options, **({"meta": meta} if meta else {})})
 
 
 def _upload_name(raw: str | None) -> str:
@@ -390,6 +409,10 @@ class ReportFilter(BaseModel):
     reimbursed: str = Field(default="all", max_length=3)
 
 
+class SignIn(BaseModel):
+    token: str = Field(min_length=1, max_length=400)
+
+
 class Reextract(BaseModel):
     ids: list[str] = Field(default_factory=list, max_length=100)
     unreviewed: bool = False
@@ -460,6 +483,31 @@ def create_app(settings: Settings) -> FastAPI:
     @app.get("/v1/health", tags=["service"])
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    # --- browser sign-in: a device token, pasted once, kept in a cookie scripts cannot read
+
+    @app.post("/v1/session", tags=["session"])
+    def sign_in(request: Request, body: SignIn):
+        state = S(request)
+        record = state.tokens.authenticate(body.token.strip())
+        if record is None:
+            if not state.limiter.allow("unauthenticated"):
+                raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
+            raise HTTPException(401, "That token is not valid.")
+        request.state.token_name = record["name"]
+        response = JSONResponse({"result": {"name": record["name"], "scopes": record.get("scopes", [])}, "format": {}})
+        response.set_cookie(SESSION_COOKIE, body.token.strip(), max_age=SESSION_SECONDS, path="/", httponly=True, secure=state.settings.cookie_secure, samesite="strict")
+        return response
+
+    @app.get("/v1/session", tags=["session"])
+    def session(record: dict[str, Any] = require()):
+        return JSONResponse({"result": {"name": record["name"], "scopes": record.get("scopes", [])}, "format": {}})
+
+    @app.delete("/v1/session", tags=["session"])
+    def sign_out(request: Request):
+        response = JSONResponse({"result": {"status": "signed_out"}, "format": {}})
+        response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=S(request).settings.cookie_secure, samesite="strict")
+        return response
 
     @app.get("/v1/status", tags=["service"], dependencies=[require("read")])
     def status(request: Request):
@@ -546,8 +594,8 @@ def create_app(settings: Settings) -> FastAPI:
     # --- library (non-medical notes for the dashboard)
 
     @app.get("/v1/library/notes", tags=["library"], dependencies=[require("read")])
-    def library_list(request: Request, trash: bool = False, limit: int = Query(100, ge=0, le=100)):
-        return _run(S(request), core.library_list, trash=trash, limit=limit)
+    def library_list(request: Request, trash: bool = False, limit: int = Query(100, ge=0, le=100), offset: int = Query(0, ge=0), q: str = Query("", max_length=200)):
+        return _run(S(request), core.library_list, trash=trash, limit=limit, offset=offset, q=q)
 
     @app.post("/v1/library/notes", tags=["library"], dependencies=[require("write")])
     def library_create(request: Request, note: LibraryCreate):
@@ -599,10 +647,11 @@ def create_app(settings: Settings) -> FastAPI:
         return response
 
     @app.get("/v1/medical/receipts", tags=["medical"], dependencies=[require("read", "reveal")])
-    def medical_list(request: Request, inbox: bool = False, trash: bool = False, limit: int = Query(0, ge=0)):
+    def medical_list(request: Request, inbox: bool = False, trash: bool = False, limit: int = Query(0, ge=0), offset: int = Query(0, ge=0),
+                     status: str = Query("", max_length=20), q: str = Query("", max_length=200), sort: str = Query("updated", max_length=20)):
         if inbox and trash:
             raise HTTPException(400, "Choose inbox or trash, not both.")
-        return _run(S(request), core.medical_list, inbox=inbox, trash=trash, json=True, limit=limit)
+        return _run(S(request), core.medical_list, inbox=inbox, trash=trash, json=True, limit=limit, offset=offset, status=status, q=q, sort=sort)
 
     @app.post("/v1/medical/report", tags=["medical"], dependencies=[require("read", "reveal")])
     def medical_report(request: Request, body: ReportFilter):
@@ -642,6 +691,25 @@ def create_app(settings: Settings) -> FastAPI:
     @app.post("/v1/medical/receipts/purge", tags=["medical"], dependencies=[require("delete")])
     def medical_purge_bulk(request: Request, body: BulkPurge):
         return _run(S(request), core.medical_purge_bulk, note_ids=body.ids, yes=body.confirm)
+
+    @app.get("/v1/medical/receipts/{note_id}", tags=["medical"], dependencies=[require("read", "reveal")])
+    def medical_show(request: Request, note_id: str):
+        return _run(S(request), core.medical_show, note_id=note_id)
+
+    @app.get("/v1/medical/receipts/{note_id}/attachments/{attachment_id}/preview", tags=["medical"], dependencies=[require("read", "reveal")], response_class=Response)
+    def medical_preview(request: Request, note_id: str, attachment_id: str, page: int = Query(1, ge=1, le=20)):
+        state = S(request)
+        try:
+            with state.vault_lock:
+                meta = core.medical_receipt_meta(core.load_index(), note_id)
+                matches = [att for att in meta.get("attachments", []) if att.get("id") == attachment_id]
+                if not matches:
+                    core.die("Attachment not found.", kind="not_found")
+            # Rendering is slow and needs no lock: it works on a private copy.
+            media_type, data = core.attachment_preview(meta, matches[0], page)
+        except core.KaalError as error:
+            return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind, error.details)
+        return Response(content=data, media_type=media_type)
 
     @app.post("/v1/medical/receipts/{note_id}/review", tags=["medical"], dependencies=[require("write")])
     def medical_review(request: Request, note_id: str):
