@@ -451,7 +451,7 @@ class Commands:
         _print(self.api.call("POST", "/v1/medical/receipts/purge", json_body={"ids": ids, "confirm": True}))
 
 
-SERVER_ONLY = {"medical_evaluate": "kaal medical evaluate", "init_vault": "kaal init", "import_joplin_raw": "kaal import-joplin-raw", "import_vault": "kaal import", "backup_vault": "kaal backup"}
+SERVER_ONLY = {"encrypt_vault": "kaal encrypt-all", "medical_evaluate": "kaal medical evaluate", "init_vault": "kaal init", "import_joplin_raw": "kaal import-joplin-raw", "import_vault": "kaal import", "backup_vault": "kaal backup"}
 LOCAL_ALWAYS = {"classify_command"}
 
 

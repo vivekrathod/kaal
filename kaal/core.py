@@ -427,6 +427,11 @@ def classify_text(text: str, *, context: str = "") -> dict[str, Any]:
 
 
 def decide_storage(text: str, *, sensitivity: str = "auto", context: str = "") -> tuple[str, dict[str, Any]]:
+    """Everything is stored encrypted. ``sensitivity`` now only labels the content.
+
+    The label still records what the classifier or the caller said, so existing
+    metadata keeps its meaning, but it no longer decides how anything is stored.
+    """
     requested = (sensitivity or "auto").lower().strip()
     if requested in {"sensitive", "encrypted", "encrypt"}:
         result = classify_text(text, context=context)
@@ -437,11 +442,11 @@ def decide_storage(text: str, *, sensitivity: str = "auto", context: str = "") -
         result = classify_text(text, context=context)
         result["sensitivity"] = "public"
         result["reasons"] = ["forced public"] + result.get("reasons", [])
-        return "plaintext", result
+        return "encrypted", result
     if requested != "auto":
         die("sensitivity must be one of: auto, sensitive, public")
     result = classify_text(text, context=context)
-    return ("encrypted" if result["sensitivity"] == "sensitive" else "plaintext"), result
+    return "encrypted", result
 
 
 def safe_read_text(path: Path, limit: int = 1_000_000) -> str:
@@ -660,6 +665,35 @@ def attachment_original_bytes(note_meta: dict[str, Any], attachment_meta: dict[s
 def attachment_extracted_sidecar_exists(note_meta: dict[str, Any], attachment_meta: dict[str, Any]) -> bool:
     att_dir = attachment_note_dir(note_meta["id"]) / attachment_meta["id"]
     return (att_dir / "extracted.md").exists() or (att_dir / "extracted.md.json").exists()
+
+
+def read_attachment_extracted_sidecar(note_meta: dict[str, Any], attachment_meta: dict[str, Any]) -> str:
+    """An attachment's extracted text, whichever way it is stored; "" when there is none."""
+    nid, att_id = note_meta["id"], attachment_meta["id"]
+    att_dir = attachment_note_dir(nid) / att_id
+    encrypted = att_dir / "extracted.md.json"
+    if encrypted.exists():
+        payload = json.loads(encrypted.read_text())
+        return decrypt_payload(payload["encrypted"], aad=f"{nid}:{att_id}:extracted.md".encode()).decode()
+    plain = att_dir / "extracted.md"
+    return plain.read_text(encoding="utf-8") if plain.exists() else ""
+
+
+def read_attachment_docling_sidecar(note_meta: dict[str, Any], attachment_meta: dict[str, Any]) -> dict[str, Any]:
+    """An attachment's stored Docling structure, whichever way it is stored; {} when there is none."""
+    nid, att_id = note_meta["id"], attachment_meta["id"]
+    att_dir = attachment_note_dir(nid) / att_id
+    try:
+        if (att_dir / "docling.json.enc").exists():
+            payload = json.loads((att_dir / "docling.json.enc").read_text())
+            data = json.loads(decrypt_payload(payload["encrypted"], aad=f"{nid}:{att_id}:docling.json".encode()))
+        elif (att_dir / "docling.json").exists():
+            data = json.loads((att_dir / "docling.json").read_text(encoding="utf-8"))
+        else:
+            return {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def write_attachment_extracted_sidecar(note_meta: dict[str, Any], attachment_meta: dict[str, Any], extracted_md: str) -> None:
@@ -939,8 +973,8 @@ def library_create(args: argparse.Namespace) -> None:
 def write_library_note(meta: dict[str, Any], note: dict[str, Any]) -> None:
     """Persist an edited note while preserving automatic encryption upgrades."""
     storage, classification = decide_storage(note["body"], sensitivity="auto", context=note["title"])
-    if meta.get("storage") == "encrypted":
-        storage = "encrypted"
+    # A note once labelled sensitive keeps the label, whatever its text becomes.
+    if meta.get("sensitivity") == "sensitive":
         classification["sensitivity"] = "sensitive"
     note["storage"] = storage
     note["sensitivity"] = classification["sensitivity"]
@@ -1131,9 +1165,8 @@ def append_note(args: argparse.Namespace) -> None:
     # Re-classify appended content in auto mode. A note that was previously public
     # must be upgraded if the appended text introduces sensitive data.
     storage, classification = decide_storage(note["body"], sensitivity="auto", context=note.get("title", ""))
-    # Once encrypted, do not downgrade automatically on append.
-    if meta.get("storage") == "encrypted":
-        storage = "encrypted"
+    # A note once labelled sensitive keeps the label on append.
+    if meta.get("sensitivity") == "sensitive":
         classification["sensitivity"] = "sensitive"
     note["storage"] = storage
     note["sensitivity"] = classification["sensitivity"]
@@ -1227,9 +1260,8 @@ def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "
     disk_name = safe_attachment_filename(stored_name, att_id)
     extracted_md = extract_attachment_markdown(src, ocr=ocr, extract=extract, receipt=receipt)
     storage, classification = decide_storage(extracted_md, sensitivity=sensitivity, context=f"{stored_name}\n{meta.get('title','')}")
-    # If the parent note is encrypted/sensitive, attachments inherit encryption.
-    if meta.get("storage") == "encrypted" or meta.get("sensitivity") == "sensitive":
-        storage = "encrypted"
+    # Attachments of a note labelled sensitive carry the same label.
+    if meta.get("sensitivity") == "sensitive":
         classification["sensitivity"] = "sensitive"
         classification.setdefault("reasons", []).insert(0, "parent note is sensitive")
     # Create the per-note directory explicitly: mkdir(parents=True) gives
@@ -1793,15 +1825,8 @@ def medical_capture(args: argparse.Namespace) -> None:
         # index between those steps and lose its just-created record.
         index = load_index()
         saved = medical_receipt_meta(index, meta["id"])
-        sidecar = attachment_note_dir(meta["id"]) / attachment["id"] / "extracted.md"
-        extracted_text = sidecar.read_text(encoding="utf-8") if sidecar.exists() else ""
-        docling_json: dict[str, Any] = {}
-        docling_sidecar = attachment_note_dir(meta["id"]) / attachment["id"] / "docling.json"
-        if docling_sidecar.exists():
-            try:
-                docling_json = json.loads(docling_sidecar.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                docling_json = {}
+        extracted_text = read_attachment_extracted_sidecar(meta, attachment)
+        docling_json = read_attachment_docling_sidecar(meta, attachment)
         if defer:
             saved["receipt"] = {"state": receipts.STATE_PENDING, "attempted_at": now_iso(), "fields": {}, "field_sources": {}}
         else:
@@ -2592,6 +2617,96 @@ def _decrypts(payload: dict[str, Any], aad: bytes, key: bytes) -> bytes | None:
         return AESGCM(key).decrypt(base64.b64decode(payload["nonce"]), base64.b64decode(payload["ciphertext"]), aad)
     except Exception:
         return None
+
+
+@holds_vault_lock
+def encrypt_vault(args: argparse.Namespace) -> None:
+    """Encrypt every note, attachment and extracted text an older Kaal stored readable.
+
+    For each item the encrypted copy is written and read back, then the index
+    is saved, and only then is the readable copy removed. A run that stops at
+    any point therefore loses nothing, and the next run finishes the job,
+    including removing readable copies an interrupted run left behind. An
+    attachment whose bytes no longer match its recorded hash is left alone and
+    reported. Output holds ids only.
+    """
+    dry_run = bool(getattr(args, "dry_run", False))
+    index = load_index()
+    counts = {"notes": 0, "attachments": 0, "extracted_text": 0, "docling": 0}
+    problems: list[dict[str, str]] = []
+
+    def remove_readable_sidecars(att_dir: Path) -> None:
+        if (att_dir / "extracted.md.json").exists():
+            (att_dir / "extracted.md").unlink(missing_ok=True)
+        if (att_dir / "docling.json.enc").exists():
+            (att_dir / "docling.json").unlink(missing_ok=True)
+
+    for meta in index.get("notes", []):
+        nid = meta["id"]
+        plain = plaintext_note_path(nid)
+        if meta.get("storage", "encrypted") == "plaintext":
+            if not plain.is_file():
+                problems.append({"kind": "note_file_missing", "note_id": nid})
+            else:
+                counts["notes"] += 1
+                if not dry_run:
+                    note = load_note(meta)
+                    note["storage"] = "encrypted"
+                    secure_write_json(encrypted_note_path(nid), encrypt_bytes(json.dumps(note, ensure_ascii=False).encode(), aad=nid.encode()))
+                    back = json.loads(decrypt_payload(json.loads(encrypted_note_path(nid).read_text()), aad=nid.encode()).decode())
+                    if back.get("body") != note["body"]:
+                        die(f"Note {nid} did not read back the same after encryption; nothing was removed.", kind="unavailable")
+                    meta["storage"] = "encrypted"
+                    save_index(index)
+                    plain.unlink()
+        elif not dry_run and plain.is_file() and encrypted_note_path(nid).is_file():
+            # Left behind by a run that stopped after saving the index.
+            plain.unlink()
+        for att in meta.get("attachments", []):
+            att_id = att["id"]
+            att_dir = attachment_note_dir(nid) / att_id
+            container = att_dir / "original.json"
+            readable = att_dir / att.get("stored_name", att["name"])
+            if att.get("storage", "encrypted") != "plaintext":
+                if not dry_run and container.is_file():
+                    if readable != container and readable.name != "metadata.json" and readable.is_file():
+                        readable.unlink()
+                    remove_readable_sidecars(att_dir)
+                continue
+            if not readable.is_file():
+                problems.append({"kind": "attachment_file_missing", "note_id": nid, "attachment_id": att_id})
+                continue
+            data = readable.read_bytes()
+            if att.get("sha256") and hashlib.sha256(data).hexdigest() != att["sha256"]:
+                problems.append({"kind": "attachment_hash_mismatch", "note_id": nid, "attachment_id": att_id})
+                continue
+            text = (att_dir / "extracted.md").read_text(encoding="utf-8") if (att_dir / "extracted.md").is_file() and readable.name != "extracted.md" else ""
+            docling = read_attachment_docling_sidecar(meta, att) if readable.name != "docling.json" else {}
+            counts["attachments"] += 1
+            counts["extracted_text"] += bool(text)
+            counts["docling"] += bool(docling)
+            if dry_run:
+                continue
+            name = att["name"]
+            aad = f"{nid}:{att_id}:{name}".encode()
+            secure_write_json(container, {"name": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "encrypted": encrypt_bytes(data, aad=aad)})
+            if decrypt_payload(json.loads(container.read_text())["encrypted"], aad=aad) != data:
+                die(f"Attachment {att_id} did not read back the same after encryption; nothing was removed.", kind="unavailable")
+            if text:
+                secure_write_json(att_dir / "extracted.md.json", {"name": "extracted.md", "encrypted": encrypt_bytes(text.encode(), aad=f"{nid}:{att_id}:extracted.md".encode())})
+            if docling:
+                secure_write_json(att_dir / "docling.json.enc", {"encrypted": encrypt_bytes(json.dumps(docling, ensure_ascii=False).encode(), aad=f"{nid}:{att_id}:docling.json".encode())})
+            att["storage"] = "encrypted"
+            secure_write_json(att_dir / "metadata.json", att)
+            save_index(index)
+            if readable != container:
+                readable.unlink()
+            remove_readable_sidecars(att_dir)
+    emit({
+        "status": "dry-run" if dry_run else ("problems" if problems else "ok"),
+        "encrypted" if not dry_run else "would_encrypt": counts,
+        "problems": problems,
+    }, indent=2, ensure_ascii=False)
 
 
 def verify_vault(args: argparse.Namespace) -> None:

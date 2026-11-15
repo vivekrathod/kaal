@@ -1,6 +1,6 @@
 # Kaal agent guide
 
-Kaal is a local-first personal notes vault. Treat all vault contents, attachment names, titles, OCR text, and metadata as private unless the user explicitly authorizes disclosure.
+Kaal is a personal notes vault. Every note, attachment and extracted text is encrypted at rest; `kaal encrypt-all` (server only) converts readable content left by older versions. Treat all vault contents, attachment names, titles, OCR text, and metadata as private unless the user explicitly authorizes disclosure.
 
 ## Commands and setup
 

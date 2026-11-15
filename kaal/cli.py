@@ -151,9 +151,9 @@ def build_parser() -> argparse.ArgumentParser:
     library_text_parser.add_argument("--attachment-id", required=True)
     library_text_parser.set_defaults(func=core.library_extracted_text)
 
-    sp = sub.add_parser("medical", help="Capture and manage plaintext medical expense receipts")
+    sp = sub.add_parser("medical", help="Capture and manage medical expense receipts")
     medical_sub = sp.add_subparsers(dest="medical_cmd", required=True)
-    capture = medical_sub.add_parser("capture", help="Capture a browser-downloaded receipt into the plaintext medical inbox")
+    capture = medical_sub.add_parser("capture", help="Capture a browser-downloaded receipt into the medical inbox")
     capture.add_argument("file", help="Downloaded PDF, image, or receipt file")
     capture.add_argument("--title", default="", help="Receipt title; defaults to browser title or filename")
     capture.add_argument("--source-url", default="", help="Original browser page or PDF URL")
@@ -232,6 +232,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("verify", help="Check the index against the files on disk (ids only)")
     sp.add_argument("--deep", action="store_true", help="Also decrypt every encrypted note and attachment and check attachment hashes")
     sp.set_defaults(func=core.verify_vault)
+
+    sp = sub.add_parser("encrypt-all", help="Encrypt every note, attachment and extracted text an older version stored readable")
+    sp.add_argument("--dry-run", action="store_true", help="Count what would be encrypted; change nothing")
+    sp.set_defaults(func=core.encrypt_vault)
 
     sp = sub.add_parser("backup", help="Copy the vault into a new dated folder, hard-linking unchanged files, and prune old copies")
     sp.add_argument("--dest", default="", help="Backup folder (default: KAAL_BACKUP_DIR)")

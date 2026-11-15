@@ -1,6 +1,6 @@
 # Kaal
 
-Kaal is your local notes vault for personal data. Notes are Markdown by default and Kaal now uses best-effort local sensitivity detection to decide whether a note or attachment should be encrypted.
+Kaal is your notes vault for personal data. Notes are Markdown, and every note, attachment and piece of extracted text is encrypted at rest.
 
 Vault: `$HOME/.secure-notes`
 Primary CLI: `$HOME/.local/bin/kaal`
@@ -12,18 +12,17 @@ Server: optional `kaal-server`, so several machines share one vault (see [Runnin
 ## Security model
 
 - Notes are Markdown by default.
-- Kaal classifies note/attachment content locally as `public` or `sensitive`.
-- Sensitive notes and attachments are encrypted at rest.
-- Public notes are stored as plaintext Markdown in the vault.
+- Every note body, attachment and extracted/OCR text is encrypted at rest, medical receipts included.
+- Kaal still labels content `public` or `sensitive` with a best-effort local classifier, or as you say with `--sensitivity`. The label is information only: it no longer decides how anything is stored.
 - Attachments always preserve the original bytes; optional extracted/OCR Markdown sidecars are created separately.
-- Sensitive parent notes force attachments to be encrypted too.
-- The index stores metadata: id, title, tags, timestamps, storage mode, classification reasons, attachment names/sizes/hashes.
+- The index stores metadata, which is not yet encrypted: id, title, tags, timestamps, classification reasons, attachment names/sizes/hashes, and medical receipt fields.
+- A vault from an older version may hold non-sensitive notes, attachments and extracted text readable. `kaal encrypt-all` (run on the server) encrypts them in place; `--dry-run` counts them first. It reads each item back before removing the readable copy and can be re-run after an interruption.
 - The encryption key is never stored in vault files: it lives in the macOS Keychain or, with `KAAL_KEY_PROVIDER=file`, in the file named by `KAAL_KEY_FILE`, which Kaal refuses to read unless only its owner can read it.
 - File permissions are restrictive: vault directories `700`, stored files `600`.
 - Default note display is redacted.
 - Full plaintext should usually be copied to clipboard rather than printed in chat.
 
-Important: the classifier is a best guess. False negatives are the dangerous case. Use `--sensitivity sensitive` for anything you know is private, and only use `--sensitivity public` when you are comfortable storing the note or attachment as plaintext.
+The classifier is a best guess, and since everything is encrypted a wrong label no longer exposes anything.
 
 ## Running Kaal as a server
 
@@ -85,15 +84,17 @@ restores into an empty vault and verifies it.
 
 ## Threat model
 
-**What encryption protects.** Notes and attachments classified sensitive are
-encrypted with AES-256-GCM, so someone holding a copy of the vault files without
-the key (a stolen disk, a backup, a snapshot) cannot read them.
+**What encryption protects.** Every note body, attachment and extracted text
+is encrypted with AES-256-GCM, so someone holding a copy of the vault files
+without the key (a stolen disk, a backup, a snapshot) cannot read them. Losing
+the key therefore loses the vault: keep a copy of it somewhere off the server.
 
-**What it does not protect.** Public notes, medical receipts (plaintext by
-design) and all metadata are stored unencrypted: titles, tags, attachment names,
-sizes and hashes in `index.json` and each `metadata.json`. Only file permissions
-protect them: the `kaal` user, folders 700, files 600. Backups and snapshots of
-the vault hold the same plaintext parts, so keep them as private as the vault.
+**What it does not protect yet.** Metadata is stored unencrypted in `index.json`
+and each `metadata.json`: titles, tags, attachment names, sizes and hashes, and
+the fields of medical receipts (patient, provider, dates, amounts). Only file
+permissions protect them: the `kaal` user, folders 700, files 600. Backups made
+before `kaal encrypt-all` was run still hold the older readable copies until
+they are pruned, so keep backups as private as the vault.
 
 **On the server.** Only `kaal-server`, running as its own user, reads the vault
 and the key file. The key is never stored next to the data, and keep a recovery
@@ -120,8 +121,7 @@ server: keep it readable only by root and the service.
 
 **Not defended against.** A compromised client can do whatever its token allows
 until you revoke it, and a token with `admin` can export everything. A
-compromised server host exposes everything. The classifier can miss sensitive
-text, which would then be stored as plaintext. Rate limits are basic and are not
+compromised server host exposes everything. Rate limits are basic and are not
 denial-of-service protection.
 
 ## Local receipt extraction and confirmation
@@ -268,7 +268,7 @@ Passport: <your-passport-number>
 DOB: <your-date-of-birth>
 ```
 
-Append to a note. A plaintext note that becomes sensitive after append is upgraded to encrypted storage automatically:
+Append to a note. A note labelled public whose text becomes sensitive after an append is relabelled sensitive:
 
 ```bash
 kaal append "My note" --body "New detail here"
@@ -336,9 +336,9 @@ kaal library purge NOTE_ID --yes
 
 ## One-click medical receipt capture from Chrome
 
-Medical receipts are intentionally stored as **plaintext** in Kaal when using
-this workflow. The receipt original and its extracted/OCR text remain local,
-with normal macOS account permissions (not Kaal application-level encryption).
+Medical receipts are encrypted like everything else: the original and its
+extracted/OCR text are stored encrypted. The fields read from a receipt live in
+the index, which is not encrypted yet (see the threat model).
 
 Capture a downloaded receipt directly:
 
@@ -349,8 +349,8 @@ kaal medical capture /path/to/receipt.pdf \
 kaal medical list --inbox
 ```
 
-The capture command creates a `medical`, `receipt`, `inbox` record, preserves a
-plaintext copy of the original, and extracts PDF text/OCR when possible.
+The capture command creates a `medical`, `receipt`, `inbox` record, preserves an
+encrypted copy of the original, and extracts PDF text/OCR when possible.
 
 ### Receipt values, family members and reimbursement
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import kaal.core as kaal
+import legacy
 
 
 class VerifyTests(unittest.TestCase):
@@ -26,6 +27,8 @@ class VerifyTests(unittest.TestCase):
         self.private = self.add("Private", "SSN: 078-05-1120", "sensitive")
         self.public_att = self.attach(self.public, "plain-name-marker.txt", "hello", "public")
         self.private_att = self.attach(self.private, "private.txt", "secret attachment", "sensitive")
+        # Older vaults hold non-sensitive content readable; verify must still check that layout.
+        legacy.make_plaintext(self.public)
 
     def tearDown(self):
         kaal.VAULT, kaal.NOTES_DIR, kaal.ATTACH_DIR, kaal.INDEX_PATH = self.saved

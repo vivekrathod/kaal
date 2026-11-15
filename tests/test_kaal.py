@@ -120,9 +120,10 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(result["sensitivity"], "sensitive")
         self.assertTrue(any("TaxDocument" in reason for reason in result["reasons"]))
 
-    def test_decide_storage_respects_public_override_for_sensitive_text(self):
+    def test_decide_storage_keeps_the_public_label_but_always_encrypts(self):
         storage, classification = kaal.decide_storage(f"SSN: {DUMMY_SSN}", sensitivity="public")
-        self.assertEqual(storage, "plaintext")
+        self.assertEqual(storage, "encrypted")
+        self.assertEqual(kaal.decide_storage("- milk")[0], "encrypted")
         self.assertEqual(classification["sensitivity"], "public")
         self.assertTrue(classification["reasons"][0], "forced public")
 
@@ -132,14 +133,16 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(classification["sensitivity"], "sensitive")
         self.assertTrue(classification["reasons"][0], "forced sensitive")
 
-    def test_add_auto_public_note_stores_plaintext_markdown(self):
+    def test_add_auto_public_note_is_labelled_public_and_stored_encrypted(self):
         meta = self.add_note(title="Groceries", tags="home", body="# Groceries\n\n- milk")
         self.assertEqual(meta["format"], "markdown")
         self.assertEqual(meta["sensitivity"], "public")
-        self.assertEqual(meta["storage"], "plaintext")
+        self.assertEqual(meta["storage"], "encrypted")
         note_file = kaal.note_path(meta["id"])
-        self.assertEqual(note_file.suffix, ".md")
-        self.assertIn("# Groceries", note_file.read_text())
+        self.assertEqual(note_file.suffix, ".json")
+        self.assertNotIn("milk", note_file.read_text())
+        self.assertFalse(kaal.plaintext_note_path(meta["id"]).exists())
+        self.assertIn("# Groceries", kaal.load_note(meta)["body"])
 
     def test_add_auto_sensitive_note_stores_encrypted_json(self):
         with self.with_fake_crypto():
@@ -154,13 +157,13 @@ class KaalFeatureTests(unittest.TestCase):
         args = SimpleNamespace(title="From File", tags="docs", body=None, body_file=str(src), sensitivity="auto")
         self.call_silently(kaal.add_note, args)
         meta = kaal.load_index()["notes"][0]
-        self.assertEqual(meta["storage"], "plaintext")
-        self.assertIn("# From file", kaal.plaintext_note_path(meta["id"]).read_text())
+        self.assertEqual(meta["storage"], "encrypted")
+        self.assertIn("# From file", kaal.load_note(meta)["body"])
 
-    def test_append_sensitive_text_upgrades_public_note_to_encrypted(self):
-        meta = self.add_note(title="Mixed", body="# Public start")
-        self.assertTrue(kaal.plaintext_note_path(meta["id"]).exists())
+    def test_append_sensitive_text_relabels_a_public_note_as_sensitive(self):
         with self.with_fake_crypto():
+            meta = self.add_note(title="Mixed", body="# Public start")
+            self.assertEqual((meta["sensitivity"], meta["storage"]), ("public", "encrypted"))
             self.call_silently(kaal.append_note, SimpleNamespace(query=meta["id"], body=f"SSN: {DUMMY_SSN}"))
         updated = kaal.load_index()["notes"][0]
         self.assertEqual(updated["storage"], "encrypted")
@@ -199,7 +202,7 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertIn("Method: tesseract", extracted)
         self.assertIn("OCR text from Tesseract", extracted)
 
-    def test_public_attachment_with_extract_preserves_original_and_sidecar_plaintext(self):
+    def test_public_attachment_with_extract_keeps_original_and_sidecar_encrypted(self):
         meta = self.add_note(title="Public", body="# Public")
         src = self.vault / "public.txt"
         src.write_text("Harmless project note", encoding="utf-8")
@@ -207,10 +210,14 @@ class KaalFeatureTests(unittest.TestCase):
 
         updated = kaal.load_index()["notes"][0]
         att = updated["attachments"][0]
-        self.assertEqual(att["storage"], "plaintext")
+        self.assertEqual(att["storage"], "encrypted")
         att_dir = kaal.attachment_note_dir(meta["id"]) / att["id"]
-        self.assertEqual((att_dir / "public.txt").read_text(), "Harmless project note")
-        self.assertIn("Harmless project note", (att_dir / "extracted.md").read_text())
+        self.assertEqual(kaal.attachment_original_bytes(updated, att), b"Harmless project note")
+        self.assertIn("Harmless project note", kaal.read_attachment_extracted_sidecar(updated, att))
+        self.assertFalse((att_dir / "public.txt").exists() or (att_dir / "extracted.md").exists())
+        for stored in att_dir.iterdir():
+            if stored.name != "metadata.json":
+                self.assertNotIn("Harmless", stored.read_text())
 
     def test_sensitive_attachment_with_extract_encrypts_original_and_sidecar(self):
         meta = self.add_note(title="Public", body="# Public")
@@ -251,7 +258,7 @@ class KaalFeatureTests(unittest.TestCase):
 
         self.assertEqual(out.read_text(), "Harmless project note")
 
-    def test_plaintext_attachment_with_overlong_display_name_uses_safe_stored_name(self):
+    def test_attachment_with_overlong_display_name_uses_safe_stored_name(self):
         meta = self.add_note(title="Public", body="# Public")
         src = self.vault / "resource.bin"
         src.write_bytes(b"resource bytes")
@@ -262,7 +269,7 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(att["name"], display_name)
         self.assertLessEqual(len(att["stored_name"].encode("utf-8")), 180)
         self.assertNotEqual(att["stored_name"], display_name)
-        self.assertTrue((kaal.attachment_note_dir(meta["id"]) / att["id"] / att["stored_name"]).exists())
+        self.assertTrue((kaal.attachment_note_dir(meta["id"]) / att["id"] / "original.json").exists())
         out = self.vault / "exported-long-name.bin"
         self.call_silently(kaal.export_attachment, SimpleNamespace(query=meta["id"], attachment=att["id"], output=str(out), force=False))
         self.assertEqual(out.read_bytes(), b"resource bytes")
@@ -336,12 +343,12 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(updated["sensitivity"], "sensitive")
         self.assertIn("public follow-up", note["body"])
 
-    def test_append_public_text_to_public_note_stays_plaintext(self):
+    def test_append_public_text_to_public_note_stays_labelled_public(self):
         meta = self.add_note(title="Public", body="# Start")
         self.call_silently(kaal.append_note, SimpleNamespace(query=meta["id"], body="more public text"))
         updated = kaal.load_index()["notes"][0]
-        self.assertEqual(updated["storage"], "plaintext")
-        self.assertIn("more public text", kaal.plaintext_note_path(meta["id"]).read_text())
+        self.assertEqual((updated["storage"], updated["sensitivity"]), ("encrypted", "public"))
+        self.assertIn("more public text", kaal.load_note(updated)["body"])
 
     def test_list_and_search_commands_emit_metadata(self):
         meta = self.add_note(title="Trip Plan", tags="travel,home", body="# Public")
@@ -658,7 +665,7 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["imported_notes"], 2)
         notes = kaal.load_index()["notes"]
         by_title = {n["title"]: n for n in notes}
-        self.assertEqual(by_title["Trip Plan"]["storage"], "plaintext")
+        self.assertEqual((by_title["Trip Plan"]["storage"], by_title["Trip Plan"]["sensitivity"]), ("encrypted", "public"))
         self.assertEqual(by_title["Identity"]["storage"], "encrypted")
         self.assertEqual(by_title["Trip Plan"]["source"], {"type": "joplin", "id": "22222222222222222222222222222222"})
         self.assertIn("joplin", by_title["Trip Plan"]["tags"])
@@ -667,7 +674,8 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertIn("joplin-notebook-personal", by_title["Trip Plan"]["tags"])
         self.assertEqual(by_title["Trip Plan"]["attachments"][0]["name"], "receipt.jpg")
         self.assertEqual(by_title["Trip Plan"]["attachments"][0]["source"], {"type": "joplin", "note_id": "22222222222222222222222222222222", "resource_id": "44444444444444444444444444444444"})
-        body = kaal.plaintext_note_path(by_title["Trip Plan"]["id"]).read_text(encoding="utf-8")
+        with self.with_fake_crypto():
+            body = kaal.load_note(by_title["Trip Plan"])["body"]
         self.assertIn("Pack snacks", body)
         self.assertNotIn("type_: 1", body)
 
@@ -688,8 +696,8 @@ class KaalFeatureTests(unittest.TestCase):
         trip = {n["title"]: n for n in kaal.load_index()["notes"]}["Trip Plan"]
         att = trip["attachments"][0]
         self.assertTrue(att["extracted_markdown"])
-        sidecar = kaal.attachment_note_dir(trip["id"]) / att["id"] / "extracted.md"
-        self.assertIn("receipt OCR text", sidecar.read_text(encoding="utf-8"))
+        with self.with_fake_crypto():
+            self.assertIn("receipt OCR text", kaal.read_attachment_extracted_sidecar(trip, att))
 
     def test_ocr_attachments_updates_existing_attachment_sidecars_separately(self):
         meta = self.add_note(title="Public", body="# Public")
@@ -707,10 +715,8 @@ class KaalFeatureTests(unittest.TestCase):
         updated = kaal.load_index()["notes"][0]
         att = updated["attachments"][0]
         self.assertTrue(att["extracted_markdown"])
-        sidecar = kaal.attachment_note_dir(updated["id"]) / att["id"] / "extracted.md"
-        self.assertTrue(sidecar.exists())
-        self.assertIn("Driver License: D1234567", sidecar.read_text(encoding="utf-8"))
-        self.assertTrue((kaal.attachment_note_dir(updated["id"]) / att["id"] / "scan.jpg").exists())
+        self.assertIn("Driver License: D1234567", kaal.read_attachment_extracted_sidecar(updated, att))
+        self.assertTrue((kaal.attachment_note_dir(updated["id"]) / att["id"] / "original.json").exists())
 
     def test_import_joplin_raw_incremental_repairs_legacy_import_without_duplicates(self):
         export_dir = self.make_joplin_raw_export()
@@ -755,7 +761,7 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["unresolved_resources"], 1)
         self.assertIn("missing resource", payload["warnings"][0])
 
-    def test_medical_capture_creates_plaintext_inbox_note_and_receipt_attachment(self):
+    def test_medical_capture_creates_an_encrypted_inbox_note_and_receipt_attachment(self):
         receipt = self.vault / "payment-receipt.pdf"
         receipt.write_bytes(b"%PDF fake receipt")
         original = kaal.run_docling
@@ -776,20 +782,20 @@ class KaalFeatureTests(unittest.TestCase):
 
         payload = json.loads(stdout)
         self.assertEqual(payload["status"], "captured")
-        self.assertEqual(payload["storage"], "plaintext")
+        self.assertEqual(payload["storage"], "encrypted")
         meta = kaal.load_index()["notes"][0]
         self.assertEqual(meta["title"], "City Clinic payment receipt")
-        self.assertEqual(meta["storage"], "plaintext")
+        self.assertEqual(meta["storage"], "encrypted")
         self.assertEqual(meta["sensitivity"], "public")
         self.assertTrue({"medical", "receipt", "inbox"}.issubset(set(meta["tags"])))
         self.assertEqual(meta["source"]["url"], "https://portal.example.test/receipt/42")
         attachment = meta["attachments"][0]
-        self.assertEqual(attachment["storage"], "plaintext")
+        self.assertEqual(attachment["storage"], "encrypted")
         self.assertEqual(attachment["sensitivity"], "public")
         self.assertTrue(attachment["extracted_markdown"])
         self.assertEqual(attachment["source"]["title"], "City Clinic: payment confirmed")
         self.assertIn("City Clinic: payment confirmed", kaal.load_note(meta)["body"])
-        self.assertIn("Paid: $42.00", (kaal.attachment_note_dir(meta["id"]) / attachment["id"] / "extracted.md").read_text())
+        self.assertIn("Paid: $42.00", kaal.read_attachment_extracted_sidecar(meta, attachment))
 
     def test_medical_export_original_writes_the_exact_managed_attachment_bytes(self):
         receipt = self.vault / "source-receipt.pdf"
@@ -845,7 +851,7 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(meta["source"]["url"], "https://example.test/docs/reference")
         self.assertNotIn("token=secret", kaal.load_note(meta)["body"])
         attachment = meta["attachments"][0]
-        self.assertEqual((kaal.attachment_note_dir(meta["id"]) / attachment["id"] / attachment["stored_name"]).read_text(), "Harmless project reference")
+        self.assertEqual(kaal.attachment_original_bytes(meta, attachment), b"Harmless project reference")
         self.assertEqual(source.read_text(), "Harmless project reference")
 
     def test_browser_capture_keeps_a_sensitive_attachment_encrypted(self):
@@ -922,7 +928,7 @@ class KaalFeatureTests(unittest.TestCase):
         _result, output, _stderr = self.capture_call(kaal.library_attach, SimpleNamespace(note_id=note["id"], file=str(source)))
         attachment = json.loads(output)["attachment"]
         self.assertTrue(source.exists())
-        self.assertTrue((kaal.attachment_note_dir(note["id"]) / attachment["id"] / attachment["stored_name"]).exists())
+        self.assertTrue((kaal.attachment_note_dir(note["id"]) / attachment["id"] / "original.json").exists())
         _result, output, _stderr = self.capture_call(kaal.library_extracted_text, SimpleNamespace(note_id=note["id"], attachment_id=attachment["id"]))
         self.assertIn("Extracted generic reference text", json.loads(output)["text"])
 
@@ -999,7 +1005,7 @@ class KaalFeatureTests(unittest.TestCase):
 
         restored = next(note for note in kaal.load_index()["notes"] if note["id"] == receipt["id"])
         self.assertTrue(restored.get("trashed_at"))
-        self.assertTrue(kaal.plaintext_note_path(receipt["id"]).exists())
+        self.assertTrue(kaal.encrypted_note_path(receipt["id"]).exists())
 
     def test_medical_bulk_purge_requires_every_receipt_to_be_trashed(self):
         trashed = self.add_note(title="Trashed receipt", tags="medical,receipt,inbox", body="# Receipt")
