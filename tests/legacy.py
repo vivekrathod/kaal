@@ -1,8 +1,9 @@
 """Put stored content back into the layout Kaal used before everything was encrypted.
 
 Older vaults hold non-sensitive notes as ``notes/<id>.md``, their attachments
-as raw files, and extracted text as ``extracted.md``. Kaal no longer writes
-that layout, but it must still read it and migrate it, so tests build it here.
+as raw files, extracted text as ``extracted.md``, and the index and attachment
+metadata as readable JSON. Kaal no longer writes that layout, but it must still
+read it and migrate it, so tests build it here.
 """
 import json
 import os
@@ -11,8 +12,8 @@ import kaal.core as kaal
 
 
 def make_plaintext(note_id: str) -> None:
-    """Rewrite one note, its attachments and their sidecars as readable files."""
-    index = json.loads(kaal.INDEX_PATH.read_text())
+    """Rewrite one note, its attachments, their sidecars and the index as readable files."""
+    index = kaal.read_index_file()
     meta = next(note for note in index["notes"] if note["id"] == note_id)
     note = kaal.load_note(meta)
     kaal.encrypted_note_path(note_id).unlink()

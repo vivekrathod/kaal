@@ -15,8 +15,8 @@ Server: optional `kaal-server`, so several machines share one vault (see [Runnin
 - Every note body, attachment and extracted/OCR text is encrypted at rest, medical receipts included.
 - Kaal still labels content `public` or `sensitive` with a best-effort local classifier, or as you say with `--sensitivity`. The label is information only: it no longer decides how anything is stored.
 - Attachments always preserve the original bytes; optional extracted/OCR Markdown sidecars are created separately.
-- The index stores metadata, which is not yet encrypted: id, title, tags, timestamps, classification reasons, attachment names/sizes/hashes, and medical receipt fields.
-- A vault from an older version may hold non-sensitive notes, attachments and extracted text readable. `kaal encrypt-all` (run on the server) encrypts them in place; `--dry-run` counts them first. It reads each item back before removing the readable copy and can be re-run after an interruption.
+- The index is encrypted too. It holds the metadata: titles, tags, timestamps, attachment names, sizes and hashes, and medical receipt fields. A copy of each attachment's metadata is kept beside it, also encrypted.
+- A vault from an older version may hold non-sensitive notes, attachments, extracted text and the index readable. `kaal encrypt-all` (run on the server) encrypts them in place; `--dry-run` counts them first. It reads each item back before removing the readable copy and can be re-run after an interruption. Until it has been run, such a vault keeps its index readable so that the older version can still open it.
 - The encryption key is never stored in vault files: it lives in the macOS Keychain or, with `KAAL_KEY_PROVIDER=file`, in the file named by `KAAL_KEY_FILE`, which Kaal refuses to read unless only its owner can read it.
 - File permissions are restrictive: vault directories `700`, stored files `600`.
 - Default note display is redacted.
@@ -89,12 +89,14 @@ is encrypted with AES-256-GCM, so someone holding a copy of the vault files
 without the key (a stolen disk, a backup, a snapshot) cannot read them. Losing
 the key therefore loses the vault: keep a copy of it somewhere off the server.
 
-**What it does not protect yet.** Metadata is stored unencrypted in `index.json`
-and each `metadata.json`: titles, tags, attachment names, sizes and hashes, and
-the fields of medical receipts (patient, provider, dates, amounts). Only file
-permissions protect them: the `kaal` user, folders 700, files 600. Backups made
-before `kaal encrypt-all` was run still hold the older readable copies until
-they are pruned, so keep backups as private as the vault.
+**What stays readable.** Not the contents and not the names: titles, tags,
+attachment names and medical receipt fields are in the encrypted index. What a
+copy of the vault files still shows is its shape: how many notes and attachments
+there are, their ids, sizes and file dates, and the size and hash recorded beside
+each encrypted attachment. Token names and their scopes are in `tokens.json`,
+outside the vault. Backups made before `kaal encrypt-all` was run still hold the
+older readable copies until they are pruned, so keep backups as private as the
+vault.
 
 **On the server.** Only `kaal-server`, running as its own user, reads the vault
 and the key file. The key is never stored next to the data, and keep a recovery
@@ -337,8 +339,8 @@ kaal library purge NOTE_ID --yes
 ## One-click medical receipt capture from Chrome
 
 Medical receipts are encrypted like everything else: the original and its
-extracted/OCR text are stored encrypted. The fields read from a receipt live in
-the index, which is not encrypted yet (see the threat model).
+extracted/OCR text are stored encrypted, and the fields read from a receipt
+live in the encrypted index.
 
 Capture a downloaded receipt directly:
 

@@ -105,17 +105,17 @@ def test_upgrade_keeps_printed_values_flags_unreadable_ones_and_is_idempotent():
 
 def test_old_records_read_as_upgraded_and_reach_the_disk_with_the_next_write(vault):
     note_id = add_receipt({"amount": "12.50", "service_date": "2026-01-02"})
-    index = json.loads(kaal.INDEX_PATH.read_text())
+    index = kaal.read_index_file()
     old = next(note for note in index["notes"] if note["id"] == note_id)
     old["receipt"] = {"fields": {"amount": "12.50", "service_date": "01/02/2026"}, "field_sources": {"service_date": "manual"}}
     kaal.secure_write_json(kaal.INDEX_PATH, index)
 
     assert stored(note_id)["fields"]["service_date"] == "2026-01-02"
-    on_disk = next(note for note in json.loads(kaal.INDEX_PATH.read_text())["notes"] if note["id"] == note_id)
+    on_disk = next(note for note in kaal.read_index_file()["notes"] if note["id"] == note_id)
     assert "schema" not in on_disk["receipt"]
 
     call(kaal.medical_people, add=["Jane Doe"], remove=[])
-    on_disk = next(note for note in json.loads(kaal.INDEX_PATH.read_text())["notes"] if note["id"] == note_id)
+    on_disk = next(note for note in kaal.read_index_file()["notes"] if note["id"] == note_id)
     assert on_disk["receipt"]["schema"] == 2
     assert on_disk["receipt"]["fields"]["service_date"] == "2026-01-02"
     assert on_disk["receipt"]["field_raw"] == {"service_date": "01/02/2026"}

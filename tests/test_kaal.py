@@ -30,7 +30,10 @@ class KaalFeatureTests(unittest.TestCase):
         kaal.VAULT.mkdir(mode=0o700, exist_ok=True)
         kaal.NOTES_DIR.mkdir(mode=0o700, exist_ok=True)
         kaal.ATTACH_DIR.mkdir(mode=0o700, exist_ok=True)
-        kaal.save_index({"version": 1, "created": kaal.now_iso(), "notes": []})
+        # A readable index, as older vaults have: several tests here swap the
+        # cipher for a stand-in part-way through, which an encrypted index
+        # could not survive. Index encryption has its own tests.
+        kaal.save_index({"version": 1, "created": kaal.now_iso(), "notes": []}, encrypted=False)
 
     def tearDown(self):
         self.tmp.cleanup()

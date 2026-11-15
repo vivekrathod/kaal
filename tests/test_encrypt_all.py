@@ -8,6 +8,7 @@ import kaal.core as kaal
 import legacy
 
 MARKER = "zebra-crossing-marker"
+NAME_MARKER = "walrus-moustache-marker"  # appears only in titles and attachment names
 
 
 @pytest.fixture()
@@ -28,9 +29,9 @@ def meta_of(note_id):
 
 
 def add_note(directory, title, body, *, attachment=None):
-    note_id = call(kaal.add_note, title=title, tags="", body=body, body_file=None, sensitivity="auto")["id"]
+    note_id = call(kaal.add_note, title=f"{title} {NAME_MARKER}", tags="", body=body, body_file=None, sensitivity="auto")["id"]
     if attachment:
-        source = directory / attachment
+        source = directory / f"{NAME_MARKER}-{attachment}"
         source.write_text(f"attachment text {MARKER}\n")
         call(kaal.attach_file, query=note_id, file=str(source), sensitivity="auto", extract=True, ocr=False)
     return note_id
@@ -42,13 +43,17 @@ def add_receipt(directory, name="receipt.txt"):
     return call(kaal.medical_capture, file=str(source), title="", source_url="", source_title="", captured_at="")["id"]
 
 
-def files_holding_the_marker():
-    """Vault files, other than the index and attachment metadata, in which the marker can be read."""
+def files_holding(marker):
     found = []
     for path in kaal.VAULT.rglob("*"):
-        if path.is_file() and path.name not in {"index.json", "metadata.json"} and MARKER.encode() in path.read_bytes():
+        if path.is_file() and (marker.encode() in path.read_bytes() or marker in path.name):
             found.append(str(path.relative_to(kaal.VAULT)))
     return sorted(found)
+
+
+def files_holding_the_marker():
+    """Vault files in which note, attachment or extracted text can be read."""
+    return files_holding(MARKER)
 
 
 def test_nothing_new_is_written_readable(vault):
@@ -70,14 +75,19 @@ def test_encrypt_all_converts_an_older_vault_and_keeps_every_byte(vault):
 
     before = {path: path.read_bytes() for path in kaal.VAULT.rglob("*") if path.is_file() and path.name != ".medical-capture.lock"}
     plan = call(kaal.encrypt_vault, dry_run=True)
-    assert plan == {"status": "dry-run", "would_encrypt": {"notes": 2, "attachments": 2, "extracted_text": 2, "docling": 0}, "problems": []}
+    assert plan == {"status": "dry-run", "would_encrypt": {"notes": 2, "attachments": 2, "extracted_text": 2, "docling": 0, "metadata": 2, "attachment_names": 0, "index": 1}, "problems": []}
+    assert "index.json" in files_holding(NAME_MARKER)
     assert {path: path.read_bytes() for path in before} == before
 
     done = call(kaal.encrypt_vault, dry_run=False)
-    assert done == {"status": "ok", "encrypted": {"notes": 2, "attachments": 2, "extracted_text": 2, "docling": 0}, "problems": []}
+    assert done == {"status": "ok", "encrypted": {"notes": 2, "attachments": 2, "extracted_text": 2, "docling": 0, "metadata": 2, "attachment_names": 2, "index": 1}, "problems": []}
     assert files_holding_the_marker() == []
+    # Titles and attachment names are gone from every stored file, the index and metadata copies included.
+    assert files_holding(NAME_MARKER) == []
+    assert kaal.index_is_encrypted()
+    assert "notes" not in json.loads(kaal.INDEX_PATH.read_text())
     assert list(kaal.NOTES_DIR.glob("*.md")) == []
-    for name in ("extracted.md", "docling.json", "list.txt", "receipt.txt"):
+    for name in ("extracted.md", "docling.json", "*list.txt", "receipt.txt"):
         assert list(kaal.ATTACH_DIR.rglob(name)) == []
 
     for checked in (note_id, receipt_id):
@@ -87,14 +97,13 @@ def test_encrypt_all_converts_an_older_vault_and_keeps_every_byte(vault):
         assert MARKER in kaal.load_note(meta)["body"] or checked == receipt_id
         assert MARKER.encode() in kaal.attachment_original_bytes(meta, attachment)
         assert MARKER in kaal.read_attachment_extracted_sidecar(meta, attachment)
-        stored_meta = json.loads((kaal.attachment_note_dir(checked) / attachment["id"] / "metadata.json").read_text())
-        assert stored_meta["storage"] == "encrypted"
+        assert kaal.read_attachment_metadata(checked, attachment["id"])["storage"] == "encrypted"
     assert meta_of(receipt_id)["receipt"]["fields"] == fields_before
     assert kaal.load_note(meta_of(sensitive_id))["body"] == "SSN: 078-05-1120"
     assert call(kaal.verify_vault, deep=True)["problems"] == []
 
     again = call(kaal.encrypt_vault, dry_run=False)
-    assert again["encrypted"] == {"notes": 0, "attachments": 0, "extracted_text": 0, "docling": 0}
+    assert again["encrypted"] == {"notes": 0, "attachments": 0, "extracted_text": 0, "docling": 0, "metadata": 0, "attachment_names": 0, "index": 0}
 
 
 def test_encrypt_all_converts_stored_docling_output_too(vault):
@@ -166,3 +175,71 @@ def test_labels_survive_without_deciding_storage(vault):
     forced = call(kaal.add_note, title="Forced", tags="", body="SSN: 078-05-1120", body_file=None, sensitivity="public")
     private = call(kaal.add_note, title="IDs", tags="", body="SSN: 078-05-1120", body_file=None, sensitivity="auto")
     assert [(meta_of(item["id"])["sensitivity"], meta_of(item["id"])["storage"]) for item in (public, forced, private)] == [("public", "encrypted"), ("public", "encrypted"), ("sensitive", "encrypted")]
+
+
+def test_a_new_vault_keeps_titles_and_names_out_of_every_file(vault):
+    note_id = add_note(vault, "Groceries", f"- milk {MARKER}", attachment="list.txt")
+    add_receipt(vault)
+    assert kaal.index_is_encrypted()
+    assert files_holding(MARKER) == [] and files_holding(NAME_MARKER) == []
+    attachment = meta_of(note_id)["attachments"][0]
+    container = json.loads((kaal.attachment_note_dir(note_id) / attachment["id"] / "original.json").read_text())
+    assert "name" not in container
+    assert NAME_MARKER in attachment["name"] and NAME_MARKER in meta_of(note_id)["title"]
+    assert kaal.read_attachment_metadata(note_id, attachment["id"])["name"] == attachment["name"]
+    assert MARKER.encode() in kaal.attachment_original_bytes(meta_of(note_id), attachment)
+    assert call(kaal.verify_vault, deep=True)["problems"] == []
+    assert call(kaal.encrypt_vault, dry_run=True)["would_encrypt"] == {"notes": 0, "attachments": 0, "extracted_text": 0, "docling": 0, "metadata": 0, "attachment_names": 0, "index": 0}
+
+
+def test_an_older_vault_stays_readable_by_older_versions_until_it_is_converted(vault):
+    note_id = add_note(vault, "Old", "body", attachment="old.txt")
+    legacy.make_plaintext(note_id)
+    assert not kaal.index_is_encrypted()
+
+    newer = add_note(vault, "Newer", "body two", attachment="newer.txt")
+    assert not kaal.index_is_encrypted()
+    assert "notes" in json.loads(kaal.INDEX_PATH.read_text())
+    attachment = meta_of(newer)["attachments"][0]
+    container = json.loads((kaal.attachment_note_dir(newer) / attachment["id"] / "original.json").read_text())
+    assert container["name"] == attachment["name"]
+
+    done = call(kaal.encrypt_vault, dry_run=False)
+    assert (done["status"], done["encrypted"]["index"], done["encrypted"]["attachment_names"]) == ("ok", 1, 2)
+    assert kaal.index_is_encrypted() and files_holding(NAME_MARKER) == []
+    assert call(kaal.verify_vault, deep=True)["problems"] == []
+
+
+def test_a_container_whose_name_disagrees_with_the_index_is_left_openable(vault):
+    note_id = add_note(vault, "Old", "body", attachment="old.txt")
+    legacy.make_plaintext(note_id)
+    call(kaal.encrypt_vault, dry_run=False)
+    # Put a different name back into the container, as if the index had drifted.
+    attachment = meta_of(note_id)["attachments"][0]
+    path = kaal.attachment_note_dir(note_id) / attachment["id"] / "original.json"
+    container = json.loads(path.read_text())
+    container["name"] = "some-other-name.txt"
+    kaal.secure_write_json(path, container)
+    result = call(kaal.encrypt_vault, dry_run=False)
+    assert [problem["kind"] for problem in result["problems"]] == ["attachment_name_mismatch"]
+    assert json.loads(path.read_text())["name"] == "some-other-name.txt"
+
+
+def test_status_does_not_need_the_key(vault, monkeypatch, tmp_path):
+    add_note(vault, "Groceries", "- milk")
+    assert call(kaal.status)["notes"] == 1 and call(kaal.status)["index_encrypted"] is True
+    monkeypatch.setenv("KAAL_KEY_FILE", str(tmp_path / "no-such.key"))
+    without_key = call(kaal.status)
+    assert (without_key["key_exists"], without_key["notes"], without_key["index_encrypted"]) == (False, None, True)
+
+
+def test_export_and_import_carry_an_encrypted_index(vault, tmp_path):
+    note_id = add_note(vault, "Groceries", f"- milk {MARKER}", attachment="list.txt")
+    archive = tmp_path / "vault.tar"
+    call(kaal.export_vault, output=str(archive))
+    assert NAME_MARKER.encode() not in archive.read_bytes() and MARKER.encode() not in archive.read_bytes()
+    kaal.configure_vault(tmp_path / "restored")
+    call(kaal.import_vault, archive=str(archive))
+    assert kaal.index_is_encrypted()
+    assert NAME_MARKER in meta_of(note_id)["title"]
+    assert MARKER in kaal.load_note(meta_of(note_id))["body"]

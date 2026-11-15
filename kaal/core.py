@@ -285,11 +285,39 @@ def holds_vault_lock(handler: Callable[[Any], None]) -> Callable[[Any], None]:
     return wrapper
 
 
+INDEX_AAD = b"kaal:index"
+INDEX_FORMAT = "kaal-index-encrypted-v1"
+
+
+def _is_encrypted_envelope(stored: Any) -> bool:
+    return isinstance(stored, dict) and isinstance(stored.get("encrypted"), dict) and "ciphertext" in stored["encrypted"]
+
+
+def index_is_encrypted() -> bool:
+    """Whether the index on disk is encrypted. A vault with no index yet counts as encrypted."""
+    if not INDEX_PATH.exists():
+        return True
+    try:
+        return _is_encrypted_envelope(json.loads(INDEX_PATH.read_text()))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def read_index_file() -> dict[str, Any]:
+    """The index exactly as stored, decrypted when it is encrypted. Nothing is upgraded."""
+    stored = json.loads(INDEX_PATH.read_text())
+    if _is_encrypted_envelope(stored):
+        return json.loads(decrypt_payload(stored["encrypted"], aad=INDEX_AAD).decode())
+    return stored
+
+
 def load_index() -> dict[str, Any]:
     if not INDEX_PATH.exists():
         return {"version": 1, "created": now_iso(), "notes": []}
     try:
-        index = json.loads(INDEX_PATH.read_text())
+        index = read_index_file()
+    except KaalError:
+        raise
     except Exception as e:
         die(f"Could not read index: {e}")
     # Readers always see current-shape receipts; the upgrade reaches the disk
@@ -298,11 +326,36 @@ def load_index() -> dict[str, Any]:
     return index
 
 
-def save_index(index: dict[str, Any]) -> None:
+def save_index(index: dict[str, Any], *, encrypted: bool | None = None) -> None:
+    """Write the index. It holds titles, tags, attachment names and receipt fields.
+
+    A new vault's index is encrypted from the start. An existing index keeps
+    the form it has on disk, so that an older Kaal can still read a vault
+    until `kaal encrypt-all` converts it; that command passes encrypted=True.
+    """
     learn_provider_names(index)
     upgrade_receipts(index)
     index["updated"] = now_iso()
-    secure_write_json(INDEX_PATH, index)
+    if index_is_encrypted() if encrypted is None else encrypted:
+        payload = encrypt_bytes(json.dumps(index, ensure_ascii=False).encode(), aad=INDEX_AAD)
+        secure_write_json(INDEX_PATH, {"format": INDEX_FORMAT, "encrypted": payload})
+    else:
+        secure_write_json(INDEX_PATH, index)
+
+
+def write_attachment_metadata(note_id: str, attachment_meta: dict[str, Any]) -> None:
+    """Keep an encrypted copy of an attachment's metadata beside it, as a second record of what it is."""
+    att_id = attachment_meta["id"]
+    payload = encrypt_bytes(json.dumps(attachment_meta, ensure_ascii=False).encode(), aad=f"{note_id}:{att_id}:metadata.json".encode())
+    secure_write_json(attachment_note_dir(note_id) / att_id / "metadata.json", {"encrypted": payload})
+
+
+def read_attachment_metadata(note_id: str, att_id: str) -> dict[str, Any]:
+    """An attachment's metadata copy, whichever way it is stored."""
+    stored = json.loads((attachment_note_dir(note_id) / att_id / "metadata.json").read_text())
+    if _is_encrypted_envelope(stored):
+        return json.loads(decrypt_payload(stored["encrypted"], aad=f"{note_id}:{att_id}:metadata.json".encode()).decode())
+    return stored
 
 
 def medical_people_names(index: dict[str, Any]) -> list[str]:
@@ -648,6 +701,14 @@ def extract_attachment_markdown(path: Path, *, ocr: bool = False, extract: bool 
     return f"# Extracted text: {path.name}\n\nMethod: {method}\n\n```text\n{text.strip()}\n```\n"
 
 
+def attachment_container(name: str, data: bytes, payload: dict[str, str]) -> dict[str, Any]:
+    """What ``original.json`` holds. The name is left out once the index is encrypted,
+    since a readable name beside the ciphertext would undo that; it is kept while the
+    index is still readable so an older Kaal can open the file."""
+    container: dict[str, Any] = {"size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "encrypted": payload}
+    return container if index_is_encrypted() else {"name": name, **container}
+
+
 def attachment_original_bytes(note_meta: dict[str, Any], attachment_meta: dict[str, Any]) -> bytes:
     nid = note_meta["id"]
     att_dir = attachment_note_dir(nid) / attachment_meta["id"]
@@ -657,7 +718,9 @@ def attachment_original_bytes(note_meta: dict[str, Any], attachment_meta: dict[s
     if not payload_path.exists():
         payload_path = attachment_note_dir(nid) / f"{attachment_meta['id']}.json"
     data = json.loads(payload_path.read_text())
-    data_name = data["name"]
+    # Older containers carry the attachment's name in the clear; newer ones
+    # leave it to the index, which is encrypted.
+    data_name = data.get("name") or attachment_meta["name"]
     aad = f"{nid}:{attachment_meta['id']}:{data_name}".encode()
     return decrypt_payload(data["encrypted"], aad=aad)
 
@@ -1287,7 +1350,7 @@ def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "
     if storage == "encrypted":
         aad = f"{nid}:{att_id}:{stored_name}".encode()
         payload = encrypt_bytes(data, aad=aad)
-        secure_write_json(out_dir / "original.json", {"name": stored_name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "encrypted": payload})
+        secure_write_json(out_dir / "original.json", attachment_container(stored_name, data, payload))
     else:
         original = out_dir / disk_name
         original.write_bytes(data)
@@ -1304,7 +1367,7 @@ def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "
                 (out_dir / "docling.json").write_bytes(payload)
                 os.chmod(out_dir / "docling.json", 0o600)
             attachment_meta["docling_json"] = True
-    secure_write_json(out_dir / "metadata.json", attachment_meta)
+    write_attachment_metadata(nid, attachment_meta)
     index = load_index()
     for n in index.get("notes", []):
         if n["id"] == nid:
@@ -1402,7 +1465,7 @@ def ocr_attachments(args: argparse.Namespace) -> None:
             if not force and (att.get("extracted_markdown") or attachment_extracted_sidecar_exists(note, att)):
                 if not dry_run and attachment_extracted_sidecar_exists(note, att) and not att.get("extracted_markdown"):
                     att["extracted_markdown"] = True
-                    secure_write_json(attachment_note_dir(note["id"]) / att["id"] / "metadata.json", att)
+                    write_attachment_metadata(note["id"], att)
                 skipped_existing += 1
                 continue
             if limit and eligible >= limit:
@@ -1443,7 +1506,7 @@ def ocr_attachments(args: argparse.Namespace) -> None:
                 if "medical" in note.get("tags", []) and "receipt" in note.get("tags", []):
                     prior_receipt = note.get("receipt", {})
                     note["receipt"] = build_receipt_state(extracted_md, docling_json, prior_receipt, ai_fields=ai_fields, ai_info=ai_info)
-                secure_write_json(attachment_note_dir(note["id"]) / att["id"] / "metadata.json", att)
+                write_attachment_metadata(note["id"], att)
             except Exception as e:
                 if "medical" in note.get("tags", []) and "receipt" in note.get("tags", []):
                     # A failed re-extraction must not cost the user what they typed or confirmed.
@@ -1909,7 +1972,7 @@ def reextract_receipt(note_id: str, outer_lock: Any = None) -> str:
             else:
                 stored["extracted_markdown"] = False
                 stored["extraction_attempted_at"] = now_iso()
-            secure_write_json(attachment_note_dir(current["id"]) / stored["id"] / "metadata.json", stored)
+            write_attachment_metadata(current["id"], stored)
             current["receipt"] = build_receipt_state(extracted_md, docling_json, prior, ai_fields=ai_fields, ai_info=ai_info)
         current["updated"] = now_iso()
         save_index(index)
@@ -2632,7 +2695,7 @@ def encrypt_vault(args: argparse.Namespace) -> None:
     """
     dry_run = bool(getattr(args, "dry_run", False))
     index = load_index()
-    counts = {"notes": 0, "attachments": 0, "extracted_text": 0, "docling": 0}
+    counts = {"notes": 0, "attachments": 0, "extracted_text": 0, "docling": 0, "metadata": 0, "attachment_names": 0, "index": 0}
     problems: list[dict[str, str]] = []
 
     def remove_readable_sidecars(att_dir: Path) -> None:
@@ -2689,7 +2752,7 @@ def encrypt_vault(args: argparse.Namespace) -> None:
                 continue
             name = att["name"]
             aad = f"{nid}:{att_id}:{name}".encode()
-            secure_write_json(container, {"name": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "encrypted": encrypt_bytes(data, aad=aad)})
+            secure_write_json(container, attachment_container(name, data, encrypt_bytes(data, aad=aad)))
             if decrypt_payload(json.loads(container.read_text())["encrypted"], aad=aad) != data:
                 die(f"Attachment {att_id} did not read back the same after encryption; nothing was removed.", kind="unavailable")
             if text:
@@ -2697,11 +2760,52 @@ def encrypt_vault(args: argparse.Namespace) -> None:
             if docling:
                 secure_write_json(att_dir / "docling.json.enc", {"encrypted": encrypt_bytes(json.dumps(docling, ensure_ascii=False).encode(), aad=f"{nid}:{att_id}:docling.json".encode())})
             att["storage"] = "encrypted"
-            secure_write_json(att_dir / "metadata.json", att)
+            write_attachment_metadata(nid, att)
+            counts["metadata"] += 1
             save_index(index)
             if readable != container:
                 readable.unlink()
             remove_readable_sidecars(att_dir)
+    # The copies of attachment metadata, then the index itself: these hold
+    # titles, tags, attachment names and receipt fields.
+    for meta in index.get("notes", []):
+        for att in meta.get("attachments", []):
+            copy = attachment_note_dir(meta["id"]) / att["id"] / "metadata.json"
+            if not copy.is_file():
+                continue
+            try:
+                already = _is_encrypted_envelope(json.loads(copy.read_text()))
+            except (OSError, json.JSONDecodeError):
+                already = False
+            if not already:
+                counts["metadata"] += 1
+                if not dry_run:
+                    write_attachment_metadata(meta["id"], att)
+            # The encrypted original still names the attachment in the clear.
+            container = copy.with_name("original.json")
+            if att.get("storage", "encrypted") != "encrypted" or not container.is_file():
+                continue
+            try:
+                held = json.loads(container.read_text())
+            except (OSError, json.JSONDecodeError):
+                problems.append({"kind": "attachment_unreadable", "note_id": meta["id"], "attachment_id": att["id"]})
+                continue
+            if "name" not in held:
+                continue
+            if held["name"] != att.get("name"):
+                # Without the name the file could no longer be opened: leave it and say so.
+                problems.append({"kind": "attachment_name_mismatch", "note_id": meta["id"], "attachment_id": att["id"]})
+                continue
+            counts["attachment_names"] += 1
+            if not dry_run:
+                held.pop("name")
+                secure_write_json(container, held)
+    if not index_is_encrypted():
+        counts["index"] = 1
+        if not dry_run:
+            save_index(index, encrypted=True)
+            if read_index_file().get("notes") != index.get("notes"):
+                die("The index did not read back the same after encryption.", kind="unavailable")
     emit({
         "status": "dry-run" if dry_run else ("problems" if problems else "ok"),
         "encrypted" if not dry_run else "would_encrypt": counts,
@@ -2775,7 +2879,7 @@ def verify_vault(args: argparse.Namespace) -> None:
                 elif deep:
                     try:
                         stored = json.loads(payload_path.read_text())
-                        plain = _decrypts(stored["encrypted"], f"{nid}:{aid}:{stored['name']}".encode(), key)
+                        plain = _decrypts(stored["encrypted"], f"{nid}:{aid}:{stored.get('name') or att['name']}".encode(), key)
                     except (OSError, KeyError, TypeError, json.JSONDecodeError):
                         plain = None
                     if plain is None:
@@ -3028,6 +3132,16 @@ def receipt_ai_status() -> dict[str, Any]:
         return {"backend": "misconfigured", "usable": False, "problem": str(error)}
 
 
+def _note_count() -> int | None:
+    """How many notes the vault holds; None when the index cannot be read, for example without the key."""
+    if not INDEX_PATH.exists():
+        return 0
+    try:
+        return len(load_index().get("notes", []))
+    except KaalError:
+        return None
+
+
 def status(args: argparse.Namespace) -> None:
     try:
         provider = key_providers.provider_from_env()
@@ -3042,7 +3156,8 @@ def status(args: argparse.Namespace) -> None:
         "key_provider": provider_name,
         "key_exists": has_key,
         "keychain_key_exists": has_key if provider_name == "keychain" else False,
-        "notes": len(load_index().get("notes", [])) if INDEX_PATH.exists() else 0,
+        "notes": _note_count(),
+        "index_encrypted": index_is_encrypted() if INDEX_PATH.exists() else None,
         "receipt_ai": receipt_ai_status(),
     }, indent=2)
 
