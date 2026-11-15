@@ -47,6 +47,8 @@ kaal medical capture /absolute/path/receipt.pdf
 kaal medical report --year 2026 --reimbursed no
 ```
 
+`kaal medical evaluate` (server only, read-only) re-extracts receipts and prints per-field accuracy with ids and outcomes, never values; it is safe to show its output.
+
 Receipt dates are stored as `YYYY-MM-DD` and amounts as plain decimals; `kaal medical update` refuses values it cannot read. `kaal medical reimburse` and `kaal medical people --add/--remove` change the user's records: run them only when asked.
 
 ## Dashboard and Chrome extension

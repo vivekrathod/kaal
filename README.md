@@ -318,6 +318,12 @@ kaal medical report --year 2026
 kaal medical report --reimbursed no
 ```
 
+`kaal medical evaluate` measures how well extraction is doing. It runs on the
+server, re-extracts each receipt that has values you typed or confirmed,
+compares the two, and prints accuracy per field with receipt ids and outcomes
+only, never a value. It changes nothing in the vault, so run it before and
+after an extraction change to see the difference.
+
 The report dates a receipt by its service date, or by its payment date when it
 has no service date. Receipts with no date are listed under `undated` and
 receipts with no amount under `missing_amount`, so nothing is left out

@@ -1965,6 +1965,122 @@ def medical_report(args: argparse.Namespace) -> None:
     }, ensure_ascii=False)
 
 
+def extract_receipt_fields(path: Path) -> tuple[dict[str, str], str]:
+    """Run the receipt pipeline on one file, exactly as capture does.
+
+    Returns the normalised candidate fields and the name of the text method
+    that was used. Nothing is stored.
+    """
+    extracted = extract_attachment_markdown(path, ocr=True, extract=True, receipt=True)
+    docling_json: dict[str, Any] = {}
+    if extracted and path.suffix.lower() in PDF_ATTACHMENT_SUFFIXES and "Method: docling" in extracted:
+        docling_json = run_docling_json(path)
+    receipt = build_receipt_state(extracted, docling_json)
+    receipts.upgrade(receipt, reviewed=False, people=[])
+    method = re.search(r"^Method: (.+)$", extracted, flags=re.MULTILINE)
+    return receipt["fields"], method.group(1).strip() if method else "none"
+
+
+# The extractor that `kaal medical evaluate` measures. Tests replace it.
+receipt_extractor: Callable[[Path], tuple[dict[str, str], str]] = extract_receipt_fields
+
+
+def _receipt_file_kind(name: str) -> str:
+    suffix = Path(name).suffix.lower()
+    if suffix in PDF_ATTACHMENT_SUFFIXES:
+        return "pdf"
+    return "image" if suffix in IMAGE_ATTACHMENT_SUFFIXES else "other"
+
+
+def medical_evaluate(args: argparse.Namespace) -> None:
+    """Measure extraction against values a person typed or confirmed.
+
+    Each receipt's stored original is run through the extractor again and the
+    result is compared, field by field, with the values whose source is
+    ``manual`` or ``confirmed``. The output holds receipt ids and outcomes
+    only, never a field value, and the vault is not changed.
+    """
+    init_if_needed()
+    wanted = set(getattr(args, "ids", None) or [])
+    limit = getattr(args, "limit", 0) or 0
+    notes = [note for note in load_index().get("notes", []) if is_medical_receipt(note) and not note.get("trashed_at")]
+    if wanted:
+        notes = [note for note in notes if note["id"] in wanted]
+        missing = wanted - {note["id"] for note in notes}
+        if missing:
+            die("Not an active medical receipt.", kind="not_found", details={"ids": sorted(missing)})
+
+    def tally() -> dict[str, dict[str, int]]:
+        return {name: {"truth": 0, "correct": 0, "wrong": 0, "missing": 0} for name in receipts.EVALUATED_FIELDS}
+
+    overall = tally()
+    by_kind: dict[str, dict[str, dict[str, int]]] = {}
+    evaluated: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    started = datetime.now(timezone.utc)
+    for note in sorted(notes, key=lambda item: item["id"]):
+        if limit and len(evaluated) >= limit:
+            break
+        receipt = note.get("receipt", {})
+        sources = receipt.get("field_sources", {})
+        truth = {
+            name: receipt.get("fields", {}).get(name) or ""
+            for name in receipts.EVALUATED_FIELDS
+            if sources.get(name) in receipts.TRUSTED_SOURCES and receipt.get("fields", {}).get(name)
+        }
+        attachments = note.get("attachments", [])
+        if not truth:
+            skipped.append({"id": note["id"], "reason": "no confirmed values"})
+            continue
+        if len(attachments) != 1:
+            skipped.append({"id": note["id"], "reason": "needs exactly one attachment"})
+            continue
+        attachment = attachments[0]
+        kind = _receipt_file_kind(attachment.get("name", ""))
+        if not capturing():
+            print(f"evaluating {len(evaluated) + 1}: {note['id']}", file=sys.stderr, flush=True)
+        began = datetime.now(timezone.utc)
+        try:
+            with tempfile.TemporaryDirectory(prefix="kaal-evaluate-") as directory:
+                copy = Path(directory) / f"receipt{Path(attachment.get('name', '')).suffix.lower()}"
+                copy.write_bytes(attachment_original_bytes(note, attachment))
+                os.chmod(copy, 0o600)
+                candidate, method = receipt_extractor(copy)
+        except KaalError:
+            raise
+        except Exception as error:
+            skipped.append({"id": note["id"], "reason": f"extraction failed: {type(error).__name__}"})
+            continue
+        outcomes = {name: receipts.compare_field(name, value, candidate.get(name) or "") for name, value in truth.items()}
+        for name, outcome in outcomes.items():
+            for counts in (overall, by_kind.setdefault(kind, tally())):
+                counts[name]["truth"] += 1
+                counts[name][outcome] += 1
+        evaluated.append({
+            "id": note["id"],
+            "kind": kind,
+            "method": method,
+            "seconds": round((datetime.now(timezone.utc) - began).total_seconds(), 1),
+            "results": outcomes,
+        })
+
+    def summarise(counts: dict[str, dict[str, int]]) -> dict[str, Any]:
+        fields = {name: {**value, "accuracy": f"{value['correct']}/{value['truth']}"} for name, value in counts.items() if value["truth"]}
+        truth = sum(value["truth"] for value in counts.values())
+        correct = sum(value["correct"] for value in counts.values())
+        return {"correct": correct, "truth": truth, "percent": round(100 * correct / truth) if truth else 0, "fields": fields}
+
+    emit({
+        "status": "ok",
+        "evaluated": len(evaluated),
+        "seconds": round((datetime.now(timezone.utc) - started).total_seconds(), 1),
+        "overall": summarise(overall),
+        "by_kind": {kind: summarise(counts) for kind, counts in sorted(by_kind.items())},
+        "receipts": evaluated,
+        "skipped": skipped,
+    }, indent=2, ensure_ascii=False)
+
+
 def medical_reimburse(args: argparse.Namespace) -> None:
     """Record that receipts were reimbursed (for example from an HSA), or undo that."""
     init_if_needed()

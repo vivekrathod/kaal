@@ -16,6 +16,8 @@ from typing import Any
 SCHEMA = 2
 DATE_FIELDS = ("service_date", "paid_date")
 NORMALISED_FIELDS = (*DATE_FIELDS, "amount")
+EVALUATED_FIELDS = ("amount", "service_date", "paid_date", "patient_name", "provider", "insurer")
+TRUSTED_SOURCES = frozenset({"manual", "confirmed"})
 STATUS_NEEDS_REVIEW = "needs_review"
 STATUS_REVIEWED = "reviewed"
 
@@ -95,6 +97,27 @@ def person_for(patient_name: str, people: list[str]) -> str:
         return ""
     matches = [person for person in people if _name_words(person) and _name_words(person) <= words]
     return matches[0] if len(matches) == 1 else ""
+
+
+def compare_field(name: str, truth: str, candidate: str) -> str:
+    """Judge one extracted value against a value a person typed or confirmed.
+
+    Returns "correct", "wrong" or "missing". Dates and amounts must be equal
+    once normalised. Names are compared as sets of words, ignoring case, order
+    and punctuation: the extracted name may carry extra words ("Jane Q Doe"
+    for "Jane Doe"), or drop some as long as two or more remain.
+    """
+    if not (candidate or "").strip():
+        return "missing"
+    if name in NORMALISED_FIELDS:
+        normalised = normalize_date(candidate) if name in DATE_FIELDS else normalize_amount(candidate)
+        return "correct" if normalised and normalised == truth else "wrong"
+    wanted, found = _name_words(truth), _name_words(candidate)
+    if not wanted or not found:
+        return "wrong"
+    if wanted <= found or (found < wanted and len(found) >= 2):
+        return "correct"
+    return "wrong"
 
 
 def upgrade(receipt: dict[str, Any], *, reviewed: bool, people: list[str]) -> bool:
