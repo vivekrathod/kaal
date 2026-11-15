@@ -17,8 +17,8 @@ const el = (tag, attrs, children) => ({ tag, attrs: attrs || {}, children: child
 const plain = (text) => text.replace(/&(?:nbsp|amp|lt|gt|quot|#39);/g, (entity) => ENTITIES[entity]);
 
 // Groups: 1 escape; 2,3 code span; 4,5 image; 6,7 link; 8 <address>; 9 bare address;
-// 10 **bold**; 11 ~~struck~~; 12 *italic*; 13 __bold__; 14 _italic_; then <br>.
-const INLINE = /(\\[\\`*_{}[\]()#+\-.!~|>])|(`+)([\s\S]+?)\2|!\[([^\]]*)\]\(\s*<?([^\s)>]+)>?(?:\s+"[^"]*")?\s*\)|\[((?:[^[\]]|\[[^[\]]*\])+)\]\(\s*<?([^\s)>]+)>?(?:\s+"[^"]*")?\s*\)|<((?:https?:\/\/|mailto:)[^\s<>]+)>|(https?:\/\/[^\s<>]+)|\*\*([^\s*](?:[\s\S]*?[^\s*])?)\*\*|~~([^~]+)~~|\*([^\s*](?:[^*]*?[^\s*])?)\*|__([^\s_](?:[\s\S]*?[^\s_])?)__|_([^\s_](?:[^_]*?[^\s_])?)_|<br\s*\/?>/gi;
+// 10 **bold**; 11 ~~struck~~; 12 *italic*; 13 __bold__; 14 _italic_; 15 an HTML <img>; then <br>.
+const INLINE = /(\\[\\`*_{}[\]()#+\-.!~|>])|(`+)([\s\S]+?)\2|!\[([^\]]*)\]\(\s*<?([^\s)>]+)>?(?:\s+"[^"]*")?\s*\)|\[((?:[^[\]]|\[[^[\]]*\])+)\]\(\s*<?([^\s)>]+)>?(?:\s+"[^"]*")?\s*\)|<((?:https?:\/\/|mailto:)[^\s<>]+)>|(https?:\/\/[^\s<>]+)|\*\*([^\s*](?:[\s\S]*?[^\s*])?)\*\*|~~([^~]+)~~|\*([^\s*](?:[^*]*?[^\s*])?)\*|__([^\s_](?:[\s\S]*?[^\s_])?)__|_([^\s_](?:[^_]*?[^\s_])?)_|(<img\b[^<>]*>)|<br\s*\/?>/gi;
 
 function inline(text, context, depth = 0) {
   if (!text) return [];
@@ -74,6 +74,17 @@ function inline(text, context, depth = 0) {
     } else if (match[12] !== undefined || match[14] !== undefined) {
       flush();
       out.push(el("em", {}, inline(match[12] !== undefined ? match[12] : match[14], context, depth + 1)));
+    } else if (match[15] !== undefined) {
+      // Joplin writes a resized picture as an HTML tag. Only its address and
+      // description are read; the tag itself is never put on the page.
+      const address = /\bsrc\s*=\s*["']?([^"'\s>]+)/i.exec(match[15]);
+      const described = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(match[15]);
+      if (address) {
+        flush();
+        out.push(...link(address[1], described ? described[1] || described[2] || "" : "", true, context, depth));
+      } else {
+        buffer += match[0];
+      }
     } else {
       flush();
       out.push(el("br"));

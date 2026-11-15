@@ -57,6 +57,9 @@ CASES = [
     (f"![photo](:/{FILE}) and [statement.pdf](:/{FILE.upper()})", '<p><file label="photo" image></file> and <file label="statement.pdf"></file></p>'),
     (f"![gone](:/{MISSING}) [lost](:/{MISSING})", "<p>gone lost</p>"),
     ("![far](https://example.com/x.png)", f'<p><a href="https://example.com/x.png" {LINK}>far</a></p>'),
+    (f'<img src=":/{FILE}" alt="chart" width="400" height="300"/> then <IMG width=10 SRC=\':/{FILE}\'>', '<p><file label="chart" image></file> then <file label="" image></file></p>'),
+    (f'<img src=":/{MISSING}" alt="lost"> <img src="https://example.com/y.png" alt="far"> <img alt="no address">',
+     f'<p>lost <a href="https://example.com/y.png" {LINK}>far</a> &lt;img alt="no address"&gt;</p>'),
 ]
 
 
@@ -75,6 +78,9 @@ HOSTILE = [
     '[x](https://example.com/" onmouseover="alert(1))',
     "<a href=\"javascript:alert(1)\">x</a>",
     "[x](vbscript:msgbox(1)) <iframe src=//example.com></iframe>",
+    '<img src="javascript:alert(1)" onerror="alert(1)">',
+    '<img src=":/not-an-id" onload="alert(1)">',
+    '<img src="data:image/svg+xml,<svg onload=alert(1)>">',
 ]
 
 
