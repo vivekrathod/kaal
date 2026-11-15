@@ -32,13 +32,15 @@ import threading
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any, Callable, NoReturn
 from urllib.parse import urlsplit, urlunsplit
 
 from kaal import keys as key_providers
+from kaal import receipts
 
 VAULT = Path(os.environ.get("KAAL_VAULT") or os.environ.get("SECURE_NOTES_VAULT") or str(Path.home() / ".secure-notes")).expanduser()
 NOTES_DIR = VAULT / "notes"
@@ -287,14 +289,38 @@ def load_index() -> dict[str, Any]:
     if not INDEX_PATH.exists():
         return {"version": 1, "created": now_iso(), "notes": []}
     try:
-        return json.loads(INDEX_PATH.read_text())
+        index = json.loads(INDEX_PATH.read_text())
     except Exception as e:
         die(f"Could not read index: {e}")
+    # Readers always see current-shape receipts; the upgrade reaches the disk
+    # with the next save, which every caller makes under the vault lock.
+    upgrade_receipts(index)
+    return index
 
 
 def save_index(index: dict[str, Any]) -> None:
+    upgrade_receipts(index)
     index["updated"] = now_iso()
     secure_write_json(INDEX_PATH, index)
+
+
+def medical_people_names(index: dict[str, Any]) -> list[str]:
+    """Family members that receipts can be assigned to, as the user entered them."""
+    people = index.get("medical", {}).get("people", []) if isinstance(index.get("medical"), dict) else []
+    return [name for name in people if isinstance(name, str) and name]
+
+
+def upgrade_receipts(index: dict[str, Any]) -> bool:
+    """Normalise every medical receipt record in an index; True if any changed."""
+    people = medical_people_names(index)
+    changed = False
+    for note in index.get("notes", []):
+        if not isinstance(note, dict) or not is_medical_receipt(note):
+            continue
+        if not isinstance(note.get("receipt"), dict):
+            note["receipt"] = {}
+        changed |= receipts.upgrade(note["receipt"], reviewed="inbox" not in note.get("tags", []), people=people)
+    return changed
 
 
 def init_vault(args: argparse.Namespace) -> None:
@@ -1370,7 +1396,7 @@ def infer_receipt_fields(extracted_text: str) -> dict[str, str]:
     # A card transaction receipt marked "SALE - APPROVED" is a narrow additional
     # case: its labelled "Total Amount" is the completed card payment, not an
     # invoice/balance total. Bare "Total Amount" remains rejected.
-    amount = re.search(r"(?:amount\s+paid|payment\s+amount|payment\s+received|paid\s+today|amount\s+collected|you\s+paid)\s*[:#-]?\s*\$?([0-9][0-9,]*\.[0-9]{2})\b", text, flags=re.IGNORECASE)
+    amount = re.search(r"(?:amount\s+paid|total\s+paid|payment\s+amount|payment\s+received|paid\s+today|amount\s+collected|you\s+paid)\s*[:#-]?\s*\$?([0-9][0-9,]*\.[0-9]{2})\b", text, flags=re.IGNORECASE)
     if not amount and approved_card_sale:
         amount = re.search(r"\btotal\s+amount\s*[:#-]?\s*\$([0-9][0-9,]*\.[0-9]{2})", text, flags=re.IGNORECASE)
     fields["amount"] = amount.group(1).replace(",", "") if amount else ""
@@ -1429,8 +1455,9 @@ def receipt_extraction_state(extracted_text: str = "", error: str = "", ai_field
 def build_receipt_state(extracted_text: str, docling_json: dict[str, Any] | None = None, prior_receipt: dict[str, Any] | None = None) -> dict[str, Any]:
     """Use one conservative field path for capture and re-extraction.
 
-    Text/layout candidates are suggestions. Only explicitly manual values survive
-    re-extraction, so a stale automatic result cannot become a durable fact.
+    Text/layout candidates are suggestions. Only values a person typed or
+    confirmed survive re-extraction, so a stale automatic result cannot become a
+    durable fact. Reimbursement is the user's record and always survives.
     """
     receipt = receipt_extraction_state(extracted_text)
     for field, value in infer_docling_fields(docling_json or {}).items():
@@ -1440,12 +1467,16 @@ def build_receipt_state(extracted_text: str, docling_json: dict[str, Any] | None
     prior = prior_receipt or {}
     prior_fields = prior.get("fields", {})
     prior_sources = prior.get("field_sources", {})
+    prior_raw = prior.get("field_raw", {})
     for field, source in prior_sources.items():
-        if source == "manual" and prior_fields.get(field):
+        if source in {"manual", "confirmed"} and prior_fields.get(field):
             receipt["fields"][field] = prior_fields[field]
-            receipt["field_sources"][field] = "manual"
-    if prior.get("manually_updated_at"):
-        receipt["manually_updated_at"] = prior["manually_updated_at"]
+            receipt["field_sources"][field] = source
+            if prior_raw.get(field):
+                receipt.setdefault("field_raw", {})[field] = prior_raw[field]
+    for key in ("manually_updated_at", "reimbursed_at", "reimbursement_note"):
+        if prior.get(key):
+            receipt[key] = prior[key]
     return receipt
 
 
@@ -1792,14 +1823,29 @@ def medical_update(args: argparse.Namespace) -> None:
     allowed = {"patient_name", "provider", "service_date", "paid_date", "insurer", "amount", "currency"}
     if not isinstance(updates, dict) or any(key not in allowed or not isinstance(value, str) or len(value) > 200 for key, value in updates.items()):
         die("Receipt fields are invalid.")
+    stored: dict[str, str] = {}
+    for key, value in updates.items():
+        value = value.strip()
+        stored[key] = value
+        if value and key in receipts.NORMALISED_FIELDS:
+            is_date = key in receipts.DATE_FIELDS
+            stored[key] = receipts.normalize_date(value) if is_date else receipts.normalize_amount(value)
+            if not stored[key]:
+                die(f"{key} is not {'a date' if is_date else 'an amount'} Kaal can read. Use {'YYYY-MM-DD' if is_date else 'a plain amount such as 123.45'}.")
     with vault_capture_lock():
         index = load_index()
         meta = medical_receipt_meta(index, args.note_id)
         receipt = meta.setdefault("receipt", receipt_extraction_state())
         fields = receipt.setdefault("fields", {})
         sources = receipt.setdefault("field_sources", {})
-        fields.update(updates)
-        for key, value in updates.items():
+        raw = receipt.setdefault("field_raw", {})
+        for key, value in stored.items():
+            fields[key] = value
+            typed = updates[key].strip()
+            if typed != value:
+                raw[key] = typed
+            else:
+                raw.pop(key, None)
             if value:
                 sources[key] = "manual"
             else:
@@ -1810,24 +1856,195 @@ def medical_update(args: argparse.Namespace) -> None:
     emit({"status": "updated", "id": meta["id"], "fields": receipt["fields"]}, ensure_ascii=False)
 
 
+def _money(value: Decimal) -> str:
+    return str(value.quantize(Decimal("0.01")))
+
+
+def _report_date_filter(raw: str, label: str) -> str:
+    if not raw:
+        return ""
+    normalised = receipts.normalize_date(raw)
+    if not normalised:
+        die(f"{label} is not a date Kaal can read. Use YYYY-MM-DD.")
+    return normalised
+
+
 def medical_report(args: argparse.Namespace) -> None:
+    """Totals for active receipts: overall, per person, per year, and not yet reimbursed.
+
+    A receipt is dated by its service date, or its payment date when it has no
+    service date. Receipts with no usable date are listed under ``undated``
+    rather than dropped; they are left out of the totals only when a year or
+    date range is asked for, because they cannot be placed in it.
+    """
     init_if_needed()
-    notes = [note for note in load_index().get("notes", []) if "medical" in note.get("tags", []) and "receipt" in note.get("tags", []) and not note.get("trashed_at")]
-    patient = (args.patient_name or "").lower()
-    start, end, year = args.from_date or "", args.to_date or "", args.year or ""
-    rows = []
-    total = 0.0
+    index = load_index()
+    notes = [note for note in index.get("notes", []) if is_medical_receipt(note) and not note.get("trashed_at")]
+    patient = (getattr(args, "patient_name", "") or "").strip().casefold()
+    year = (getattr(args, "year", "") or "").strip()
+    if year and not re.fullmatch(r"\d{4}", year):
+        die("Year must be four digits, for example 2026.")
+    start = _report_date_filter((getattr(args, "from_date", "") or "").strip(), "The start date")
+    end = _report_date_filter((getattr(args, "to_date", "") or "").strip(), "The end date")
+    reimbursed_filter = (getattr(args, "reimbursed", "") or "all").strip().lower()
+    if reimbursed_filter not in {"all", "yes", "no"}:
+        die("reimbursed must be one of: all, yes, no")
+    dated_filter = bool(year or start or end)
+
+    rows: list[dict[str, Any]] = []
+    undated: list[str] = []
+    missing_amount: list[str] = []
+    zero = Decimal("0")
+    totals = {"total": zero, "reimbursed": zero, "unreimbursed": zero, "needs_review": zero}
+    needs_review_count = 0
+    by_person: dict[str, dict[str, Any]] = {}
+    by_year: dict[str, dict[str, Any]] = {}
+
+    def add(groups: dict[str, dict[str, Any]], key: str, amount: Decimal, reimbursed: bool) -> None:
+        group = groups.setdefault(key, {"count": 0, "total": zero, "unreimbursed": zero})
+        group["count"] += 1
+        group["total"] += amount
+        if not reimbursed:
+            group["unreimbursed"] += amount
+
     for note in notes:
-        fields = note.get("receipt", {}).get("fields", {})
-        date = fields.get("service_date") or fields.get("paid_date") or ""
-        if patient and patient not in fields.get("patient_name", "").lower(): continue
-        if year and not date.startswith(year): continue
-        if start and date < start: continue
-        if end and date > end: continue
-        try: total += float(fields.get("amount") or 0)
-        except ValueError: pass
-        rows.append({"id": note["id"], "title": note.get("title", ""), "fields": fields})
-    emit({"status": "ok", "count": len(rows), "total_amount": f"{total:.2f}", "receipts": rows}, ensure_ascii=False)
+        receipt = note.get("receipt", {})
+        fields = receipt.get("fields", {})
+        person = receipt.get("person") or ""
+        if patient and patient not in person.casefold() and patient not in (fields.get("patient_name") or "").casefold():
+            continue
+        reimbursed = bool(receipt.get("reimbursed_at"))
+        if reimbursed_filter != "all" and reimbursed != (reimbursed_filter == "yes"):
+            continue
+        when = fields.get("service_date") or fields.get("paid_date") or ""
+        if not when:
+            undated.append(note["id"])
+            if dated_filter:
+                continue
+        elif (year and not when.startswith(year)) or (start and when < start) or (end and when > end):
+            continue
+        amount = receipts.amount_value(fields.get("amount") or "")
+        if amount is None:
+            missing_amount.append(note["id"])
+            amount = zero
+        reviewed = receipt.get("status") == receipts.STATUS_REVIEWED
+        totals["total"] += amount
+        totals["reimbursed" if reimbursed else "unreimbursed"] += amount
+        if not reviewed:
+            needs_review_count += 1
+            totals["needs_review"] += amount
+        add(by_person, person, amount, reimbursed)
+        add(by_year, when[:4], amount, reimbursed)
+        rows.append({
+            "id": note["id"],
+            "title": note.get("title", ""),
+            "status": receipt.get("status", ""),
+            "person": person,
+            "reimbursed_at": receipt.get("reimbursed_at", ""),
+            "fields": fields,
+        })
+
+    def grouped(groups: dict[str, dict[str, Any]], label: str) -> list[dict[str, Any]]:
+        return [
+            {label: key, "count": group["count"], "total_amount": _money(group["total"]), "unreimbursed_amount": _money(group["unreimbursed"])}
+            for key, group in sorted(groups.items())
+        ]
+
+    emit({
+        "status": "ok",
+        "count": len(rows),
+        "total_amount": _money(totals["total"]),
+        "reimbursed_amount": _money(totals["reimbursed"]),
+        "unreimbursed_amount": _money(totals["unreimbursed"]),
+        "needs_review": {"count": needs_review_count, "amount": _money(totals["needs_review"])},
+        "by_person": grouped(by_person, "person"),
+        "by_year": grouped(by_year, "year"),
+        "undated": undated,
+        "missing_amount": missing_amount,
+        "receipts": rows,
+    }, ensure_ascii=False)
+
+
+def medical_reimburse(args: argparse.Namespace) -> None:
+    """Record that receipts were reimbursed (for example from an HSA), or undo that."""
+    init_if_needed()
+    ids = list(dict.fromkeys(getattr(args, "note_ids", []) or []))
+    if not ids:
+        die("Give at least one receipt id.")
+    undo = bool(getattr(args, "undo", False))
+    note_text = (getattr(args, "note", "") or "").strip()
+    if len(note_text) > 500:
+        die("The reimbursement note is limited to 500 characters.")
+    when = ""
+    if not undo:
+        typed = (getattr(args, "date", "") or "").strip()
+        when = receipts.normalize_date(typed) if typed else date.today().isoformat()
+        if not when:
+            die("The reimbursement date is not a date Kaal can read. Use YYYY-MM-DD.")
+    with vault_capture_lock():
+        index = load_index()
+        chosen = [medical_receipt_meta(index, note_id) for note_id in ids]
+        total = Decimal("0")
+        for meta in chosen:
+            receipt = meta["receipt"]
+            if meta.get("trashed_at"):
+                die("A receipt in Trash cannot be changed; restore it first.", details={"id": meta["id"]})
+            if undo:
+                continue
+            if receipt.get("status") != receipts.STATUS_REVIEWED:
+                die("Review a receipt before marking it reimbursed.", details={"id": meta["id"]})
+            amount = receipts.amount_value(receipt.get("fields", {}).get("amount") or "")
+            if amount is None:
+                die("A receipt needs a paid amount before it can be marked reimbursed.", details={"id": meta["id"]})
+            total += amount
+        stamp = now_iso()
+        for meta in chosen:
+            receipt = meta["receipt"]
+            if undo:
+                receipt.pop("reimbursed_at", None)
+                receipt.pop("reimbursement_note", None)
+            else:
+                receipt["reimbursed_at"] = when
+                if note_text:
+                    receipt["reimbursement_note"] = note_text
+                else:
+                    receipt.pop("reimbursement_note", None)
+            meta["updated"] = stamp
+        save_index(index)
+    result: dict[str, Any] = {"status": "unreimbursed" if undo else "reimbursed", "count": len(chosen), "ids": [meta["id"] for meta in chosen]}
+    if not undo:
+        result.update({"reimbursed_at": when, "total_amount": _money(total)})
+    emit(result, ensure_ascii=False)
+
+
+def medical_people(args: argparse.Namespace) -> None:
+    """List, add or remove the family members receipts are assigned to."""
+    init_if_needed()
+    add = [receipts.clean_person_name(name) for name in (getattr(args, "add", None) or [])]
+    remove = [receipts.clean_person_name(name) for name in (getattr(args, "remove", None) or [])]
+    if any(not name for name in add + remove):
+        die("A person's name cannot be empty.")
+    if not add and not remove:
+        emit({"status": "ok", "people": medical_people_names(load_index())}, ensure_ascii=False)
+        return
+    with vault_capture_lock():
+        index = load_index()
+        people = medical_people_names(index)
+        gone = {name.casefold() for name in remove}
+        people = [name for name in people if name.casefold() not in gone]
+        known = {name.casefold() for name in people}
+        for name in add:
+            if name.casefold() not in known:
+                people.append(name)
+                known.add(name.casefold())
+        if len(people) > 50:
+            die("The family list is limited to 50 people.")
+        medical = index.get("medical") if isinstance(index.get("medical"), dict) else {}
+        medical["people"] = people
+        index["medical"] = medical
+        # Saving re-matches every receipt against the new list.
+        save_index(index)
+    emit({"status": "updated", "people": people}, ensure_ascii=False)
 
 
 def medical_trash(args: argparse.Namespace) -> None:

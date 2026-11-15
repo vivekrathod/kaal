@@ -311,6 +311,28 @@
         "title": "NoteCreate",
         "type": "object"
       },
+      "PeopleChange": {
+        "properties": {
+          "add": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Add",
+            "type": "array"
+          },
+          "remove": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Remove",
+            "type": "array"
+          }
+        },
+        "title": "PeopleChange",
+        "type": "object"
+      },
       "QueryBody": {
         "properties": {
           "query": {
@@ -342,6 +364,41 @@
         "title": "ReceiptFields",
         "type": "object"
       },
+      "Reimburse": {
+        "properties": {
+          "date": {
+            "default": "",
+            "maxLength": 32,
+            "title": "Date",
+            "type": "string"
+          },
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Ids",
+            "type": "array"
+          },
+          "note": {
+            "default": "",
+            "maxLength": 500,
+            "title": "Note",
+            "type": "string"
+          },
+          "undo": {
+            "default": false,
+            "title": "Undo",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ids"
+        ],
+        "title": "Reimburse",
+        "type": "object"
+      },
       "ReportFilter": {
         "properties": {
           "from_date": {
@@ -354,6 +411,12 @@
             "default": "",
             "maxLength": 200,
             "title": "Patient Name",
+            "type": "string"
+          },
+          "reimbursed": {
+            "default": "all",
+            "maxLength": 3,
+            "title": "Reimbursed",
             "type": "string"
           },
           "to_date": {
@@ -477,7 +540,7 @@
   "info": {
     "description": "An encrypted notes vault. Every request needs `Authorization: Bearer <token>` except /v1/health.",
     "title": "Kaal",
-    "version": "0.4.0"
+    "version": "0.5.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -1043,6 +1106,62 @@
         ]
       }
     },
+    "/v1/medical/people": {
+      "get": {
+        "operationId": "medical_people_v1_medical_people_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Medical People",
+        "tags": [
+          "medical"
+        ]
+      },
+      "post": {
+        "operationId": "medical_people_change_v1_medical_people_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PeopleChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Medical People Change",
+        "tags": [
+          "medical"
+        ]
+      }
+    },
     "/v1/medical/receipts": {
       "get": {
         "operationId": "medical_list_v1_medical_receipts_get",
@@ -1176,6 +1295,45 @@
           }
         },
         "summary": "Medical Purge Bulk",
+        "tags": [
+          "medical"
+        ]
+      }
+    },
+    "/v1/medical/receipts/reimburse": {
+      "post": {
+        "operationId": "medical_reimburse_v1_medical_receipts_reimburse_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Reimburse"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Medical Reimburse",
         "tags": [
           "medical"
         ]

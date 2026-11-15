@@ -44,6 +44,14 @@ kaal-server serve                     # 127.0.0.1:8765; publish with `tailscale 
 [`deploy/kaal-server.service`](deploy/kaal-server.service) is a hardened systemd
 unit, and the [`Dockerfile`](Dockerfile) builds a container image.
 
+**Updating a server.** `deploy/deploy.sh --host USER@SERVER REF` tests and
+builds one commit, backs the vault up on the server, installs it, restarts
+`kaal-server` and checks its health. If the check fails it restores the version
+that was running. `--rollback` restores the previous version by hand,
+`--dry-run` shows what would happen, and `--status` shows what is installed. It
+expects the layout of the systemd unit above and passwordless `sudo` on the
+server.
+
 **Tokens** are shown once (or written to a new mode-600 file with `--output`)
 and stored only as SHA-256 hashes. `kaal-server token list` and
 `kaal-server token revoke NAME` manage them. Each token has scopes:
@@ -282,6 +290,39 @@ kaal medical list --inbox
 
 The capture command creates a `medical`, `receipt`, `inbox` record, preserves a
 plaintext copy of the original, and extracts PDF text/OCR when possible.
+
+### Receipt values, family members and reimbursement
+
+Each receipt stores dates as `YYYY-MM-DD` and amounts as plain numbers such as
+`123.45`, whatever the receipt printed; the printed text is kept beside them in
+`field_raw`. Numeric dates are read month first. A date or amount Kaal cannot
+read is left empty and flagged, and a correction you type is refused if it
+cannot be read. Older records are converted automatically.
+
+```bash
+# The people receipts belong to. Names on receipts are matched to this list
+# ignoring order, case and punctuation ("DOE, JANE Q" matches "Jane Doe").
+kaal medical people --add "Jane Doe" --add "John Doe"
+kaal medical people
+
+# Correct a field, then mark the receipt reviewed.
+kaal medical update NOTE_ID --fields-json '{"service_date": "3/4/2026", "amount": "40.00"}'
+kaal medical review NOTE_ID
+
+# Record a reimbursement (for example an HSA withdrawal), or undo it.
+kaal medical reimburse NOTE_ID OTHER_ID --date 2026-05-01 --note "HSA withdrawal 12"
+kaal medical reimburse NOTE_ID --undo
+
+# Totals: overall, per person, per year, and what is not yet reimbursed.
+kaal medical report --year 2026
+kaal medical report --reimbursed no
+```
+
+The report dates a receipt by its service date, or by its payment date when it
+has no service date. Receipts with no date are listed under `undated` and
+receipts with no amount under `missing_amount`, so nothing is left out
+silently. `needs_review` shows how much of the total comes from receipts nobody
+has confirmed yet. Only a reviewed receipt can be marked reimbursed.
 
 For the one-click Chrome toolbar and right-click workflow, see
 [`chrome-extension/README.md`](chrome-extension/README.md). It includes the

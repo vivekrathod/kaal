@@ -330,6 +330,19 @@ class ReportFilter(BaseModel):
     patient_name: str = Field(default="", max_length=200)
     from_date: str = Field(default="", max_length=32)
     to_date: str = Field(default="", max_length=32)
+    reimbursed: str = Field(default="all", max_length=3)
+
+
+class Reimburse(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=100)
+    date: str = Field(default="", max_length=32)
+    note: str = Field(default="", max_length=500)
+    undo: bool = False
+
+
+class PeopleChange(BaseModel):
+    add: list[str] = Field(default_factory=list, max_length=50)
+    remove: list[str] = Field(default_factory=list, max_length=50)
 
 
 class BulkPurge(BaseModel):
@@ -522,6 +535,20 @@ def create_app(settings: Settings) -> FastAPI:
     @app.post("/v1/medical/report", tags=["medical"], dependencies=[require("read", "reveal")])
     def medical_report(request: Request, body: ReportFilter):
         return _run(S(request), core.medical_report, **body.model_dump())
+
+    @app.post("/v1/medical/receipts/reimburse", tags=["medical"], dependencies=[require("write")])
+    def medical_reimburse(request: Request, body: Reimburse):
+        return _run(S(request), core.medical_reimburse, note_ids=body.ids, date=body.date, note=body.note, undo=body.undo)
+
+    @app.get("/v1/medical/people", tags=["medical"], dependencies=[require("read", "reveal")])
+    def medical_people(request: Request):
+        return _run(S(request), core.medical_people, add=[], remove=[])
+
+    @app.post("/v1/medical/people", tags=["medical"], dependencies=[require("write")])
+    def medical_people_change(request: Request, body: PeopleChange):
+        if not body.add and not body.remove:
+            raise HTTPException(400, "Give at least one name to add or remove.")
+        return _run(S(request), core.medical_people, add=body.add, remove=body.remove)
 
     @app.post("/v1/medical/receipts/purge", tags=["medical"], dependencies=[require("delete")])
     def medical_purge_bulk(request: Request, body: BulkPurge):

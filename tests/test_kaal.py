@@ -1165,6 +1165,11 @@ class KaalFeatureTests(unittest.TestCase):
             kaal.infer_receipt_fields("SALE - APPROVED\nTotal Amount: $23.24\n")["amount"],
             "23.24",
         )
+        # A payment table's footer: the label and value sit in separate columns.
+        self.assertEqual(
+            kaal.infer_receipt_fields("Reference      Payment\n01583I         $10.00\n   Total Paid:                $31.50\n")["amount"],
+            "31.50",
+        )
         self.assertEqual(kaal.infer_receipt_fields("Date: 10/09/2025\n")["paid_date"], "")
         self.assertEqual(
             kaal.infer_receipt_fields("SALE - APPROVED\nDate: 10/09/2025\n")["paid_date"],

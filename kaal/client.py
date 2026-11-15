@@ -408,8 +408,19 @@ class Commands:
         _print(self.api.call("PATCH", f"/v1/medical/receipts/{_id(args.note_id)}/fields", json_body={"fields": fields}))
 
     def medical_report(self, args: Any) -> None:
-        body = {"year": args.year or "", "patient_name": args.patient_name or "", "from_date": args.from_date or "", "to_date": args.to_date or ""}
+        body = {"year": args.year or "", "patient_name": args.patient_name or "", "from_date": args.from_date or "", "to_date": args.to_date or "", "reimbursed": getattr(args, "reimbursed", "") or "all"}
         _print(self.api.call("POST", "/v1/medical/report", json_body=body))
+
+    def medical_reimburse(self, args: Any) -> None:
+        body = {"ids": list(args.note_ids), "date": getattr(args, "date", "") or "", "note": getattr(args, "note", "") or "", "undo": bool(getattr(args, "undo", False))}
+        _print(self.api.call("POST", "/v1/medical/receipts/reimburse", json_body=body))
+
+    def medical_people(self, args: Any) -> None:
+        add, remove = list(getattr(args, "add", None) or []), list(getattr(args, "remove", None) or [])
+        if add or remove:
+            _print(self.api.call("POST", "/v1/medical/people", json_body={"add": add, "remove": remove}))
+        else:
+            _print(self.api.call("GET", "/v1/medical/people"))
 
     def medical_trash(self, args: Any) -> None:
         _print(self.api.call("POST", f"/v1/medical/receipts/{_id(args.note_id)}/trash"))

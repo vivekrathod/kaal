@@ -42,7 +42,12 @@ kaal export-attachment NOTE_ID ATTACHMENT_ID --output /absolute/path/output.pdf
 # Medical receipts use the separate workflow
 kaal medical list --inbox
 kaal medical capture /absolute/path/receipt.pdf
+
+# Receipt totals (medical data: needs the reveal scope, and do not echo the rows)
+kaal medical report --year 2026 --reimbursed no
 ```
+
+Receipt dates are stored as `YYYY-MM-DD` and amounts as plain decimals; `kaal medical update` refuses values it cannot read. `kaal medical reimburse` and `kaal medical people --add/--remove` change the user's records: run them only when asked.
 
 ## Dashboard and Chrome extension
 
@@ -56,7 +61,7 @@ kaal medical capture /absolute/path/receipt.pdf
 
 ## Development
 
-Code lives in the `kaal` package: `core.py` (vault, encryption, command handlers), `keys.py` (Keychain and key-file providers), `cli.py` (argument parsing, local or remote), `client.py` (remote mode), `server.py` (kaal-server) and `tokens.py`. `bin/secure-notes.py` is a launcher. Install dev dependencies with `pip install -e '.[dev]'` (add `extract` for Docling).
+Code lives in the `kaal` package: `core.py` (vault, encryption, command handlers), `receipts.py` (receipt value normalisation and family-member matching), `keys.py` (Keychain and key-file providers), `cli.py` (argument parsing, local or remote), `client.py` (remote mode), `server.py` (kaal-server) and `tokens.py`. `bin/secure-notes.py` is a launcher. Install dev dependencies with `pip install -e '.[dev]'` (add `extract` for Docling).
 
 Tests use a throwaway key file and never the Keychain, and never a real `~/.config/kaal/config.toml` (see `tests/conftest.py`); keep it that way. Run the full verification suite before reporting a code change complete:
 
@@ -70,5 +75,18 @@ After changing an endpoint, regenerate the API spec (a test fails until you do):
 ```bash
 .venv/bin/python -m kaal.server openapi --output docs/openapi.json
 ```
+
+## Deployment
+
+`deploy/deploy.sh` deploys one commit to a server and can roll it back. It tests and builds that commit (never the working tree), then on the server backs the vault up, snapshots the installed version, installs, restarts `kaal-server` and checks health, restoring the snapshot if the check fails.
+
+```bash
+deploy/deploy.sh --host USER@SERVER --status
+deploy/deploy.sh --host USER@SERVER --dry-run REF
+deploy/deploy.sh --host USER@SERVER REF          # add --with-deps when dependencies changed
+deploy/deploy.sh --host USER@SERVER --rollback
+```
+
+Deploying or rolling back changes a live vault's server: do it only when the user has approved that specific release, and pass `--yes` only after they have. `--status` and `--dry-run` change nothing on the server. The script does not install systemd unit files.
 
 The root `README.md` is end-user documentation. Update this file when agent behavior, safety rules, or stable command locations change.

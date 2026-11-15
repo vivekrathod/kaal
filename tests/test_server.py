@@ -233,6 +233,35 @@ class CaptureLibraryMedicalTests(ServerTestCase):
         bulk = self.client.post("/v1/medical/receipts/purge", headers=self.h(), json={"ids": [rid], "confirm": True})
         self.assertEqual(self.ok(bulk)["count"], 1)
 
+    def test_medical_people_reimbursement_and_report(self):
+        receipt = self.ok(self.upload("/v1/medical/receipts", name="receipt.txt", content=b"Patient: DOE, JANE\nAmount paid: $12.50\nService date: 01/02/2026\n", token="writer"))
+        rid = receipt["id"]
+        listed = self.ok(self.client.get("/v1/medical/receipts", headers=self.h("revealer")))[0]["receipt"]
+        self.assertEqual((listed["schema"], listed["status"]), (2, "needs_review"))
+        self.assertEqual(listed["fields"]["service_date"], "2026-01-02")
+        self.assertEqual(listed["field_raw"]["service_date"], "01/02/2026")
+
+        self.assertEqual(self.client.get("/v1/medical/people", headers=self.h("reader")).status_code, 403)
+        self.assertEqual(self.client.post("/v1/medical/people", headers=self.h("revealer"), json={"add": ["Jane Doe"]}).status_code, 403)
+        self.assertEqual(self.client.post("/v1/medical/people", headers=self.h("writer"), json={}).status_code, 400)
+        self.assertEqual(self.ok(self.client.post("/v1/medical/people", headers=self.h("writer"), json={"add": ["Jane Doe"]}))["people"], ["Jane Doe"])
+        self.assertEqual(self.ok(self.client.get("/v1/medical/people", headers=self.h("revealer")))["people"], ["Jane Doe"])
+
+        too_early = self.client.post("/v1/medical/receipts/reimburse", headers=self.h("writer"), json={"ids": [rid], "date": "2026-02-01"})
+        self.assertEqual(too_early.status_code, 400)
+        self.assertEqual(self.client.patch(f"/v1/medical/receipts/{rid}/fields", headers=self.h("writer"), json={"fields": {"paid_date": "whenever"}}).status_code, 400)
+        self.ok(self.client.post(f"/v1/medical/receipts/{rid}/review", headers=self.h("writer")))
+        self.assertEqual(self.client.post("/v1/medical/receipts/reimburse", headers=self.h("revealer"), json={"ids": [rid]}).status_code, 403)
+        done = self.ok(self.client.post("/v1/medical/receipts/reimburse", headers=self.h("writer"), json={"ids": [rid], "date": "2/1/2026", "note": "ref 1"}))
+        self.assertEqual((done["reimbursed_at"], done["total_amount"]), ("2026-02-01", "12.50"))
+
+        report = self.ok(self.client.post("/v1/medical/report", headers=self.h("revealer"), json={"year": "2026"}))
+        self.assertEqual((report["count"], report["total_amount"], report["unreimbursed_amount"]), (1, "12.50", "0.00"))
+        self.assertEqual(report["by_person"], [{"person": "Jane Doe", "count": 1, "total_amount": "12.50", "unreimbursed_amount": "0.00"}])
+        self.assertEqual(self.ok(self.client.post("/v1/medical/report", headers=self.h("revealer"), json={"reimbursed": "no"}))["count"], 0)
+        self.assertEqual(self.client.post("/v1/medical/report", headers=self.h("revealer"), json={"year": "26"}).status_code, 400)
+        self.assertEqual(self.ok(self.client.post("/v1/medical/receipts/reimburse", headers=self.h("writer"), json={"ids": [rid], "undo": True}))["status"], "unreimbursed")
+
     def test_generic_endpoints_refuse_medical_misuse(self):
         receipt = self.ok(self.upload("/v1/medical/receipts", name="r.txt", content=b"x", token="writer"))
         self.assertEqual(self.client.get(f"/v1/library/notes/{receipt['id']}", headers=self.h()).status_code, 400)
