@@ -1,8 +1,9 @@
 import { api } from "/web/api.js";
 import { h, replace, notice, actionButton, twoStepButton, formatMoney, formatDate } from "/web/ui.js";
 
-export function trashView(container, _params, { expired }) {
+export function trashView(container, _params, { expired, session }) {
   let alive = true;
+  const mayDelete = ((session || {}).scopes || []).includes("delete");
   const status = h("div", {});
   const list = h("div", { class: "list" });
 
@@ -32,14 +33,16 @@ export function trashView(container, _params, { expired }) {
           h("span", { class: "row-sub" }, [(note.receipt || {}).person || fields.patient_name, formatDate(fields.service_date || fields.paid_date), formatMoney(fields.amount)].filter(Boolean).join(" · "))),
         h("span", { class: "row-actions" },
           actionButton("Restore", () => attempt(async () => { await api.restore(note.id); await load(); }), { kind: "small" }),
-          twoStepButton("Delete", "Delete forever?", () => attempt(async () => { await api.purge(note.id); await load(); }))));
+          mayDelete ? twoStepButton("Delete", "Delete forever?", () => attempt(async () => { await api.purge(note.id); await load(); })) : null));
     }));
   }
 
   replace(container,
     h("a", { href: "#/receipts", class: "back" }, "‹ Receipts"),
     h("h1", {}, "Trash"),
-    h("p", { class: "muted" }, "Receipts here can be restored. Deleting one removes Kaal's copy for good."),
+    h("p", { class: "muted" }, mayDelete
+      ? "Receipts here can be restored. Deleting one removes Kaal's copy for good."
+      : "Receipts here can be restored. This device isn't allowed to delete them for good."),
     status, list);
   attempt(load);
   return () => { alive = false; };

@@ -53,7 +53,10 @@ server.
 
 **Tokens** are shown once (or written to a new mode-600 file with `--output`)
 and stored only as SHA-256 hashes. `kaal-server token list` and
-`kaal-server token revoke NAME` manage them. Each token has scopes:
+`kaal-server token revoke NAME` manage them, and
+`kaal-server token scopes NAME --scopes read,reveal,write,delete` changes what
+an existing token may do without issuing a new one, so the devices using it
+stay signed in. Each token has scopes:
 
 | Scope | Allows |
 |---|---|
@@ -87,7 +90,8 @@ A picture, PDF or plain-text file can be opened in the browser
 the file really is what its name says. Every other kind of file, such as a
 saved web page, is download-only, because opened from Kaal's own address it
 could act with your sign-in. Permanent
-deletion needs a token with the `delete` scope. It is plain files in
+deletion needs a token with the `delete` scope; a device without it is not
+offered the button. It is plain files in
 `kaal/web/` with no build step, and it only talks to the API below. The server
 tells the browser to run nothing but those files and never to show them inside
 another site.

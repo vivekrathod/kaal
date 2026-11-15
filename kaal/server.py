@@ -902,6 +902,14 @@ def _token_revoke(args: argparse.Namespace) -> None:
     print(json.dumps({"status": "revoked", "token": record}, indent=2))
 
 
+def _token_scopes(args: argparse.Namespace) -> None:
+    try:
+        record = tokens.TokenStore(Settings.from_env().tokens_file).set_scopes(args.name, args.scopes.split(","))
+    except tokens.TokenError as error:
+        sys.exit(f"ERROR: {error}")
+    print(json.dumps({"status": "updated", "token": record}, indent=2))
+
+
 def _openapi(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory() as td:
         vault = Path(td) / "vault"
@@ -927,7 +935,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="")
     serve.add_argument("--port", type=int, default=0)
     serve.set_defaults(func=_serve)
-    token = sub.add_parser("token", help="Issue, list and revoke API tokens")
+    token = sub.add_parser("token", help="Issue, list, change and revoke API tokens")
     token_sub = token.add_subparsers(dest="token_cmd", required=True)
     create = token_sub.add_parser("create", help="Issue a token; it is shown once")
     create.add_argument("name")
@@ -938,6 +946,10 @@ def build_parser() -> argparse.ArgumentParser:
     revoke = token_sub.add_parser("revoke", help="Revoke a token by name or id")
     revoke.add_argument("name")
     revoke.set_defaults(func=_token_revoke)
+    scopes = token_sub.add_parser("scopes", help="Change what an existing token may do; it stays signed in")
+    scopes.add_argument("name")
+    scopes.add_argument("--scopes", required=True, help=f"The full new list, comma-separated: {', '.join(tokens.SCOPES)}")
+    scopes.set_defaults(func=_token_scopes)
     spec = sub.add_parser("openapi", help="Print the OpenAPI spec")
     spec.add_argument("--output", default="")
     spec.set_defaults(func=_openapi)

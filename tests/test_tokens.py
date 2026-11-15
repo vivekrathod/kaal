@@ -55,6 +55,26 @@ class TokenStoreTests(unittest.TestCase):
         record, _secret = self.store.create("hermes", ["read", "write"])
         self.assertEqual(record["scopes"], ["read", "write"])
 
+    def test_scopes_of_a_token_in_use_can_be_changed_without_a_new_secret(self):
+        _record, secret = self.store.create("browser", ["read", "write"])
+        other_view = tokens.TokenStore(self.path)
+        self.assertEqual(other_view.authenticate(secret)["scopes"], ["read", "write"])
+        time.sleep(0.01)
+        changed = self.store.set_scopes("browser", ["delete", "read", " write "])
+        self.assertEqual(changed["scopes"], ["read", "write", "delete"])
+        self.assertNotIn("sha256", changed)
+        self.assertEqual(other_view.authenticate(secret)["scopes"], ["read", "write", "delete"])
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        for bad, message in ((["read", "root"], "Unknown scope"), ([], "at least one scope")):
+            with self.assertRaisesRegex(tokens.TokenError, message):
+                self.store.set_scopes("browser", bad)
+        self.assertEqual(other_view.authenticate(secret)["scopes"], ["read", "write", "delete"])
+        self.store.revoke("browser")
+        with self.assertRaisesRegex(tokens.TokenError, "No active token"):
+            self.store.set_scopes("browser", ["read"])
+        with self.assertRaisesRegex(tokens.TokenError, "No active token"):
+            self.store.set_scopes("nobody", ["read"])
+
     def test_list_never_includes_hashes(self):
         self.store.create("hermes", ["read"])
         listed = self.store.list()

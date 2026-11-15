@@ -81,6 +81,11 @@ def test_sessions_follow_the_token_scopes_revocation_and_sign_out(service):
     cleared = service.client.delete("/v1/session", headers=reader)
     assert cleared.status_code == 200 and 'kaal_session="";' in cleared.headers["set-cookie"] and "Max-Age=0" in cleared.headers["set-cookie"]
 
+    # Changing what the token may do reaches a signed-in browser without a new sign-in.
+    service.store.set_scopes("reader", ["read", "reveal", "delete"])
+    assert service.client.get("/v1/session", headers=reader).json()["result"] == {"name": "reader", "scopes": ["read", "reveal", "delete"]}
+    assert service.client.get("/v1/medical/receipts", headers=reader).status_code == 200
+
     service.store.revoke("reader")
     assert service.client.get("/v1/session", headers=reader).status_code == 401
 

@@ -87,6 +87,7 @@ function pdfCard(noteId, file) {
     file.extracted_markdown ? text : null);
 }
 
+const CANNOT_DELETE = "This device can restore from the Trash but isn't allowed to delete for good.";
 const tagList = (text) => [...new Set(text.split(",").map((tag) => tag.trim().replace(/^#/, "")).filter(Boolean))];
 
 export function notesView(container, params, { expired }) {
@@ -149,8 +150,9 @@ export function notesView(container, params, { expired }) {
   };
 }
 
-export function noteView(container, noteId, { go, expired }) {
+export function noteView(container, noteId, { go, expired, session }) {
   let alive = true;
+  const mayDelete = ((session || {}).scopes || []).includes("delete");
   const status = h("div", {});
   const attempt = async (work) => {
     status.replaceChildren();
@@ -214,9 +216,10 @@ export function noteView(container, noteId, { go, expired }) {
         files.length ? h("div", {}, h("h2", {}, attachments.length === 1 ? "File" : "Files"), files) : null,
         trashed ? null : h("div", { class: "add-files" }, picker, h("label", { for: "add-files", class: "button small" }, "Add files")),
         status,
+        trashed && !mayDelete ? h("p", { class: "hint" }, CANNOT_DELETE) : null,
         h("div", { class: "actions" }, trashed
           ? [actionButton("Restore", () => attempt(async () => { await api.restoreNote(note.id); await load(); })),
-             twoStepButton("Delete forever", "Tap again to delete forever", () => attempt(async () => { await api.purgeNote(note.id); go("notes?trash=1"); }))]
+             mayDelete ? twoStepButton("Delete forever", "Tap again to delete forever", () => attempt(async () => { await api.purgeNote(note.id); go("notes?trash=1"); })) : null]
           : [h("a", { href: `#/note/${encodeURIComponent(note.id)}/edit`, class: "button primary" }, "Edit"),
              twoStepButton("Move to Trash", "Tap again to move to Trash", () => attempt(async () => { await api.trashNote(note.id); go("notes"); }))])));
   }

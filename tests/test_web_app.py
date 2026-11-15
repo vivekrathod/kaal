@@ -121,6 +121,13 @@ def test_the_editor_and_the_renderer_agree_on_how_a_note_refers_to_its_files():
     assert '"/v1/library/notes/${id(noteId)}/attachments"'.replace('"', "`") in (WEB / "api.js").read_text()
 
 
+def test_delete_for_good_is_offered_only_to_a_device_allowed_to_do_it():
+    for name in ("notes.js", "trash.js"):
+        text = (WEB / "views" / name).read_text()
+        assert '.includes("delete")' in text, name
+        assert re.search(r"mayDelete \? twoStepButton\(\"Delete", text), name
+
+
 def test_the_web_files_are_packaged_with_kaal():
     assert '"web/*"' in (ROOT / "pyproject.toml").read_text()
 

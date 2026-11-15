@@ -90,17 +90,22 @@ class TokenStore:
                 os.unlink(tmp)
         self._cache = None
 
-    def create(self, name: str, scopes: Iterable[str]) -> tuple[dict[str, Any], str]:
-        name = name.strip()
+    @staticmethod
+    def _wanted(scopes: Iterable[str]) -> list[str]:
         requested = {s.strip() for s in scopes if s.strip()}
-        wanted = [s for s in SCOPES if s in requested]
-        if not name:
-            raise TokenError("A token needs a name.")
         unknown = sorted(requested - set(SCOPES))
         if unknown:
             raise TokenError(f"Unknown scope(s): {', '.join(unknown)}. Choose from: {', '.join(SCOPES)}.")
+        wanted = [s for s in SCOPES if s in requested]
         if not wanted:
             raise TokenError("A token needs at least one scope.")
+        return wanted
+
+    def create(self, name: str, scopes: Iterable[str]) -> tuple[dict[str, Any], str]:
+        name = name.strip()
+        if not name:
+            raise TokenError("A token needs a name.")
+        wanted = self._wanted(scopes)
         with self._lock:
             records = [dict(r) for r in self._load()]
             if any(r["name"] == name and not r.get("revoked_at") for r in records):
@@ -122,6 +127,19 @@ class TokenStore:
                 raise TokenError(f"No active token named or with id {name_or_id!r}.")
             for record in active:
                 record["revoked_at"] = _now()
+            self._save(records)
+        return self._public(active[0])
+
+    def set_scopes(self, name_or_id: str, scopes: Iterable[str]) -> dict[str, Any]:
+        """Change what an active token may do. Its secret stays the same, so
+        the devices using it stay signed in and see the change at once."""
+        wanted = self._wanted(scopes)
+        with self._lock:
+            records = [dict(r) for r in self._load()]
+            active = [r for r in records if not r.get("revoked_at") and name_or_id in (r["id"], r["name"])]
+            if len(active) != 1:
+                raise TokenError(f"No active token named or with id {name_or_id!r}." if not active else f"More than one active token matches {name_or_id!r}; use its id.")
+            active[0]["scopes"] = wanted
             self._save(records)
         return self._public(active[0])
 
