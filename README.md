@@ -63,6 +63,16 @@ and stored only as SHA-256 hashes. `kaal-server token list` and
 | `delete` | Permanent deletion and purges |
 | `admin` | Whole-vault export |
 
+**Web app.** `kaal-server` serves a small web app at `/`: open the server's
+address in a browser on a laptop or phone and sign in with a device token. It
+covers medical receipts: add one from a file or the phone's camera, see what
+still needs review, check each value against a picture of the receipt (with
+where it came from and how far to trust it), mark receipts reviewed or
+reimbursed, and see totals per person and year. It is plain files in
+`kaal/web/` with no build step, and it only talks to the API below. The server
+tells the browser to run nothing but those files and never to show them inside
+another site.
+
 **Browsers.** A web page served from the same address signs in by sending a
 device token once to `POST /v1/session`. The server answers with a cookie that
 page scripts cannot read (`HttpOnly`, `Secure`, `SameSite=Strict`, 30 days), and

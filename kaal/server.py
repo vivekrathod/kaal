@@ -231,6 +231,16 @@ def _error(status: int, message: str, kind: str | None = None, details: dict | N
     return JSONResponse(payload, status_code=status, headers=headers)
 
 
+WEB_DIR = Path(__file__).with_name("web")
+# The web app is static files with no inline script or style, so the browser
+# can be told to run nothing else and to refuse being framed by another site.
+WEB_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+WEB_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json", ".png": "image/png"}
+
 SESSION_COOKIE = "kaal_session"
 SESSION_SECONDS = 30 * 24 * 3600
 # A browser cannot add this header to a request made from another site without
@@ -479,6 +489,25 @@ def create_app(settings: Settings) -> FastAPI:
         return _error(500, "Internal error.", "internal")
 
     S = lambda request: request.app.state.kaal  # noqa: E731
+
+    # --- the web app: static files only; everything it shows comes from the API above
+
+    def web_file(relative: str) -> Response:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\.[a-z]+", relative):
+            raise HTTPException(404, "Not found.")
+        path = WEB_DIR / relative
+        media_type = WEB_TYPES.get(path.suffix)
+        if media_type is None or not path.is_file():
+            raise HTTPException(404, "Not found.")
+        return Response(content=path.read_bytes(), media_type=media_type, headers=WEB_HEADERS)
+
+    @app.get("/", include_in_schema=False)
+    def web_index():
+        return web_file("index.html")
+
+    @app.get("/web/{relative:path}", include_in_schema=False)
+    def web_asset(relative: str):
+        return web_file(relative)
 
     @app.get("/v1/health", tags=["service"])
     def health() -> dict[str, str]:
