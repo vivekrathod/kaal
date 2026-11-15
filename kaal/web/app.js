@@ -4,6 +4,9 @@ import { signInView } from "/web/views/signin.js";
 import { inboxView } from "/web/views/inbox.js";
 import { reviewView } from "/web/views/review.js";
 import { totalsView } from "/web/views/totals.js";
+import { trashView } from "/web/views/trash.js";
+import { settingsView } from "/web/views/settings.js";
+import { notesView, noteView, noteEditView } from "/web/views/notes.js";
 
 const root = document.querySelector("#app");
 let session = null;
@@ -26,8 +29,7 @@ function shell(active, content) {
   return [
     h("header", { class: "bar" },
       h("span", { class: "brand" }, "Kaal"),
-      h("nav", { class: "tabs", "aria-label": "Sections" }, tab("receipts", "Receipts", "receipts"), tab("totals", "Totals", "totals")),
-      h("button", { type: "button", class: "link", onClick: signOut }, "Sign out")),
+      h("nav", { class: "tabs", "aria-label": "Sections" }, tab("receipts", "Receipts", "receipts"), tab("totals", "Totals", "totals"), tab("notes", "Notes", "notes"), tab("settings", "Settings", "settings"))),
     h("main", { class: "page" }, content),
   ];
 }
@@ -60,13 +62,28 @@ async function render() {
   }
   const { name, rest, params } = route();
   const content = h("div", { class: "view" });
-  const context = { go, session, expired: () => { session = null; render(); } };
+  const context = { go, session, signOut, expired: () => { session = null; render(); } };
   if (name === "receipt" && rest[0]) {
     replace(root, shell("receipts", content));
     leaveView = reviewView(content, rest[0], context);
   } else if (name === "totals") {
     replace(root, shell("totals", content));
     leaveView = totalsView(content, params, context);
+  } else if (name === "trash") {
+    replace(root, shell("receipts", content));
+    leaveView = trashView(content, params, context);
+  } else if (name === "settings") {
+    replace(root, shell("settings", content));
+    leaveView = settingsView(content, params, context);
+  } else if (name === "notes" && rest[0] === "new") {
+    replace(root, shell("notes", content));
+    leaveView = noteEditView(content, null, context);
+  } else if (name === "notes") {
+    replace(root, shell("notes", content));
+    leaveView = notesView(content, params, context);
+  } else if (name === "note" && rest[0]) {
+    replace(root, shell("notes", content));
+    leaveView = rest[1] === "edit" ? noteEditView(content, rest[0], context) : noteView(content, rest[0], context);
   } else {
     replace(root, shell("receipts", content));
     leaveView = inboxView(content, params, context);

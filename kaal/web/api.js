@@ -63,12 +63,26 @@ export const api = {
   review: (noteId) => result(request("POST", `/v1/medical/receipts/${id(noteId)}/review`)),
   reopen: (noteId) => result(request("POST", `/v1/medical/receipts/${id(noteId)}/reopen`)),
   trash: (noteId) => result(request("POST", `/v1/medical/receipts/${id(noteId)}/trash`)),
+  restore: (noteId) => result(request("POST", `/v1/medical/receipts/${id(noteId)}/restore`)),
+  purge: (noteId) => result(request("DELETE", `/v1/medical/receipts/${id(noteId)}`, { params: { confirm: true } })),
   reread: (noteId) => result(request("POST", "/v1/medical/receipts/reextract", { json: { ids: [noteId] } })),
   reimburse: (ids, { date = "", note = "", undo = false } = {}) => result(request("POST", "/v1/medical/receipts/reimburse", { json: { ids, date, note, undo } })),
 
   people: () => result(request("GET", "/v1/medical/people")).then((data) => data.people),
+  changePeople: ({ add = [], remove = [] }) => result(request("POST", "/v1/medical/people", { json: { add, remove } })).then((data) => data.people),
+  providers: () => result(request("GET", "/v1/medical/providers")).then((data) => data.providers),
+  forgetProvider: (printed) => result(request("POST", "/v1/medical/providers/forget", { json: { forget: [printed] } })).then((data) => data.providers),
   report: (filter) => result(request("POST", "/v1/medical/report", { json: filter })),
+
+  notes: (params) => request("GET", "/v1/library/notes", { params }),
+  note: (noteId) => result(request("GET", `/v1/library/notes/${id(noteId)}`)).then((data) => data.note),
+  createNote: (note) => result(request("POST", "/v1/library/notes", { json: note })),
+  updateNote: (noteId, note) => result(request("PUT", `/v1/library/notes/${id(noteId)}`, { json: note })),
+  trashNote: (noteId) => result(request("POST", `/v1/library/notes/${id(noteId)}/trash`)),
+  restoreNote: (noteId) => result(request("POST", `/v1/library/notes/${id(noteId)}/restore`)),
+  purgeNote: (noteId) => result(request("DELETE", `/v1/library/notes/${id(noteId)}`, { params: { confirm: true } })),
 };
 
 export const previewUrl = (noteId, attachmentId, page = 1) => `/v1/medical/receipts/${id(noteId)}/attachments/${id(attachmentId)}/preview?page=${page}`;
 export const originalUrl = (noteId, attachmentId) => `/v1/medical/receipts/${id(noteId)}/attachments/${id(attachmentId)}/content`;
+export const noteFileUrl = (noteId, attachmentId) => `/v1/notes/${id(noteId)}/attachments/${id(attachmentId)}/content`;

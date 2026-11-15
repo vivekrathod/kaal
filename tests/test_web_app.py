@@ -53,6 +53,9 @@ def test_the_page_has_no_inline_script_or_style_for_that_policy_to_block():
     ("/web/app.js", "text/javascript; charset=utf-8"),
     ("/web/api.js", "text/javascript; charset=utf-8"),
     ("/web/views/review.js", "text/javascript; charset=utf-8"),
+    ("/web/views/notes.js", "text/javascript; charset=utf-8"),
+    ("/web/views/settings.js", "text/javascript; charset=utf-8"),
+    ("/web/views/trash.js", "text/javascript; charset=utf-8"),
     ("/web/app.css", "text/css; charset=utf-8"),
     ("/web/app.webmanifest", "application/manifest+json"),
     ("/web/icon.svg", "image/svg+xml"),
@@ -83,7 +86,7 @@ def test_every_request_the_app_makes_is_in_the_published_api():
     urls = re.findall(r"""Url = \([^)]*\) => `([^`]+)`""", api)
     made = {(method, re.sub(r"\$\{[^}]+\}", "{}", plain or template)) for method, plain, template in calls}
     made |= {("GET", re.sub(r"\$\{[^}]+\}", "{}", url).split("?")[0]) for url in urls}
-    assert len(made) >= 15
+    assert len(made) >= 25
     assert made - published == set()
     # No other file reaches the API directly.
     for script in SCRIPTS:

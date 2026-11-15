@@ -96,6 +96,7 @@ export function inboxView(container, params, { go, expired }) {
       search),
     status,
     list,
+    h("p", { class: "footnote" }, h("a", { href: "#/trash" }, "Trash")),
     picker,
     add);
   load();

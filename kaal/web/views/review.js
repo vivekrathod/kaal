@@ -1,5 +1,5 @@
 import { api, previewUrl, originalUrl } from "/web/api.js";
-import { h, replace, notice, actionButton, formatMoney, formatDate, today } from "/web/ui.js";
+import { h, replace, notice, actionButton, twoStepButton, formatMoney, formatDate, today } from "/web/ui.js";
 
 const FIELDS = [
   { key: "amount", label: "Amount paid", type: "text", inputmode: "decimal", placeholder: "0.00" },
@@ -159,18 +159,10 @@ export function reviewView(container, noteId, { go, expired }) {
       extras.append(actionButton("Reopen for review", () => attempt(async () => { await api.reopen(note.id); await load(); })));
     }
     extras.append(actionButton("Read it again", () => attempt(async () => { await api.reread(note.id); await load(); })));
-    let armed = false;
-    const remove = h("button", { type: "button", class: "button danger" }, "Move to Trash");
-    remove.addEventListener("click", () => attempt(async () => {
-      if (!armed) {
-        armed = true;
-        remove.textContent = "Tap again to move to Trash";
-        return;
-      }
+    extras.append(twoStepButton("Move to Trash", "Tap again to move to Trash", () => attempt(async () => {
       await api.trash(note.id);
       go("receipts");
-    }));
-    extras.append(remove);
+    })));
 
     replace(container,
       back(),

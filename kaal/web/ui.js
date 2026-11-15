@@ -40,6 +40,30 @@ export function notice(message, kind = "info") {
   return h("p", { class: `notice ${kind}`, role: kind === "error" ? "alert" : "status" }, message);
 }
 
+// A button for something that cannot be undone: the first press only arms it.
+export function twoStepButton(label, armedLabel, action) {
+  let armed = false;
+  const button = h("button", { type: "button", class: "button danger" }, label);
+  button.addEventListener("click", async () => {
+    if (!armed) {
+      armed = true;
+      button.textContent = armedLabel;
+      return;
+    }
+    button.disabled = true;
+    try {
+      await action();
+    } finally {
+      if (button.isConnected) {
+        button.disabled = false;
+        armed = false;
+        button.textContent = label;
+      }
+    }
+  });
+  return button;
+}
+
 // A button that shows it is working and cannot be pressed twice.
 export function actionButton(label, action, { kind = "secondary", busyLabel = "Working…" } = {}) {
   const button = h("button", { type: "button", class: `button ${kind}` }, label);

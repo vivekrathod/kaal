@@ -68,7 +68,10 @@ address in a browser on a laptop or phone and sign in with a device token. It
 covers medical receipts: add one from a file or the phone's camera, see what
 still needs review, check each value against a picture of the receipt (with
 where it came from and how far to trust it), mark receipts reviewed or
-reimbursed, and see totals per person and year. It is plain files in
+reimbursed, see totals per person and year, and restore or permanently delete
+what is in the Trash. It also covers notes (search, read, write, trash) and
+settings: the family list and the provider names Kaal has learnt. Permanent
+deletion needs a token with the `delete` scope. It is plain files in
 `kaal/web/` with no build step, and it only talks to the API below. The server
 tells the browser to run nothing but those files and never to show them inside
 another site.
