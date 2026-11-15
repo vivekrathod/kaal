@@ -75,6 +75,13 @@ shown as formatted Markdown; pictures inside a note appear in place, each PDF
 shows its first page with the text read from it, and a "Show source" switch
 shows the raw note. HTML inside a note is displayed as text, never run.
 
+Notes are written in Markdown, with a Preview switch beside the text. Pictures,
+PDFs and other files can be added while writing a note or from the note itself
+("Add files"). A file added to a new note is stored when the note is saved. In
+an existing note, "Insert in text" places a file where the cursor is, as
+`![name](attachment:ID)` for a picture or `[name](attachment:ID)` for anything
+else; files not placed in the text are listed under the note.
+
 A picture, PDF or plain-text file can be opened in the browser
 (`GET /v1/notes/{id}/attachments/{attachment}/view`); the server checks that
 the file really is what its name says. Every other kind of file, such as a
@@ -168,7 +175,7 @@ denial-of-service protection.
 
 - Text/Markdown-like files can be extracted into an `extracted.md` sidecar with `--extract`.
 - PDF receipts start with `pdftotext -layout`, preserving printed columns when a PDF has a native text layer.
-- A non-empty text layer is not automatically considered adequate: medical PDF receipts use the small ordered route `pdftotext -layout` → macOS Vision OCR → Docling, stopping when explicit paid-amount and date evidence is present. MarkItDown and Tesseract remain available only for generic, non-receipt attachment extraction.
+- A non-empty text layer is not automatically considered adequate: medical PDF receipts use the small ordered route `pdftotext -layout` → macOS Vision OCR → Docling, stopping when explicit paid-amount and date evidence is present. A PDF attached to an ordinary note is read from its text layer, or by OCR when it has none; Docling and MarkItDown are tried only if both give nothing.
 - Kaal never guesses the paid amount or date from an unlabelled total, balance, or date-like value. Ambiguous fields stay blank for review.
 - The narrow exception is an explicitly **SALE/PAYMENT - APPROVED** card receipt with a labelled **Total Amount**: that is recorded as the completed card payment. A bare `Total` or `Total Amount` is still rejected.
 - Kaal records field provenance (`labelled-text`, `docling-structured`, `ai-grounded`, `ai-unverified`, `ai-amount-due`, `manual`, or `confirmed`). Manual corrections and confirmed values survive re-extraction.

@@ -623,7 +623,7 @@ def text_layer_is_real(text: str) -> bool:
 
 
 def receipt_pdf_text(path: Path, *, ocr: bool) -> tuple[str, str]:
-    """Text of a receipt PDF as (method, text).
+    """Text of a PDF as (method, text).
 
     A real text layer is used as it is. Whether the label rules can find
     fields in it does not matter here: reading fields is a later step. A PDF
@@ -667,12 +667,21 @@ def extract_attachment_markdown(path: Path, *, ocr: bool = False, extract: bool 
     if extract and suffix in TEXT_ATTACHMENT_SUFFIXES:
         text = safe_read_text(path)
         method = "text"
-    elif extract and suffix in PDF_ATTACHMENT_SUFFIXES and receipt and receipt_ai_enabled():
-        # With a model reading the fields, the text only has to be the receipt's
-        # text. Without one, the cascade below still hunts for a rendering the
-        # label rules can match, exactly as before.
+    elif extract and suffix in PDF_ATTACHMENT_SUFFIXES and (not receipt or receipt_ai_enabled()):
+        # A PDF's text is its own text layer, or OCR when it is a scan. That is
+        # all an ordinary attachment needs, and all a receipt needs when a
+        # model reads its fields. The slow converters run only when both come
+        # back empty.
         method, text = receipt_pdf_text(path, ocr=ocr)
+        if not text.strip() and not receipt:
+            for fallback, reader in (("docling", run_docling), ("markitdown", run_markitdown)):
+                text = reader(path)
+                if text.strip():
+                    method = fallback
+                    break
     elif extract and suffix in PDF_ATTACHMENT_SUFFIXES:
+        # A receipt read by the label rules alone: hunt for a rendering in
+        # which the rules can find a paid amount and a date.
         candidates = [("pdftotext-layout", run_pdftotext(path))]
         # A non-empty native PDF text layer is not enough if it lacks one of the
         # fields the user must verify. For PDFs, macOS Vision is the one local
@@ -684,13 +693,6 @@ def extract_attachment_markdown(path: Path, *, ocr: bool = False, extract: bool 
             best_local_score = max(receipt_nonnegotiable_evidence_score(candidate_text) for _candidate_method, candidate_text in candidates)
             if best_local_score < 2:
                 candidates.append(("docling", run_docling(path)))
-                # Medical receipts use the small, evidence-tested route:
-                # native PDF text -> local Vision -> Docling. Keep the broader
-                # MarkItDown/Tesseract fallbacks for non-receipt attachments.
-                if not receipt:
-                    candidates.append(("markitdown", run_markitdown(path)))
-                    if ocr:
-                        candidates.append(("tesseract-pdf", run_pdf_ocr(path)))
         candidates = [(candidate_method, candidate_text) for candidate_method, candidate_text in candidates if candidate_text.strip()]
         if candidates:
             method, text = max(

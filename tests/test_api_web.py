@@ -1,6 +1,7 @@
 """What the web app needs from the API: browser sign-in, receipt detail, previews and paged lists."""
 import io
 import json
+import re
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -176,6 +177,24 @@ def note_with(service, name, content):
     assert attached.status_code == 200, attached.text
     shown = service.client.get(f"/v1/library/notes/{note['id']}", headers=service.bearer()).json()["result"]["note"]
     return f"/v1/notes/{note['id']}/attachments/{shown['attachments'][0]['id']}"
+
+
+def test_a_file_added_to_a_note_gets_an_id_the_note_text_can_refer_to(service):
+    note = service.client.post("/v1/library/notes", headers=service.bearer(), json={"title": "Garden", "body": "text"}).json()["result"]["note"]
+    picture = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    added = service.client.post(f"/v1/library/notes/{note['id']}/attachments", headers=service.bearer(), files={"file": ("beds.png", picture, "image/png")}).json()["result"]
+    assert added["status"] == "attached" and added["attachment"]["name"] == "beds.png"
+    file_id = added["attachment"]["id"]
+    assert re.fullmatch(r"[0-9a-f]{12}", file_id)
+    body = f"# Garden\n\n![beds](attachment:{file_id})"
+    assert service.client.put(f"/v1/library/notes/{note['id']}", headers=service.bearer(), json={"title": "Garden", "body": body}).status_code == 200
+    shown = service.client.get(f"/v1/library/notes/{note['id']}", headers=service.bearer()).json()["result"]["note"]
+    assert shown["body"].strip() == body and [file["id"] for file in shown["attachments"]] == [file_id]
+    assert service.client.get(f"/v1/notes/{note['id']}/attachments/{file_id}/view", headers=service.bearer()).content == picture
+    # A trashed note takes no more files.
+    service.client.post(f"/v1/library/notes/{note['id']}/trash", headers=service.bearer())
+    refused = service.client.post(f"/v1/library/notes/{note['id']}/attachments", headers=service.bearer(), files={"file": ("more.png", picture, "image/png")})
+    assert refused.status_code >= 400
 
 
 @pytest.mark.parametrize("name, content, media_type, sandboxed", [

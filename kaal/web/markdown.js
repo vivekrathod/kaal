@@ -9,7 +9,8 @@
 const MAX_SOURCE = 400000;
 const MAX_INLINE = 20000;
 const MAX_DEPTH = 8;
-const RESOURCE = /^:\/([0-9a-fA-F]{32})$/;
+// A file inside the note: Joplin's :/<id>, or attachment:<id> for a file added in Kaal.
+const RESOURCE = /^(?::\/([0-9a-fA-F]{32})|attachment:([0-9a-fA-F]{6,32}))$/;
 const SAFE_LINK = /^(https?:\/\/|mailto:)/i;
 const ENTITIES = { "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'" };
 
@@ -100,7 +101,7 @@ const anchor = (href, children) => el("a", { href, target: "_blank", rel: "noope
 function link(address, label, isImage, context, depth) {
   const resource = RESOURCE.exec(address);
   if (resource) {
-    const made = context.resource ? context.resource(resource[1].toLowerCase(), plain(label), isImage) : null;
+    const made = context.resource ? context.resource((resource[1] || resource[2]).toLowerCase(), plain(label), isImage) : null;
     return made ? [made] : [plain(label || "missing file")];
   }
   if (!SAFE_LINK.test(address)) return [plain(isImage ? `![${label}](${address})` : `[${label}](${address})`)];

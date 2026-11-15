@@ -19,6 +19,44 @@ const fileLink = (noteId, file, label, className) => (isViewable(file)
   ? h("a", { href: noteViewUrl(noteId, file.id), target: "_blank", rel: "noopener", class: className }, label)
   : h("a", { href: noteFileUrl(noteId, file.id), download: file.name || "attachment", class: className }, label));
 
+// How a note's text finds its files: by the id Joplin linked them with, or by Kaal's own.
+function fileResolver(noteId, attachments, shownInText) {
+  const known = new Map();
+  for (const file of attachments) {
+    known.set(String(file.id).toLowerCase(), file);
+    if ((file.source || {}).resource_id) known.set(String(file.source.resource_id).toLowerCase(), file);
+  }
+  return (key, label) => {
+    const file = known.get(key);
+    if (!file) return null;
+    if (shownInText) shownInText.add(file.id);
+    if (isPicture(file)) {
+      return { tag: "a", attrs: { href: noteViewUrl(noteId, file.id), target: "_blank", rel: "noopener", class: "picture" },
+        children: [{ tag: "img", attrs: { src: notePreviewUrl(noteId, file.id), alt: label || file.name || "Picture", loading: "lazy" }, children: [] }] };
+    }
+    return { tag: "a", attrs: isViewable(file)
+      ? { href: noteViewUrl(noteId, file.id), target: "_blank", rel: "noopener", class: "file-link" }
+      : { href: noteFileUrl(noteId, file.id), download: file.name || "attachment", class: "file-link" },
+      children: [label || file.name || "File"] };
+  };
+}
+
+// Send files to a note one at a time, saying how far along it is.
+async function addFiles(noteId, files, say) {
+  const added = [];
+  for (const [position, file] of files.entries()) {
+    say(`Adding ${file.name || "file"} (${position + 1} of ${files.length})…`);
+    try {
+      added.push(await api.attachNoteFile(noteId, file));
+    } catch (error) {
+      error.message = error.status === 413 ? `${file.name || "A file"} is too large to add.` : `${file.name || "A file"} could not be added: ${error.message}`;
+      error.added = added;
+      throw error;
+    }
+  }
+  return added;
+}
+
 function pdfCard(noteId, file) {
   const page = h("img", { src: notePreviewUrl(noteId, file.id), alt: `First page of ${file.name || "the PDF"}`, loading: "lazy", class: "file-page" });
   page.addEventListener("error", () => page.replaceWith(h("p", { class: "empty" }, "No preview for this PDF.")));
@@ -132,21 +170,8 @@ export function noteView(container, noteId, { go, expired }) {
     const trashed = Boolean(note.trashed_at);
     const attachments = note.attachments || [];
     // A note imported from Joplin refers to its files by an id; each file records which.
-    const byResource = new Map(attachments.filter((file) => (file.source || {}).resource_id).map((file) => [String(file.source.resource_id).toLowerCase(), file]));
     const shownInText = new Set();
-    const resource = (resourceId, label) => {
-      const file = byResource.get(resourceId);
-      if (!file) return null;
-      shownInText.add(file.id);
-      if (isPicture(file)) {
-        return { tag: "a", attrs: { href: noteViewUrl(note.id, file.id), target: "_blank", rel: "noopener", class: "picture" },
-          children: [{ tag: "img", attrs: { src: notePreviewUrl(note.id, file.id), alt: label || file.name || "Picture", loading: "lazy" }, children: [] }] };
-      }
-      return { tag: "a", attrs: isViewable(file)
-        ? { href: noteViewUrl(note.id, file.id), target: "_blank", rel: "noopener", class: "file-link" }
-        : { href: noteFileUrl(note.id, file.id), download: file.name || "attachment", class: "file-link" },
-        children: [label || file.name || "File"] };
-    };
+    const resource = fileResolver(note.id, attachments, shownInText);
 
     const rendered = h("div", { class: "markdown" }, renderMarkdown(note.body || "", { resource }).map(fromTree));
     const source = h("pre", { class: "body", hidden: true }, note.body || "");
@@ -157,6 +182,18 @@ export function noteView(container, noteId, { go, expired }) {
       rendered.hidden = showSource;
       toggle.textContent = showSource ? "Show formatted" : "Show source";
     });
+
+    const picker = h("input", { type: "file", id: "add-files", multiple: true, class: "visually-hidden" });
+    picker.addEventListener("change", () => attempt(async () => {
+      const chosen = [...picker.files];
+      picker.value = "";
+      if (!chosen.length) return;
+      try {
+        await addFiles(note.id, chosen, (message) => replace(status, notice(message)));
+      } finally {
+        if (alive) await load();
+      }
+    }));
 
     const pdfs = attachments.filter(isPdf);
     const loosePictures = attachments.filter((file) => isPicture(file) && !shownInText.has(file.id));
@@ -175,6 +212,7 @@ export function noteView(container, noteId, { go, expired }) {
         h("p", { class: "muted" }, [when(note.updated) && `Updated ${when(note.updated)}`, ...(note.tags || []).map((tag) => `#${tag}`)].filter(Boolean).join("  "), " ", toggle),
         rendered, source,
         files.length ? h("div", {}, h("h2", {}, attachments.length === 1 ? "File" : "Files"), files) : null,
+        trashed ? null : h("div", { class: "add-files" }, picker, h("label", { for: "add-files", class: "button small" }, "Add files")),
         status,
         h("div", { class: "actions" }, trashed
           ? [actionButton("Restore", () => attempt(async () => { await api.restoreNote(note.id); await load(); })),
@@ -194,17 +232,96 @@ export function noteEditView(container, noteId, { go, expired }) {
   const cancel = noteId ? `#/note/${encodeURIComponent(noteId)}` : "#/notes";
 
   function draw(note) {
+    let attachments = note.attachments || [];
+    let waiting = [];  // files chosen for a note that does not exist yet
+
     const title = h("input", { type: "text", id: "note-title", value: note.title || "", maxlength: "500", autocomplete: "off" });
     const tags = h("input", { type: "text", id: "note-tags", value: (note.tags || []).join(", "), placeholder: "home, taxes", autocomplete: "off", autocapitalize: "off" });
     const body = h("textarea", { id: "note-body", rows: "16" });
     body.value = note.body || "";
+    const preview = h("div", { class: "markdown preview", hidden: true });
+    const write = h("button", { type: "button", class: "segment active" }, "Write");
+    const look = h("button", { type: "button", class: "segment" }, "Preview");
+    const show = (previewing) => {
+      if (previewing) replace(preview, renderMarkdown(body.value, { resource: fileResolver(noteId, attachments) }).map(fromTree));
+      preview.hidden = !previewing;
+      body.hidden = previewing;
+      write.className = `segment${previewing ? "" : " active"}`;
+      look.className = `segment${previewing ? " active" : ""}`;
+    };
+    write.addEventListener("click", () => show(false));
+    look.addEventListener("click", () => show(true));
+
+    // Put a reference to a file where the cursor is, on a line of its own;
+    // at the end if the cursor was never placed in the text.
+    let placed = false;
+    body.addEventListener("focus", () => { placed = true; });
+    const insert = (file) => {
+      const reference = `${isPicture(file) ? "!" : ""}[${(file.name || "file").replace(/[\[\]]/g, "")}](attachment:${file.id})`;
+      const at = placed ? body.selectionStart : body.value.length;
+      const before = body.value.slice(0, at);
+      const after = body.value.slice(placed ? body.selectionEnd : at);
+      const start = `${before}${before && !before.endsWith("\n") ? "\n" : ""}${reference}\n`;
+      body.value = start + after;
+      show(false);
+      body.focus();
+      body.setSelectionRange(start.length, start.length);
+    };
+
+    const fileList = h("ul", { class: "plain" });
+    const later = h("p", { class: "hint", hidden: true }, "Pictures and PDFs show under the note. To place one inside the text, save first, then edit the note.");
+    const drawFiles = () => {
+      const rows = attachments.map((file) => h("li", { class: "line" },
+        h("span", {}, file.name || "File", " ", h("span", { class: "muted-text" }, size(file.size))),
+        h("button", { type: "button", class: "button small", onClick: () => insert(file) }, "Insert in text")));
+      const pending = waiting.map((file, position) => h("li", { class: "line" },
+        h("span", {}, file.name || "File", " ", h("span", { class: "muted-text" }, `${size(file.size)} · added when you save`)),
+        h("button", { type: "button", class: "button small", onClick: () => { waiting.splice(position, 1); drawFiles(); } }, "Remove")));
+      replace(fileList, rows, pending);
+      fileList.hidden = !rows.length && !pending.length;
+      later.hidden = !pending.length;
+    };
+
+    const picker = h("input", { type: "file", id: "note-files", multiple: true, class: "visually-hidden" });
+    picker.addEventListener("change", async () => {
+      const chosen = [...picker.files];
+      picker.value = "";
+      if (!chosen.length) return;
+      if (!noteId) {
+        waiting = waiting.concat(chosen);
+        drawFiles();
+        return;
+      }
+      // The note exists, so the files can be stored now and placed in the text straight away.
+      try {
+        attachments = attachments.concat(await addFiles(noteId, chosen, (message) => replace(status, notice(message))));
+        status.replaceChildren();
+      } catch (error) {
+        if (error.status === 401) return expired();
+        attachments = attachments.concat(error.added || []);
+        replace(status, notice(error.message, "error"));
+      }
+      drawFiles();
+    });
+
+    const save = h("button", { type: "submit", class: "button primary" }, "Save");
     const form = h("form", { class: "card form", novalidate: true },
       h("h1", {}, noteId ? "Edit note" : "New note"),
       h("div", { class: "field" }, h("label", { for: "note-title" }, "Title"), title),
       h("div", { class: "field" }, h("label", { for: "note-tags" }, "Tags"), tags),
-      h("div", { class: "field" }, h("label", { for: "note-body" }, "Note"), body),
+      h("div", { class: "field" },
+        h("div", { class: "field-head" }, h("label", { for: "note-body" }, "Note"), h("div", { class: "segments compact" }, write, look)),
+        body, preview,
+        h("p", { class: "hint" }, "Markdown works here: # Heading, **bold**, *italic*, - list, - [ ] to do, [link](https://…), `code`.")),
+      h("div", { class: "field" },
+        h("span", { class: "label" }, "Files"),
+        fileList,
+        later,
+        h("div", {}, picker, h("label", { for: "note-files", class: "button small" }, "Add pictures, PDFs or other files"))),
       status,
-      h("div", { class: "actions" }, h("button", { type: "submit", class: "button primary" }, "Save"), h("a", { href: cancel, class: "button" }, "Cancel")));
+      h("div", { class: "actions" }, save, h("a", { href: cancel, class: "button" }, "Cancel")));
+    drawFiles();
+
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (!title.value.trim() || !body.value.trim()) {
@@ -212,12 +329,18 @@ export function noteEditView(container, noteId, { go, expired }) {
         return;
       }
       const content = { title: title.value.trim(), tags: tagList(tags.value), body: body.value };
+      save.disabled = true;
+      let savedId = noteId;
       try {
         const saved = noteId ? await api.updateNote(noteId, content) : await api.createNote(content);
-        go(`note/${encodeURIComponent(noteId || (saved.note || saved).id)}`);
+        savedId = noteId || (saved.note || saved).id;
+        if (waiting.length) await addFiles(savedId, waiting, (message) => replace(status, notice(message)));
+        go(`note/${encodeURIComponent(savedId)}`);
       } catch (error) {
         if (error.status === 401) return expired();
-        replace(status, notice(error.message, "error"));
+        save.disabled = false;
+        // The note itself may already be saved; say so, so it is not typed twice.
+        replace(status, notice(error.message, "error"), savedId && !noteId ? h("p", { class: "hint" }, "The note was saved. ", h("a", { href: `#/note/${encodeURIComponent(savedId)}` }, "Open it")) : null);
       }
     });
     replace(container, h("a", { href: cancel, class: "back" }, "‹ Back"), form);

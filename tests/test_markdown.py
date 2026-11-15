@@ -58,6 +58,9 @@ CASES = [
     (f"![gone](:/{MISSING}) [lost](:/{MISSING})", "<p>gone lost</p>"),
     ("![far](https://example.com/x.png)", f'<p><a href="https://example.com/x.png" {LINK}>far</a></p>'),
     (f'<img src=":/{FILE}" alt="chart" width="400" height="300"/> then <IMG width=10 SRC=\':/{FILE}\'>', '<p><file label="chart" image></file> then <file label="" image></file></p>'),
+    # A file added in Kaal is referred to by its own, shorter id.
+    ("![plan](attachment:a1b2c3d4e5f6) and [list.pdf](attachment:A1B2C3D4E5F6)", '<p><file label="plan" image></file> and <file label="list.pdf"></file></p>'),
+    ("![gone](attachment:b1b2c3d4e5f6) [x](attachment:../../etc/passwd)", "<p>gone [x](attachment:../../etc/passwd)</p>"),
     (f'<img src=":/{MISSING}" alt="lost"> <img src="https://example.com/y.png" alt="far"> <img alt="no address">',
      f'<p>lost <a href="https://example.com/y.png" {LINK}>far</a> &lt;img alt="no address"&gt;</p>'),
 ]
@@ -81,6 +84,7 @@ HOSTILE = [
     '<img src="javascript:alert(1)" onerror="alert(1)">',
     '<img src=":/not-an-id" onload="alert(1)">',
     '<img src="data:image/svg+xml,<svg onload=alert(1)>">',
+    "[x](attachment:javascript:alert(1)) ![y](attachment:a1b2c3\"onerror=alert(1))",
 ]
 
 

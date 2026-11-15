@@ -184,3 +184,13 @@ textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; 
 @media (min-width: 860px) {
   .file-cards { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
 }
+
+/* Writing a note */
+button.segment { border: 0; background: none; font: inherit; cursor: pointer; }
+button.segment.active { background: var(--surface); color: var(--text); }
+.segments.compact { margin: 0; }
+.segments.compact .segment { padding: 3px 10px; font-size: 0.88rem; }
+.preview { min-height: 220px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; }
+.label { font-weight: 600; font-size: 0.92rem; }
+.add-files { margin: 4px 0 12px; }
+label.button { cursor: pointer; }

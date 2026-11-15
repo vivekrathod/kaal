@@ -271,6 +271,27 @@ def test_receipt_pdfs_use_their_text_layer_and_fall_back_to_ocr_not_docling(vaul
     assert kaal.text_layer_is_real(layer) and not kaal.text_layer_is_real("Page 1\n") and not kaal.text_layer_is_real("." * 400)
 
 
+def test_a_pdf_added_to_a_note_is_read_from_its_text_layer_or_by_ocr_without_the_slow_converters(vault, monkeypatch):
+    pdf = vault / "manual.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    layer = "BOILER HANDBOOK: how to bleed the radiators, set the timer and book the yearly service.\n"
+    slow = []
+    monkeypatch.setattr(kaal, "run_docling", lambda path: slow.append("docling") or "TEXT FROM DOCLING")
+    monkeypatch.setattr(kaal, "run_markitdown", lambda path: slow.append("markitdown") or "TEXT FROM MARKITDOWN")
+    monkeypatch.setattr(kaal, "run_macos_vision_pdf_ocr", lambda path: "")
+    monkeypatch.setattr(kaal, "run_pdf_ocr", lambda path: "TEXT READ BY OCR FROM A SCANNED PAGE")
+
+    monkeypatch.setattr(kaal, "run_pdftotext", lambda path: layer)
+    assert "Method: pdftotext-layout" in kaal.extract_attachment_markdown(pdf, extract=True, ocr=True)
+    monkeypatch.setattr(kaal, "run_pdftotext", lambda path: "")
+    assert "Method: tesseract-pdf" in kaal.extract_attachment_markdown(pdf, extract=True, ocr=True)
+    assert slow == []
+    # Only a PDF that gives nothing either way is handed to the converters.
+    monkeypatch.setattr(kaal, "run_pdf_ocr", lambda path: "")
+    last = kaal.extract_attachment_markdown(pdf, extract=True, ocr=True)
+    assert "Method: docling" in last and "TEXT FROM DOCLING" in last and slow == ["docling"]
+
+
 def test_unverified_amounts_and_dates_stay_out_of_the_totals_until_confirmed(vault, model):
     model.answer = {"amount": "75.00", "service_date": "05/06/2026"}
     note_id = capture(vault, "a blurry photo with nothing readable\n")

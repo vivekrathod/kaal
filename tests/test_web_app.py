@@ -112,6 +112,15 @@ def test_vault_text_is_never_written_into_the_page_as_markup():
             assert risky not in text, f"{script.name} uses {risky}"
 
 
+def test_the_editor_and_the_renderer_agree_on_how_a_note_refers_to_its_files():
+    notes = (WEB / "views" / "notes.js").read_text()
+    assert "](attachment:${file.id})" in notes
+    assert "attachment:([0-9a-fA-F]{6,32})" in (WEB / "markdown.js").read_text()
+    # New notes and edited ones can take files, and a note can be previewed before it is saved.
+    assert "api.attachNoteFile(" in notes and "renderMarkdown(body.value" in notes
+    assert '"/v1/library/notes/${id(noteId)}/attachments"'.replace('"', "`") in (WEB / "api.js").read_text()
+
+
 def test_the_web_files_are_packaged_with_kaal():
     assert '"web/*"' in (ROOT / "pyproject.toml").read_text()
 

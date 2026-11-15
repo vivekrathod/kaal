@@ -93,6 +93,11 @@ export const api = {
   trashNote: (noteId) => result(request("POST", `/v1/library/notes/${id(noteId)}/trash`)),
   restoreNote: (noteId) => result(request("POST", `/v1/library/notes/${id(noteId)}/restore`)),
   purgeNote: (noteId) => result(request("DELETE", `/v1/library/notes/${id(noteId)}`, { params: { confirm: true } })),
+  attachNoteFile: (noteId, file) => {
+    const form = new FormData();
+    form.append("file", file, file.name || "file");
+    return result(request("POST", `/v1/library/notes/${id(noteId)}/attachments`, { form })).then((data) => data.attachment);
+  },
   noteFileText: (noteId, attachmentId) => result(request("GET", `/v1/library/notes/${id(noteId)}/attachments/${id(attachmentId)}/extracted-text`)).then((data) => data.text || ""),
 };
 
