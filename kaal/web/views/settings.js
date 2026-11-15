@@ -1,4 +1,4 @@
-import { api } from "/web/api.js";
+import { api, appVersion } from "/web/api.js";
 import { h, replace, notice, actionButton } from "/web/ui.js";
 
 export function settingsView(container, _params, { session, signOut, expired }) {
@@ -51,6 +51,7 @@ export function settingsView(container, _params, { session, signOut, expired }) 
       h("section", { class: "card section" },
         h("h1", {}, "This device"),
         h("p", { class: "muted" }, `Signed in as “${session.name}”. It may: ${session.scopes.join(", ")}.`),
+        h("p", { class: "muted" }, `Kaal ${appVersion() || ""}`),
         h("button", { type: "button", class: "button", onClick: signOut }, "Sign out")));
   }
 

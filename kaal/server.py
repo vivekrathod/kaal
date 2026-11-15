@@ -492,6 +492,8 @@ def create_app(settings: Settings) -> FastAPI:
         started = time.monotonic()
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
+        # Lets an open web app notice that the server has been updated under it.
+        response.headers["X-Kaal-Version"] = __version__
         route = request.scope.get("route")
         template = getattr(route, "path", "(unmatched)")
         token_name = getattr(request.state, "token_name", "-")

@@ -40,6 +40,15 @@ def test_the_page_is_served_without_a_token_and_may_run_only_its_own_scripts(cli
     assert response.headers["cache-control"] == "no-store"
 
 
+def test_every_response_names_the_server_version_so_an_open_page_can_tell_it_is_stale(client):
+    from kaal import __version__
+    for path in ("/", "/web/app.js", "/v1/health", "/v1/session", "/nowhere"):
+        assert client.get(path).headers["x-kaal-version"] == __version__, path
+    api = (WEB / "api.js").read_text()
+    assert 'response.headers.get("X-Kaal-Version")' in api
+    assert "updateWaiting()" in (WEB / "app.js").read_text() and "location.reload()" in (WEB / "app.js").read_text()
+
+
 def test_the_page_has_no_inline_script_or_style_for_that_policy_to_block():
     html = (WEB / "index.html").read_text()
     assert re.findall(r"<script(?![^>]*\bsrc=)", html) == []

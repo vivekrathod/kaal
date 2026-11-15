@@ -9,6 +9,13 @@ export class ApiError extends Error {
   }
 }
 
+// The version of Kaal this page was loaded from, and whether the server has
+// since been updated: an open page keeps running the code it loaded.
+let loadedVersion = null;
+let newerVersion = false;
+export const appVersion = () => loadedVersion;
+export const updateWaiting = () => newerVersion;
+
 async function request(method, path, { json, form, params } = {}) {
   let url = path;
   if (params) {
@@ -33,6 +40,11 @@ async function request(method, path, { json, form, params } = {}) {
     response = await fetch(url, { method, headers, body, credentials: "same-origin" });
   } catch {
     throw new ApiError(0, "Can't reach Kaal. Check your connection and try again.", "unavailable");
+  }
+  const version = response.headers.get("X-Kaal-Version");
+  if (version) {
+    if (loadedVersion === null) loadedVersion = version;
+    else if (version !== loadedVersion) newerVersion = true;
   }
   let data = null;
   try {

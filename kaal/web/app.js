@@ -1,4 +1,4 @@
-import { api, ApiError } from "/web/api.js";
+import { api, ApiError, updateWaiting } from "/web/api.js";
 import { h, replace, notice } from "/web/ui.js";
 import { signInView } from "/web/views/signin.js";
 import { inboxView } from "/web/views/inbox.js";
@@ -47,6 +47,12 @@ async function render() {
   if (leaveView) {
     leaveView();
     leaveView = null;
+  }
+  // Moving between screens is a safe moment to pick up a newer version:
+  // nothing is half-typed, and the address says where to come back to.
+  if (updateWaiting()) {
+    location.reload();
+    return;
   }
   if (!session) {
     try {
