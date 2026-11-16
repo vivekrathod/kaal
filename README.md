@@ -127,11 +127,12 @@ a password. Nothing is offered until whoever runs the installation sets it up:
    create an OAuth client ID of type "Web application". Under "Authorized
    redirect URIs" add `https://YOUR-KAAL-ADDRESS/v1/sign-in/with/google/callback`.
 2. Give Kaal the client ID and client secret: as an administrator, in the web
-   app under Settings → Sign-in services; or on the server, with the secret in
-   a file so that it is never part of a command line:
+   app under Settings → Sign-in services; or on the server, where the command
+   asks for the secret without showing it, so that it is never part of a
+   command line (`--secret-file PATH` reads it from a file instead):
 
    ```bash
-   kaal-server sign-in add google --client-id ID --secret-file /path/to/secret --address https://YOUR-KAAL-ADDRESS
+   kaal-server sign-in add google --client-id ID --address https://YOUR-KAAL-ADDRESS
    kaal-server sign-in list           # also prints the redirect address to register
    kaal-server sign-in remove google
    ```

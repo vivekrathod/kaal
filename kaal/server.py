@@ -2006,6 +2006,18 @@ def _people(args: argparse.Namespace) -> None:
     print(json.dumps(out, indent=2))
 
 
+def _read_secret(source: str) -> str:
+    """A client secret from a file, from standard input, or typed at a prompt that
+    does not show it. Never from the command line, where other users could see it."""
+    if source != "-":
+        return Path(source).expanduser().read_text().strip()
+    if sys.stdin.isatty():
+        import getpass
+
+        return getpass.getpass("Paste the client secret and press Enter (it is not shown): ").strip()
+    return sys.stdin.read().strip()
+
+
 def _signin_services(args: argparse.Namespace) -> None:
     """kaal-server sign-in …: which services people may sign in through."""
     settings = Settings.from_env()
@@ -2016,8 +2028,7 @@ def _signin_services(args: argparse.Namespace) -> None:
             issuer, name = args.issuer or preset.get("issuer", ""), args.name or preset.get("name", "") or args.service
             if not issuer:
                 sys.exit("ERROR: --issuer is needed for a service other than google.")
-            # The secret comes from a file or standard input, so it is never part of a command line.
-            secret = (sys.stdin.read() if args.secret_file == "-" else Path(args.secret_file).expanduser().read_text()).strip()
+            secret = _read_secret(args.secret_file)
             address = clean_address(args.address or settings.public_url or store.get("public_address") or "")
             add_signin_service(store, oidc.Services(), service_id=args.service, name=name, issuer=issuer, client_id=args.client_id, client_secret=secret)
             store.put("public_address", address)
@@ -2114,7 +2125,7 @@ def build_parser() -> argparse.ArgumentParser:
     signin_add = signin_sub.add_parser("add", help="Offer a service, or replace its client id and secret")
     signin_add.add_argument("service", help="google, or a short id of your own for another OpenID Connect service")
     signin_add.add_argument("--client-id", required=True)
-    signin_add.add_argument("--secret-file", required=True, help="A file holding the client secret, or - to read it from standard input")
+    signin_add.add_argument("--secret-file", default="-", help="A file holding the client secret. Without it, the secret is asked for (or read from standard input)")
     signin_add.add_argument("--address", default="", help="The address people open Kaal at, such as https://kaal.example.org (default: KAAL_PUBLIC_URL)")
     signin_add.add_argument("--issuer", default="", help="The service's address, for one other than google")
     signin_add.add_argument("--name", default="", help="What the button calls it (default: the id)")

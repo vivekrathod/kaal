@@ -548,3 +548,29 @@ def test_the_command_line_adds_lists_and_removes_a_service(house, monkeypatch, c
             cli(monkeypatch, capsys, house.home, "sign-in", *poor)
         capsys.readouterr()
     assert json.loads(cli(monkeypatch, capsys, house.home, "sign-in", "remove", "google")[0])["services"] == []
+
+
+def test_the_command_line_asks_for_the_secret_at_a_terminal_and_reads_it_when_piped(house, monkeypatch, capsys):
+    import getpass
+    import io
+
+    monkeypatch.setattr(oidc, "fetch", house.google.fetch)
+    asked = []
+    monkeypatch.setattr(getpass, "getpass", lambda prompt: asked.append(prompt) or f"  {house.google.client_secret}\n")
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: True, read=lambda: pytest.fail("a terminal is asked, not read to its end")))
+    out, _ = cli(monkeypatch, capsys, house.home, "sign-in", "add", "google", "--client-id", house.google.client_id, "--address", HERE)
+    assert len(asked) == 1 and "not shown" in asked[0] and house.google.client_secret not in out
+    assert oidc.open_secret(kaal.installation_key(), house.store.service("google")["secret"]) == house.google.client_secret
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("a piped secret\n"))
+    cli(monkeypatch, capsys, house.home, "sign-in", "add", "google", "--client-id", house.google.client_id, "--secret-file", "-", "--address", HERE)
+    assert len(asked) == 1
+    assert oidc.open_secret(kaal.installation_key(), house.store.service("google")["secret"]) == "a piped secret"
+
+    # An empty answer stores nothing new.
+    monkeypatch.setattr(getpass, "getpass", lambda prompt: "   ")
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: True))
+    with pytest.raises(SystemExit):
+        cli(monkeypatch, capsys, house.home, "sign-in", "add", "google", "--client-id", house.google.client_id, "--address", HERE)
+    capsys.readouterr()
+    assert oidc.open_secret(kaal.installation_key(), house.store.service("google")["secret"]) == "a piped secret"
