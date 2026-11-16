@@ -73,27 +73,12 @@ SENSITIVE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("DriverLicense", re.compile(r"\b(?:driver'?s?\s+license|dl)\s*(?:number|#|no\.?|:)?\s*([A-Z0-9-]{5,20})\b", re.I)),
     ("TaxId", re.compile(r"\b(?:ein|itin|tax\s*id)\b\s*(?:number|#|no\.?|:)?\s*([0-9A-Z-]{5,20})\b", re.I)),
 ]
-SENSITIVE_THRESHOLD = 5
 TEXT_ATTACHMENT_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".json", ".yaml", ".yml", ".xml", ".html", ".htm"}
 IMAGE_ATTACHMENT_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif", ".webp"}
 PDF_ATTACHMENT_SUFFIXES = {".pdf"}
 RECEIPT_FIELD_NAMES = {"patient_name", "provider", "service_date", "paid_date", "amount", "currency", "insurer"}
 
-CLASSIFIER_RULES: list[tuple[str, int, re.Pattern[str]]] = [
-    ("SSN", 8, SENSITIVE_PATTERNS[0][1]),
-    ("Passport", 6, SENSITIVE_PATTERNS[2][1]),
-    ("DriverLicense", 6, SENSITIVE_PATTERNS[3][1]),
-    ("TaxId", 6, SENSITIVE_PATTERNS[4][1]),
-    ("DOB", 4, re.compile(r"\b(?:dob|date of birth|birthdate)\s*[:=]\s*\d{1,4}[-/ ]\d{1,2}[-/ ]\d{1,4}\b", re.I)),
-    ("BankRouting", 6, re.compile(r"\b(?:routing|aba)\s*(?:number|#|no\.?|:)?\s*\d{9}\b", re.I)),
-    ("BankAccount", 5, re.compile(r"\b(?:account|acct)\s*(?:number|#|no\.?|:)?\s*\d{6,17}\b", re.I)),
-    ("Credential", 7, re.compile(r"\b(?:password|passcode|api[_ -]?key|secret|recovery code|private key|access token|refresh token)\b", re.I)),
-    ("TaxDocument", 5, re.compile(r"\b(?:w-?2|1099|irs|tax return|agi|form 1040)\b", re.I)),
-    ("Medical", 4, re.compile(r"\b(?:medical record|patient id|health insurance|member id|medicare|medicaid)\b", re.I)),
-    ("Email", 1, re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)),
-    ("Phone", 1, re.compile(r"(?:\+?1[-. ]?)?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}")),
-    ("AddressHint", 2, re.compile(r"\b\d{1,6}\s+[A-Za-z0-9 .'-]+\s+(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|court|ct|blvd|boulevard)\b", re.I)),
-]
+
 
 
 class KaalError(SystemExit):
@@ -435,69 +420,19 @@ def parse_tags(raw: str) -> list[str]:
     return sorted({t.strip().lstrip("#") for t in raw.split(",") if t.strip()})
 
 
-def luhn_valid(number: str) -> bool:
-    digits = [int(d) for d in re.sub(r"\D", "", number)]
-    if not 13 <= len(digits) <= 19:
-        return False
-    checksum = 0
-    parity = len(digits) % 2
-    for i, digit in enumerate(digits):
-        if i % 2 == parity:
-            digit *= 2
-            if digit > 9:
-                digit -= 9
-        checksum += digit
-    return checksum % 10 == 0
+def sensitivity_label(requested: str | None = "auto") -> str:
+    """The label a note or a file carries.
 
-
-def classify_text(text: str, *, context: str = "") -> dict[str, Any]:
-    """Best-effort local sensitivity classifier.
-
-    False negatives are the dangerous case, so callers should encrypt when the
-    result is sensitive or when extraction/classification is uncertain.
+    Everything is stored encrypted whatever the label says. It records what the
+    caller stated and nothing is inferred from the text: content is labelled
+    sensitive unless the caller says it is public.
     """
-    haystack = f"{context}\n{text}"
-    # Joplin embeds 32-hex resource ids in Markdown links (:/<id>). Those ids
-    # can look like long payment-card numbers to the Luhn heuristic, but they
-    # are opaque local attachment references and should not make a note private.
-    haystack = JOPLIN_RESOURCE_LINK_RE.sub(":/[joplin-resource]", haystack)
-    reasons: list[str] = []
-    score = 0
-    for name, weight, pattern in CLASSIFIER_RULES:
-        if pattern.search(haystack):
-            score += weight
-            reasons.append(f"matched {name}")
-    for match in SENSITIVE_PATTERNS[1][1].finditer(haystack):
-        candidate = match.group(0)
-        if luhn_valid(candidate):
-            score += 7
-            reasons.append("matched CreditCard with valid Luhn checksum")
-            break
-    sensitivity = "sensitive" if score >= SENSITIVE_THRESHOLD else "public"
-    return {"sensitivity": sensitivity, "score": score, "threshold": SENSITIVE_THRESHOLD, "reasons": reasons}
-
-
-def decide_storage(text: str, *, sensitivity: str = "auto", context: str = "") -> tuple[str, dict[str, Any]]:
-    """Everything is stored encrypted. ``sensitivity`` now only labels the content.
-
-    The label still records what the classifier or the caller said, so existing
-    metadata keeps its meaning, but it no longer decides how anything is stored.
-    """
-    requested = (sensitivity or "auto").lower().strip()
-    if requested in {"sensitive", "encrypted", "encrypt"}:
-        result = classify_text(text, context=context)
-        result["sensitivity"] = "sensitive"
-        result["reasons"] = ["forced sensitive"] + result.get("reasons", [])
-        return "encrypted", result
-    if requested in {"public", "plaintext", "plain"}:
-        result = classify_text(text, context=context)
-        result["sensitivity"] = "public"
-        result["reasons"] = ["forced public"] + result.get("reasons", [])
-        return "encrypted", result
-    if requested != "auto":
-        die("sensitivity must be one of: auto, sensitive, public")
-    result = classify_text(text, context=context)
-    return "encrypted", result
+    wanted = (requested or "auto").lower().strip()
+    if wanted in {"public", "plaintext", "plain"}:
+        return "public"
+    if wanted in {"auto", "sensitive", "encrypted", "encrypt"}:
+        return "sensitive"
+    die("sensitivity must be one of: auto, sensitive, public")
 
 
 def safe_read_text(path: Path, limit: int = 1_000_000) -> str:
@@ -659,15 +594,9 @@ def write_attachment_extracted_sidecar(note_meta: dict[str, Any], attachment_met
     att_id = attachment_meta["id"]
     att_dir = attachment_note_dir(nid) / att_id
     att_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if attachment_meta.get("storage", "encrypted") == "encrypted":
-        sidecar_payload = encrypt_bytes(extracted_md.encode(), aad=f"{nid}:{att_id}:extracted.md".encode())
-        secure_write_json(att_dir / "extracted.md.json", {"name": "extracted.md", "encrypted": sidecar_payload})
-        (att_dir / "extracted.md").unlink(missing_ok=True)
-    else:
-        sidecar = att_dir / "extracted.md"
-        sidecar.write_text(extracted_md, encoding="utf-8")
-        os.chmod(sidecar, 0o600)
-        (att_dir / "extracted.md.json").unlink(missing_ok=True)
+    sidecar_payload = encrypt_bytes(extracted_md.encode(), aad=f"{nid}:{att_id}:extracted.md".encode())
+    secure_write_json(att_dir / "extracted.md.json", {"name": "extracted.md", "encrypted": sidecar_payload})
+    (att_dir / "extracted.md").unlink(missing_ok=True)   # a readable copy from an older version
 
 
 def read_stdin_or_arg(value: str | None, body_file: str | None = None) -> str:
@@ -760,7 +689,7 @@ def create_note(title: str, body: str, *, tags: list[str] | None = None, sensiti
     note_id = secrets.token_hex(6)
     ts = now_iso()
     note_tags = sorted(set(tags or []))
-    storage, classification = decide_storage(body, sensitivity=sensitivity, context=title)
+    label = sensitivity_label(sensitivity)
     note_obj = {
         "id": note_id,
         "title": title,
@@ -769,19 +698,13 @@ def create_note(title: str, body: str, *, tags: list[str] | None = None, sensiti
         "updated": ts,
         "body": body,
         "format": "markdown",
-        "sensitivity": classification["sensitivity"],
-        "storage": storage,
-        "classification": classification,
+        "sensitivity": label,
+        "storage": "encrypted",
     }
     if source:
         note_obj["source"] = source
-    if storage == "encrypted":
-        payload = encrypt_bytes(json.dumps(note_obj, ensure_ascii=False).encode(), aad=note_id.encode())
-        secure_write_json(encrypted_note_path(note_id), payload)
-    else:
-        path = plaintext_note_path(note_id)
-        path.write_text(body, encoding="utf-8")
-        os.chmod(path, 0o600)
+    payload = encrypt_bytes(json.dumps(note_obj, ensure_ascii=False).encode(), aad=note_id.encode())
+    secure_write_json(encrypted_note_path(note_id), payload)
     meta = {
         "id": note_id,
         "title": title,
@@ -790,9 +713,8 @@ def create_note(title: str, body: str, *, tags: list[str] | None = None, sensiti
         "updated": ts,
         "attachments": [],
         "format": "markdown",
-        "sensitivity": classification["sensitivity"],
-        "storage": storage,
-        "classification": classification,
+        "sensitivity": label,
+        "storage": "encrypted",
     }
     if source:
         meta["source"] = source
@@ -815,7 +737,6 @@ def add_note(args: argparse.Namespace) -> None:
         "format": "markdown",
         "sensitivity": meta["sensitivity"],
         "storage": meta["storage"],
-        "classification_reasons": meta.get("classification", {}).get("reasons", []),
     }, indent=2, ensure_ascii=False)
 
 
@@ -1051,23 +972,15 @@ def library_create(args: argparse.Namespace) -> None:
 
 
 def write_library_note(meta: dict[str, Any], note: dict[str, Any]) -> None:
-    """Persist an edited note while preserving automatic encryption upgrades."""
-    storage, classification = decide_storage(note["body"], sensitivity="auto", context=note["title"])
-    # A note once labelled sensitive keeps the label, whatever its text becomes.
-    if meta.get("sensitivity") == "sensitive":
-        classification["sensitivity"] = "sensitive"
-    note["storage"] = storage
-    note["sensitivity"] = classification["sensitivity"]
-    note["classification"] = classification
-    plaintext_note_path(note["id"]).unlink(missing_ok=True)
-    encrypted_note_path(note["id"]).unlink(missing_ok=True)
-    if storage == "encrypted":
-        secure_write_json(encrypted_note_path(note["id"]), encrypt_bytes(json.dumps(note, ensure_ascii=False).encode(), aad=note["id"].encode()))
-    else:
-        plaintext_note_path(note["id"]).write_text(note["body"], encoding="utf-8")
-        os.chmod(plaintext_note_path(note["id"]), 0o600)
-    for key in ("title", "tags", "updated", "storage", "sensitivity", "classification"):
+    """Persist an edited note, encrypted. Its label stays what it was."""
+    note["storage"] = "encrypted"
+    note["sensitivity"] = meta.get("sensitivity") or "sensitive"
+    note.pop("classification", None)
+    plaintext_note_path(note["id"]).unlink(missing_ok=True)   # a readable copy from an older version
+    secure_write_json(encrypted_note_path(note["id"]), encrypt_bytes(json.dumps(note, ensure_ascii=False).encode(), aad=note["id"].encode()))
+    for key in ("title", "tags", "updated", "storage", "sensitivity"):
         meta[key] = note[key]
+    meta.pop("classification", None)
 
 
 def library_update(args: argparse.Namespace) -> None:
@@ -1242,33 +1155,20 @@ def append_note(args: argparse.Namespace) -> None:
         die("No append text provided.")
     note["body"] = note.get("body", "").rstrip() + "\n\n" + extra.strip() + "\n"
     note["updated"] = now_iso()
-    # Re-classify appended content in auto mode. A note that was previously public
-    # must be upgraded if the appended text introduces sensitive data.
-    storage, classification = decide_storage(note["body"], sensitivity="auto", context=note.get("title", ""))
-    # A note once labelled sensitive keeps the label on append.
-    if meta.get("sensitivity") == "sensitive":
-        classification["sensitivity"] = "sensitive"
-    note["storage"] = storage
-    note["sensitivity"] = classification["sensitivity"]
-    note["classification"] = classification
-    if storage == "encrypted":
-        old_plain = plaintext_note_path(note["id"])
-        if old_plain.exists():
-            old_plain.unlink()
-        payload = encrypt_bytes(json.dumps(note, ensure_ascii=False).encode(), aad=note["id"].encode())
-        secure_write_json(encrypted_note_path(note["id"]), payload)
-    else:
-        plaintext_note_path(note["id"]).write_text(note["body"], encoding="utf-8")
-        os.chmod(plaintext_note_path(note["id"]), 0o600)
+    note["storage"] = "encrypted"
+    note["sensitivity"] = meta.get("sensitivity") or "sensitive"
+    note.pop("classification", None)
+    plaintext_note_path(note["id"]).unlink(missing_ok=True)   # a readable copy from an older version
+    secure_write_json(encrypted_note_path(note["id"]), encrypt_bytes(json.dumps(note, ensure_ascii=False).encode(), aad=note["id"].encode()))
     index = load_index()
     for n in index.get("notes", []):
         if n["id"] == note["id"]:
             n["updated"] = note["updated"]
-            n["storage"] = storage
-            n["sensitivity"] = classification["sensitivity"]
-            n["classification"] = classification
+            n["storage"] = "encrypted"
+            n["sensitivity"] = note["sensitivity"]
+            n.pop("classification", None)
     save_index(index)
-    emit({"status": "appended", "id": note["id"], "title": note.get("title", ""), "storage": storage, "sensitivity": classification["sensitivity"]}, indent=2, ensure_ascii=False)
+    emit({"status": "appended", "id": note["id"], "title": note.get("title", ""), "storage": "encrypted", "sensitivity": note["sensitivity"]}, indent=2, ensure_ascii=False)
 
 
 def extract_field(body: str, field: str) -> str:
@@ -1339,11 +1239,8 @@ def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "
     att_id = secrets.token_hex(6)
     disk_name = safe_attachment_filename(stored_name, att_id)
     extracted_md = extract_attachment_markdown(src, ocr=ocr, extract=extract)
-    storage, classification = decide_storage(extracted_md, sensitivity=sensitivity, context=f"{stored_name}\n{meta.get('title','')}")
-    # Attachments of a note labelled sensitive carry the same label.
-    if meta.get("sensitivity") == "sensitive":
-        classification["sensitivity"] = "sensitive"
-        classification.setdefault("reasons", []).insert(0, "parent note is sensitive")
+    # A file on a note labelled sensitive carries the same label.
+    label = "sensitive" if meta.get("sensitivity") == "sensitive" else sensitivity_label(sensitivity)
     # Create the per-note directory explicitly: mkdir(parents=True) gives
     # intermediate directories the default mode (755), not 700.
     ATTACH_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1357,21 +1254,14 @@ def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "
         "size": len(data),
         "created": now_iso(),
         "sha256": hashlib.sha256(data).hexdigest(),
-        "storage": storage,
-        "sensitivity": classification["sensitivity"],
-        "classification": classification,
+        "storage": "encrypted",
+        "sensitivity": label,
         "extracted_markdown": bool(extracted_md),
     }
     if source:
         attachment_meta["source"] = source
-    if storage == "encrypted":
-        aad = f"{nid}:{att_id}:{stored_name}".encode()
-        payload = encrypt_bytes(data, aad=aad)
-        secure_write_json(out_dir / "original.json", attachment_container(stored_name, data, payload))
-    else:
-        original = out_dir / disk_name
-        original.write_bytes(data)
-        os.chmod(original, 0o600)
+    payload = encrypt_bytes(data, aad=f"{nid}:{att_id}:{stored_name}".encode())
+    secure_write_json(out_dir / "original.json", attachment_container(stored_name, data, payload))
     if extracted_md:
         write_attachment_extracted_sidecar(meta, attachment_meta, extracted_md)
     write_attachment_metadata(nid, attachment_meta)
@@ -1408,7 +1298,6 @@ def attach_file(args: argparse.Namespace) -> None:
         "storage": attachment_meta["storage"],
         "sensitivity": attachment_meta["sensitivity"],
         "extracted_markdown": attachment_meta["extracted_markdown"],
-        "classification_reasons": attachment_meta.get("classification", {}).get("reasons", []),
     }, indent=2, ensure_ascii=False)
 
 
@@ -1668,8 +1557,8 @@ def sanitized_capture_url(value: str) -> str:
 def browser_capture(args: argparse.Namespace) -> None:
     """Capture a browser artifact as a normal Kaal note and attachment.
 
-    Unlike ``medical_capture``, this follows Kaal's regular automatic storage
-    classification and does not add medical receipt metadata or lifecycle tags.
+    Unlike ``medical_capture``, this does not add medical receipt metadata or
+    lifecycle tags.
     """
     init_if_needed()
     src = Path(args.file).expanduser().resolve()
@@ -1772,12 +1661,7 @@ def browser_capture_text(args: argparse.Namespace) -> None:
 
 
 def medical_capture(args: argparse.Namespace) -> None:
-    """Create a plaintext medical-receipt inbox record from a browser capture.
-
-    Receipt handling intentionally overrides Kaal's classifier: the user has
-    chosen normal local filesystem protection for medical receipts rather than
-    application-level encryption.
-    """
+    """Create a medical-receipt inbox record from a file, encrypted like everything else."""
     init_if_needed()
     src = Path(args.file).expanduser().resolve()
     if not src.exists() or not src.is_file():
@@ -1811,12 +1695,11 @@ def medical_capture(args: argparse.Namespace) -> None:
     # afterwards, outside the vault lock (see reextract_receipt).
     defer = bool(getattr(args, "defer", False))
     with vault_capture_lock():
-        meta = create_note(title, "\n".join(body_lines), tags=["medical", "receipt", "inbox"], sensitivity="public", source=source)
+        meta = create_note(title, "\n".join(body_lines), tags=["medical", "receipt", "inbox"], source=source)
         try:
             attachment = attach_file_to_note(
                 meta,
                 src,
-                sensitivity="public",
                 extract=not defer,
                 ocr=not defer,
                 source=source,
@@ -3160,16 +3043,6 @@ def status(args: argparse.Namespace) -> None:
     }, indent=2)
 
 
-def classify_command(args: argparse.Namespace) -> None:
-    if args.file:
-        text = safe_read_text(Path(args.file).expanduser().resolve())
-        context = Path(args.file).name
-    else:
-        text = read_stdin_or_arg(None)
-        context = ""
-    emit(classify_text(text, context=context), indent=2, ensure_ascii=False)
-
-
 JOPLIN_RESOURCE_LINK_RE = re.compile(r":/([0-9a-fA-F]{32})")
 JOPLIN_PROP_RE = re.compile(r"^([A-Za-z0-9_]+):\s?(.*)$")
 
@@ -3272,7 +3145,6 @@ def load_joplin_raw_export(export_dir: Path) -> dict[str, Any]:
             if not blob:
                 unresolved += 1
                 warnings.append(f"missing resource {rid} referenced by note {note_id}")
-    likely_sensitive = sum(1 for note in notes if classify_text(note.get("body", ""), context=note.get("title", ""))["sensitivity"] == "sensitive")
     return {
         "notes": notes,
         "folders": folders,
@@ -3281,7 +3153,6 @@ def load_joplin_raw_export(export_dir: Path) -> dict[str, Any]:
         "note_tags": note_tags,
         "referenced": referenced,
         "unresolved_resources": unresolved,
-        "likely_sensitive_notes": likely_sensitive,
         "warnings": warnings,
     }
 
@@ -3386,7 +3257,6 @@ def import_joplin_raw(args: argparse.Namespace) -> None:
         "tags": len(parsed["tags"]),
         "referenced_resources": referenced_count,
         "unresolved_resources": parsed["unresolved_resources"],
-        "likely_sensitive_notes": parsed["likely_sensitive_notes"],
         "warnings": parsed["warnings"],
     }
     if incremental:

@@ -170,11 +170,11 @@ def test_a_run_that_stops_part_way_can_be_finished_later(vault, monkeypatch):
     assert call(kaal.verify_vault, deep=True)["problems"] == []
 
 
-def test_labels_survive_without_deciding_storage(vault):
-    public = call(kaal.add_note, title="Groceries", tags="", body="- milk", body_file=None, sensitivity="auto")
+def test_a_label_is_only_what_the_caller_said_and_never_decides_storage(vault):
+    plain = call(kaal.add_note, title="Groceries", tags="", body="- milk", body_file=None, sensitivity="auto")
     forced = call(kaal.add_note, title="Forced", tags="", body="SSN: 078-05-1120", body_file=None, sensitivity="public")
-    private = call(kaal.add_note, title="IDs", tags="", body="SSN: 078-05-1120", body_file=None, sensitivity="auto")
-    assert [(meta_of(item["id"])["sensitivity"], meta_of(item["id"])["storage"]) for item in (public, forced, private)] == [("public", "encrypted"), ("public", "encrypted"), ("sensitive", "encrypted")]
+    private = call(kaal.add_note, title="IDs", tags="", body="SSN: 078-05-1120", body_file=None, sensitivity="sensitive")
+    assert [(meta_of(item["id"])["sensitivity"], meta_of(item["id"])["storage"]) for item in (plain, forced, private)] == [("sensitive", "encrypted"), ("public", "encrypted"), ("sensitive", "encrypted")]
 
 
 def test_a_new_vault_keeps_titles_and_names_out_of_every_file(vault):

@@ -91,55 +91,22 @@ class KaalFeatureTests(unittest.TestCase):
 
         return FakeCrypto()
 
-    def test_classify_text_marks_ssn_as_sensitive(self):
-        result = kaal.classify_text(f"SSN: {DUMMY_SSN}\nDOB: 1970-01-01")
-        self.assertEqual(result["sensitivity"], "sensitive")
-        self.assertGreaterEqual(result["score"], kaal.SENSITIVE_THRESHOLD)
-        self.assertTrue(any("SSN" in reason for reason in result["reasons"]))
+    def test_the_label_is_what_the_caller_says_and_never_decides_storage(self):
+        self.assertEqual([kaal.sensitivity_label(asked) for asked in ("auto", None, "", "sensitive", "encrypted", "encrypt", " Sensitive ")], ["sensitive"] * 7)
+        self.assertEqual([kaal.sensitivity_label(asked) for asked in ("public", "plaintext", "plain")], ["public"] * 3)
+        for gone in ("classify_text", "decide_storage", "classify_command", "luhn_valid", "CLASSIFIER_RULES"):
+            self.assertFalse(hasattr(kaal, gone), gone)
+        # Text that looks private and text that does not are stored the same way.
+        for body, asked in ((f"SSN: {DUMMY_SSN}", "public"), ("- milk", "auto")):
+            meta = self.add_note(title="Label", body=body, sensitivity=asked)
+            self.assertEqual((meta["storage"], meta["sensitivity"]), ("encrypted", "public" if asked == "public" else "sensitive"))
+            self.assertNotIn("classification", meta)
+            self.assertFalse(kaal.plaintext_note_path(meta["id"]).exists())
 
-    def test_classify_text_marks_grocery_list_as_public(self):
-        result = kaal.classify_text("# Groceries\n\n- milk\n- eggs\n- coffee")
-        self.assertEqual(result["sensitivity"], "public")
-        self.assertEqual(result["score"], 0)
-
-    def test_classify_text_marks_valid_luhn_credit_card_as_sensitive(self):
-        result = kaal.classify_text(f"Card: {DUMMY_CC}")
-        self.assertEqual(result["sensitivity"], "sensitive")
-        self.assertTrue(any("CreditCard" in reason for reason in result["reasons"]))
-
-    def test_classify_text_marks_bank_account_and_routing_as_sensitive(self):
-        result = kaal.classify_text("Routing: 021000021\nAccount: 123456789012")
-        self.assertEqual(result["sensitivity"], "sensitive")
-        self.assertTrue(any("BankRouting" in reason for reason in result["reasons"]))
-        self.assertTrue(any("BankAccount" in reason for reason in result["reasons"]))
-
-    def test_classify_text_marks_credentials_as_sensitive(self):
-        result = kaal.classify_text("api_key = abcdefghijklmnopqrstuvwxyz")
-        self.assertEqual(result["sensitivity"], "sensitive")
-        self.assertTrue(any("Credential" in reason for reason in result["reasons"]))
-
-    def test_classify_text_uses_filename_context_for_tax_documents(self):
-        result = kaal.classify_text("ordinary looking content", context="2025 W-2.pdf")
-        self.assertEqual(result["sensitivity"], "sensitive")
-        self.assertTrue(any("TaxDocument" in reason for reason in result["reasons"]))
-
-    def test_decide_storage_keeps_the_public_label_but_always_encrypts(self):
-        storage, classification = kaal.decide_storage(f"SSN: {DUMMY_SSN}", sensitivity="public")
-        self.assertEqual(storage, "encrypted")
-        self.assertEqual(kaal.decide_storage("- milk")[0], "encrypted")
-        self.assertEqual(classification["sensitivity"], "public")
-        self.assertTrue(classification["reasons"][0], "forced public")
-
-    def test_decide_storage_respects_sensitive_override_for_public_text(self):
-        storage, classification = kaal.decide_storage("# Groceries", sensitivity="sensitive")
-        self.assertEqual(storage, "encrypted")
-        self.assertEqual(classification["sensitivity"], "sensitive")
-        self.assertTrue(classification["reasons"][0], "forced sensitive")
-
-    def test_add_auto_public_note_is_labelled_public_and_stored_encrypted(self):
+    def test_add_note_is_stored_encrypted_and_labelled_sensitive_unless_told_otherwise(self):
         meta = self.add_note(title="Groceries", tags="home", body="# Groceries\n\n- milk")
         self.assertEqual(meta["format"], "markdown")
-        self.assertEqual(meta["sensitivity"], "public")
+        self.assertEqual(meta["sensitivity"], "sensitive")
         self.assertEqual(meta["storage"], "encrypted")
         note_file = kaal.note_path(meta["id"])
         self.assertEqual(note_file.suffix, ".json")
@@ -162,17 +129,6 @@ class KaalFeatureTests(unittest.TestCase):
         meta = kaal.load_index()["notes"][0]
         self.assertEqual(meta["storage"], "encrypted")
         self.assertIn("# From file", kaal.load_note(meta)["body"])
-
-    def test_append_sensitive_text_relabels_a_public_note_as_sensitive(self):
-        with self.with_fake_crypto():
-            meta = self.add_note(title="Mixed", body="# Public start")
-            self.assertEqual((meta["sensitivity"], meta["storage"]), ("public", "encrypted"))
-            self.call_silently(kaal.append_note, SimpleNamespace(query=meta["id"], body=f"SSN: {DUMMY_SSN}"))
-        updated = kaal.load_index()["notes"][0]
-        self.assertEqual(updated["storage"], "encrypted")
-        self.assertEqual(updated["sensitivity"], "sensitive")
-        self.assertFalse(kaal.plaintext_note_path(meta["id"]).exists())
-        self.assertTrue(kaal.encrypted_note_path(meta["id"]).exists())
 
     def test_extract_text_from_txt_attachment_returns_markdown(self):
         src = self.vault / "sample.txt"
@@ -234,17 +190,16 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertTrue((att_dir / "extracted.md.json").exists())
         self.assertFalse((att_dir / "sensitive.txt").exists())
 
-    def test_attachment_to_sensitive_parent_is_encrypted_even_when_harmless(self):
+    def test_a_file_on_a_sensitive_note_carries_its_label_whatever_was_asked(self):
         with self.with_fake_crypto():
             meta = self.add_note(title="Private", body=f"SSN: {DUMMY_SSN}")
             src = self.vault / "harmless.txt"
             src.write_text("Harmless project note", encoding="utf-8")
-            self.call_silently(kaal.attach_file, SimpleNamespace(query=meta["id"], file=str(src), sensitivity="auto", extract=True, ocr=False))
+            self.call_silently(kaal.attach_file, SimpleNamespace(query=meta["id"], file=str(src), sensitivity="public", extract=True, ocr=False))
 
-        updated = kaal.load_index()["notes"][0]
-        att = updated["attachments"][0]
-        self.assertEqual(att["storage"], "encrypted")
-        self.assertTrue(any("parent note" in reason for reason in att["classification"]["reasons"]))
+        att = kaal.load_index()["notes"][0]["attachments"][0]
+        self.assertEqual((att["storage"], att["sensitivity"]), ("encrypted", "sensitive"))
+        self.assertNotIn("classification", att)
 
     def test_export_plaintext_attachment_round_trips_original_bytes(self):
         meta = self.add_note(title="Public", body="# Public")
@@ -275,7 +230,7 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(out.read_bytes(), b"resource bytes")
 
     def test_invalid_sensitivity_dies(self):
-        code, _stdout, stderr = self.assert_dies(kaal.decide_storage, "body", sensitivity="mystery")
+        code, _stdout, stderr = self.assert_dies(kaal.sensitivity_label, "mystery")
         self.assertEqual(code, 1)
         self.assertIn("sensitivity must be", stderr)
 
@@ -339,12 +294,13 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(updated["sensitivity"], "sensitive")
         self.assertIn("public follow-up", note["body"])
 
-    def test_append_public_text_to_public_note_stays_labelled_public(self):
-        meta = self.add_note(title="Public", body="# Start")
-        self.call_silently(kaal.append_note, SimpleNamespace(query=meta["id"], body="more public text"))
+    def test_append_keeps_the_label_a_note_was_given(self):
+        meta = self.add_note(title="Public", body="# Start", sensitivity="public")
+        self.call_silently(kaal.append_note, SimpleNamespace(query=meta["id"], body=f"SSN: {DUMMY_SSN}"))
         updated = kaal.load_index()["notes"][0]
         self.assertEqual((updated["storage"], updated["sensitivity"]), ("encrypted", "public"))
-        self.assertIn("more public text", kaal.load_note(updated)["body"])
+        self.assertIn(DUMMY_SSN, kaal.load_note(updated)["body"])
+        self.assertNotIn(DUMMY_SSN, kaal.encrypted_note_path(meta["id"]).read_text())
 
     def test_list_and_search_commands_emit_metadata(self):
         meta = self.add_note(title="Trip Plan", tags="travel,home", body="# Public")
@@ -487,13 +443,6 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertNotIn("keychain_key_exists", payload)
         self.assertEqual(payload["notes"], 1)
 
-    def test_classify_command_reads_file(self):
-        src = self.vault / "classify.txt"
-        src.write_text(f"SSN: {DUMMY_SSN}", encoding="utf-8")
-        _result, stdout, _stderr = self.capture_call(kaal.classify_command, SimpleNamespace(file=str(src)))
-        payload = json.loads(stdout)
-        self.assertEqual(payload["sensitivity"], "sensitive")
-
     def test_init_vault_creates_dirs_index_and_reports_fake_key(self):
         fresh = self.vault / "fresh"
         kaal.VAULT = fresh
@@ -600,7 +549,7 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["resources"], 1)
         self.assertEqual(payload["tags"], 1)
         self.assertEqual(payload["referenced_resources"], 1)
-        self.assertEqual(payload["likely_sensitive_notes"], 1)
+        self.assertNotIn("likely_sensitive_notes", payload)
         self.assertEqual(kaal.load_index()["notes"], [])
 
     def test_import_joplin_raw_dry_run_ignores_appledouble_sidecars(self):
@@ -661,7 +610,7 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["imported_notes"], 2)
         notes = kaal.load_index()["notes"]
         by_title = {n["title"]: n for n in notes}
-        self.assertEqual((by_title["Trip Plan"]["storage"], by_title["Trip Plan"]["sensitivity"]), ("encrypted", "public"))
+        self.assertEqual((by_title["Trip Plan"]["storage"], by_title["Trip Plan"]["sensitivity"]), ("encrypted", "sensitive"))
         self.assertEqual(by_title["Identity"]["storage"], "encrypted")
         self.assertEqual(by_title["Trip Plan"]["source"], {"type": "joplin", "id": "22222222222222222222222222222222"})
         self.assertIn("joplin", by_title["Trip Plan"]["tags"])
@@ -782,12 +731,12 @@ class KaalFeatureTests(unittest.TestCase):
         meta = kaal.load_index()["notes"][0]
         self.assertEqual(meta["title"], "City Clinic payment receipt")
         self.assertEqual(meta["storage"], "encrypted")
-        self.assertEqual(meta["sensitivity"], "public")
+        self.assertEqual(meta["sensitivity"], "sensitive")
         self.assertTrue({"medical", "receipt", "inbox"}.issubset(set(meta["tags"])))
         self.assertEqual(meta["source"]["url"], "https://portal.example.test/receipt/42")
         attachment = meta["attachments"][0]
         self.assertEqual(attachment["storage"], "encrypted")
-        self.assertEqual(attachment["sensitivity"], "public")
+        self.assertEqual(attachment["sensitivity"], "sensitive")
         self.assertTrue(attachment["extracted_markdown"])
         self.assertEqual(attachment["source"]["title"], "City Clinic: payment confirmed")
         self.assertIn("City Clinic: payment confirmed", kaal.load_note(meta)["body"])
@@ -1167,7 +1116,8 @@ class KaalFeatureTests(unittest.TestCase):
     def test_build_parser_parses_representative_commands(self):
         parser = kaal_cli.build_parser()
         self.assertEqual(parser.parse_args(["add", "--title", "T", "--body", "B"]).func, kaal.add_note)
-        self.assertEqual(parser.parse_args(["classify", "file.txt"]).func, kaal.classify_command)
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parser.parse_args(["classify", "file.txt"])  # the classifier is gone
         self.assertEqual(parser.parse_args(["list", "--json"]).func, kaal.list_notes)
         self.assertEqual(parser.parse_args(["search", "query"]).func, kaal.search_notes)
         self.assertEqual(parser.parse_args(["show", "query", "--full", "--json"]).func, kaal.show_note)

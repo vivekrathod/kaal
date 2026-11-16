@@ -459,7 +459,6 @@ class Commands:
 
 
 SERVER_ONLY = {"encrypt_vault": "kaal encrypt-all", "medical_evaluate": "kaal medical evaluate", "init_vault": "kaal init", "import_joplin_raw": "kaal import-joplin-raw", "import_vault": "kaal import", "backup_vault": "kaal backup"}
-LOCAL_ALWAYS = {"classify_command"}
 
 
 def _id(value: str) -> str:
@@ -472,9 +471,6 @@ def _source_form(args: Any) -> dict[str, str]:
 
 def run(remote: Remote, args: Any) -> None:
     name = getattr(args.func, "__name__", "")
-    if name in LOCAL_ALWAYS:
-        args.func(args)
-        return
     if name in SERVER_ONLY:
         core.die(f"`{SERVER_ONLY[name]}` runs on the server. Use it there, or set KAAL_LOCAL=1 to work on a local vault.")
     handler: Callable[[Any], None] | None = getattr(Commands(Api(remote)), name, None)

@@ -204,9 +204,10 @@ class RemoteCliTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("on the server", proc.stderr)
 
-    def test_classify_runs_locally(self):
-        proc = self.kaal("classify", env=self.env(KAAL_URL="https://unreachable.invalid"), stdin="SSN: 078-05-1120")
-        self.assertEqual(json.loads(proc.stdout)["sensitivity"], "sensitive")
+    def test_the_classifier_command_is_gone(self):
+        proc = self.kaal("classify", check=False, stdin="SSN: 078-05-1120")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("invalid choice", proc.stderr)
 
 
 class RemoteConfigTests(unittest.TestCase):
