@@ -10,7 +10,8 @@ const MAX_SOURCE = 400000;
 const MAX_INLINE = 20000;
 const MAX_DEPTH = 8;
 // A file inside the note: Joplin's :/<id>, or attachment:<id> for a file added in Kaal.
-const RESOURCE = /^(?::\/([0-9a-fA-F]{32})|attachment:([0-9a-fA-F]{6,32}))$/;
+// attachment:new<n> stands for a file chosen for a note that has not been saved yet.
+const RESOURCE = /^(?::\/([0-9a-fA-F]{32})|attachment:([0-9a-fA-F]{6,32}|new\d{1,4}))$/;
 const SAFE_LINK = /^(https?:\/\/|mailto:)/i;
 const ENTITIES = { "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'" };
 

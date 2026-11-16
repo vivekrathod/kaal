@@ -61,6 +61,8 @@ CASES = [
     # A file added in Kaal is referred to by its own, shorter id.
     ("![plan](attachment:a1b2c3d4e5f6) and [list.pdf](attachment:A1B2C3D4E5F6)", '<p><file label="plan" image></file> and <file label="list.pdf"></file></p>'),
     ("![gone](attachment:b1b2c3d4e5f6) [x](attachment:../../etc/passwd)", "<p>gone [x](attachment:../../etc/passwd)</p>"),
+    # A file chosen for a note not saved yet has a stand-in id; unresolved, it is just its label.
+    ("![later](attachment:new12) [bad](attachment:new) [worse](attachment:newest)", "<p>later [bad](attachment:new) [worse](attachment:newest)</p>"),
     (f'<img src=":/{MISSING}" alt="lost"> <img src="https://example.com/y.png" alt="far"> <img alt="no address">',
      f'<p>lost <a href="https://example.com/y.png" {LINK}>far</a> &lt;img alt="no address"&gt;</p>'),
 ]

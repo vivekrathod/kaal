@@ -35,7 +35,7 @@ function fileResolver(noteId, attachments, shownInText) {
         children: [{ tag: "img", attrs: { src: notePreviewUrl(noteId, file.id), alt: label || file.name || "Picture", loading: "lazy" }, children: [] }] };
     }
     return { tag: "a", attrs: isViewable(file)
-      ? { href: noteViewUrl(noteId, file.id), target: "_blank", rel: "noopener", class: "file-link" }
+      ? { href: noteViewUrl(noteId, file.id), target: "_blank", rel: "noopener", class: isPdf(file) ? "file-link pdf-link" : "file-link" }
       : { href: noteFileUrl(noteId, file.id), download: file.name || "attachment", class: "file-link" },
       children: [label || file.name || "File"] };
   };
@@ -213,7 +213,26 @@ export function noteView(container, noteId, { go, expired, session }) {
       }
     }));
 
-    const pdfs = attachments.filter(isPdf);
+    // A PDF is shown once. Linked on a line of its own, its card takes that
+    // line's place; linked inside a sentence, the link is how it is shown;
+    // not mentioned in the text at all, its card goes under the note.
+    const byAddress = new Map(attachments.filter(isPdf).map((file) => [noteViewUrl(note.id, file.id), file]));
+    const blank = (node) => node.nodeType === Node.TEXT_NODE && !node.textContent.trim();
+    for (const link of [...rendered.querySelectorAll("a.pdf-link")]) {
+      const file = byAddress.get(link.getAttribute("href"));
+      let before = link.previousSibling;
+      while (before && blank(before)) before = before.previousSibling;
+      let after = link.nextSibling;
+      while (after && blank(after)) after = after.nextSibling;
+      const aloneOnItsLine = (!before || before.nodeName === "BR") && (!after || after.nodeName === "BR") && ["P", "LI"].includes(link.parentNode.nodeName);
+      if (!file || !aloneOnItsLine) continue;
+      // The card is a block of its own, so the line breaks around it go.
+      if (before) before.remove();
+      if (after) after.remove();
+      link.replaceWith(h("div", { class: "file-cards" }, pdfCard(note.id, file)));
+    }
+
+    const pdfs = attachments.filter((file) => isPdf(file) && !shownInText.has(file.id));
     const loosePictures = attachments.filter((file) => isPicture(file) && !shownInText.has(file.id));
     const others = attachments.filter((file) => !isPdf(file) && !isPicture(file));
     const files = [
@@ -229,7 +248,7 @@ export function noteView(container, noteId, { go, expired, session }) {
         h("h1", {}, note.title || "Untitled"),
         h("p", { class: "muted" }, [when(note.updated) && `Updated ${when(note.updated)}`, ...(note.tags || []).map((tag) => `#${tag}`)].filter(Boolean).join("  "), " ", toggle),
         rendered, source,
-        files.length ? h("div", {}, h("h2", {}, attachments.length === 1 ? "File" : "Files"), files) : null,
+        files.length ? h("div", {}, h("h2", {}, pdfs.length + loosePictures.length + others.length === 1 ? "File" : "Files"), files) : null,
         trashed ? null : h("div", { class: "add-files" }, picker, h("label", { for: "add-files", class: "button small" }, "Add files")),
         status,
         trashed && !mayDelete ? h("p", { class: "hint" }, CANNOT_DELETE) : null,
@@ -252,7 +271,10 @@ export function noteEditView(container, noteId, { go, expired }) {
 
   function draw(note) {
     let attachments = note.attachments || [];
-    let waiting = [];  // files chosen for a note that does not exist yet
+    // Files chosen for a note that does not exist yet. Each has a stand-in id
+    // (new1, new2, …) that the text can refer to until the real one is known.
+    let waiting = [];
+    let chosenSoFar = 0;
 
     const title = h("input", { type: "text", id: "note-title", value: note.title || "", maxlength: "500", autocomplete: "off" });
     const tags = h("input", { type: "text", id: "note-tags", value: (note.tags || []).join(", "), placeholder: "home, taxes", autocomplete: "off", autocapitalize: "off" });
@@ -262,7 +284,14 @@ export function noteEditView(container, noteId, { go, expired }) {
     const write = h("button", { type: "button", class: "segment active" }, "Write");
     const look = h("button", { type: "button", class: "segment" }, "Preview");
     const show = (previewing) => {
-      if (previewing) replace(preview, renderMarkdown(body.value, { resource: fileResolver(noteId, attachments) }).map(fromTree));
+      if (previewing) {
+        const stored = fileResolver(noteId, attachments);
+        const resource = (key, label) => {
+          const pending = waiting.find((entry) => entry.id === key);
+          return pending ? { tag: "em", attrs: {}, children: [`${label || pending.name} (shown once the note is saved)`] } : stored(key, label);
+        };
+        replace(preview, renderMarkdown(body.value, { resource }).map(fromTree));
+      }
       preview.hidden = !previewing;
       body.hidden = previewing;
       write.className = `segment${previewing ? "" : " active"}`;
@@ -288,17 +317,22 @@ export function noteEditView(container, noteId, { go, expired }) {
     };
 
     const fileList = h("ul", { class: "plain" });
-    const later = h("p", { class: "hint", hidden: true }, "Pictures and PDFs show under the note. To place one inside the text, save first, then edit the note.");
     const drawFiles = () => {
       const rows = attachments.map((file) => h("li", { class: "line" },
         h("span", {}, file.name || "File", " ", h("span", { class: "muted-text" }, size(file.size))),
         h("button", { type: "button", class: "button small", onClick: () => insert(file) }, "Insert in text")));
-      const pending = waiting.map((file, position) => h("li", { class: "line" },
-        h("span", {}, file.name || "File", " ", h("span", { class: "muted-text" }, `${size(file.size)} · added when you save`)),
-        h("button", { type: "button", class: "button small", onClick: () => { waiting.splice(position, 1); drawFiles(); } }, "Remove")));
+      const pending = waiting.map((entry, position) => h("li", { class: "line" },
+        h("span", {}, entry.name, " ", h("span", { class: "muted-text" }, `${size(entry.file.size)} · added when you save`)),
+        h("span", { class: "row-actions" },
+          h("button", { type: "button", class: "button small", onClick: () => insert(entry) }, "Insert in text"),
+          h("button", { type: "button", class: "button small", onClick: () => {
+            waiting.splice(position, 1);
+            // Take its place in the text away with it.
+            body.value = body.value.split("\n").filter((line) => !new RegExp(`^!?\\[[^\\]]*\\]\\(attachment:${entry.id}\\)$`).test(line.trim())).join("\n");
+            drawFiles();
+          } }, "Remove"))));
       replace(fileList, rows, pending);
       fileList.hidden = !rows.length && !pending.length;
-      later.hidden = !pending.length;
     };
 
     const picker = h("input", { type: "file", id: "note-files", multiple: true, class: "visually-hidden" });
@@ -307,7 +341,7 @@ export function noteEditView(container, noteId, { go, expired }) {
       picker.value = "";
       if (!chosen.length) return;
       if (!noteId) {
-        waiting = waiting.concat(chosen);
+        waiting = waiting.concat(chosen.map((file) => ({ id: `new${++chosenSoFar}`, name: file.name || "file", file })));
         drawFiles();
         return;
       }
@@ -335,7 +369,6 @@ export function noteEditView(container, noteId, { go, expired }) {
       h("div", { class: "field" },
         h("span", { class: "label" }, "Files"),
         fileList,
-        later,
         h("div", {}, picker, h("label", { for: "note-files", class: "button small" }, "Add pictures, PDFs or other files"))),
       status,
       h("div", { class: "actions" }, save, h("a", { href: cancel, class: "button" }, "Cancel")));
@@ -353,7 +386,21 @@ export function noteEditView(container, noteId, { go, expired }) {
       try {
         const saved = noteId ? await api.updateNote(noteId, content) : await api.createNote(content);
         savedId = noteId || (saved.note || saved).id;
-        if (waiting.length) await addFiles(savedId, waiting, (message) => replace(status, notice(message)));
+        if (waiting.length) {
+          let stored = [];
+          let failure = null;
+          try {
+            stored = await addFiles(savedId, waiting.map((entry) => entry.file), (message) => replace(status, notice(message)));
+          } catch (error) {
+            stored = error.added || [];
+            failure = error;
+          }
+          // The text referred to each new file by a stand-in id; give it the real ones.
+          let text = content.body;
+          stored.forEach((file, position) => { text = text.split(`(attachment:${waiting[position].id})`).join(`(attachment:${file.id})`); });
+          if (text !== content.body) await api.updateNote(savedId, { ...content, body: text });
+          if (failure) throw failure;
+        }
         go(`note/${encodeURIComponent(savedId)}`);
       } catch (error) {
         if (error.status === 401) return expired();
