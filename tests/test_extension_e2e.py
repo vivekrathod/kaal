@@ -145,6 +145,9 @@ def test_connect_save_review_and_close_in_a_real_browser(stage):
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-2000:]
     out = json.loads(done.stdout)
 
+    # The extension holds no access to any website; the server lets its pages call the API.
+    assert out["hostAccess"] == []
+
     # Settings: refuses what is wrong, accepts what is right.
     assert out["popupUnconnected"] == "Connect to Kaal"
     assert "https://" in out["settingsBadAddress"] and "didn't accept that token" in out["settingsBadToken"]
@@ -171,3 +174,4 @@ def test_connect_save_review_and_close_in_a_real_browser(stage):
     # The site is remembered, and a PDF tab is kept as the file it is.
     assert out["rememberedSites"] == ["127.0.0.1"] and out["popupSecond"][0] == "Save receipt"
     assert out["pdf"]["stage"] == "review" and out["pdf"]["source"] == f"{stage.site}/statement.pdf" and out["pdf"]["fileName"].endswith(".pdf")
+    assert out["pdf"]["size"] == out["pdf"]["sizeOnTheSite"] > 0  # fetched through the tab, byte for byte

@@ -23,8 +23,9 @@ def manifest():
 def test_the_extension_asks_for_what_it_uses_and_nothing_from_the_old_design():
     data = manifest()
     assert data["manifest_version"] == 3
-    assert sorted(data["permissions"]) == ["alarms", "contextMenus", "debugger", "sidePanel", "storage"]
-    assert data["host_permissions"] == ["<all_urls>"]
+    assert sorted(data["permissions"]) == ["activeTab", "alarms", "contextMenus", "debugger", "sidePanel", "storage"]
+    # No access to any website: pages are read through the tab, and the server names the extension.
+    assert "host_permissions" not in data and "optional_host_permissions" not in data and "optional_permissions" not in data
     assert data["background"] == {"service_worker": "background.js", "type": "module"}
     assert data["action"]["default_popup"] == "popup.html" and data["options_ui"]["page"] == "options.html"
     assert set(data["commands"]) == {"_execute_action", "save"}
@@ -76,7 +77,7 @@ def test_every_request_the_worker_makes_is_in_the_published_api():
     spec = json.loads((ROOT / "docs" / "openapi.json").read_text())["paths"]
     worker = (EXT / "background.js").read_text()
     calls = re.findall(r"""call\("([A-Z]+)",\s*"([^"?]+)""", worker)
-    assert sorted(set(calls)) == [("GET", "/v1/medical/receipts"), ("POST", "/v1/captures"), ("POST", "/v1/captures/text"), ("POST", "/v1/medical/receipts")]
+    assert sorted(set(calls)) == [("GET", "/v1/medical/receipts"), ("GET", "/v1/medical/sources"), ("POST", "/v1/captures"), ("POST", "/v1/captures/text"), ("POST", "/v1/medical/receipts")]
     for method, path in calls:
         assert method.lower() in spec[path], (method, path)
     # Only the worker and the shared request layer talk to the server.
@@ -84,6 +85,9 @@ def test_every_request_the_worker_makes_is_in_the_published_api():
         if script.name != "background.js":
             assert "fetch(" not in script.read_text(), f"{script.name} makes requests itself"
     assert "Authorization: `Bearer ${token}`" in worker and 'credentials: "omit"' in worker
+    # The worker's only requests are to Kaal; a site's file is read through the tab, not fetched with the person's sign-in.
+    assert worker.count("fetch(") == 1 and 'credentials: "include"' not in worker
+    assert "Network.loadNetworkResource" in worker and "sender.id !== chrome.runtime.id" in worker
 
 
 def test_right_click_has_two_entries_and_the_panel_opens_with_the_click():
@@ -131,6 +135,7 @@ console.log(JSON.stringify({
   names: [lib.fileNameFor("Payment: receipt / March", "", "application/pdf"), lib.fileNameFor("", "https://a.example/files/statement%202.pdf", "application/pdf"),
           lib.fileNameFor("photo.JPG", "https://a.example/p", "image/jpeg; q=1"), lib.fileNameFor("", "https://a.example/data.csv", ""), lib.fileNameFor("", "", "")],
   told: [0, 401, 403, 413, 500].map((status) => lib.explain(status, "from the server")),
+  merged: [lib.mergeSites(["mine.example"], ["theirs.example", "mine.example", "", 7]), lib.mergeSites(undefined, ["a.example"]), lib.mergeSites(["a", "b", "c"], ["d"], 3)],
 }));
 """)
     assert out["sites"] == ["portal.example.org", "old.example.com"] and out["again"] == out["sites"] and out["ignored"] == out["sites"]
@@ -139,6 +144,7 @@ console.log(JSON.stringify({
     assert out["pdf"] == [True, False, False]
     assert out["blocked"] == [True, True, True, False, False, True]
     assert out["names"] == ["Payment receipt March.pdf", "statement 2.pdf", "photo.JPG", "data.csv", "Saved page.bin"]
+    assert out["merged"] == [["mine.example", "theirs.example"], ["a.example"], ["a", "b", "c"]]
     assert out["told"][1]["settings"] is True and "token" in out["told"][1]["message"]
     assert out["told"][4]["message"] == "from the server" and out["told"][0]["message"] == "Can't reach Kaal."
 

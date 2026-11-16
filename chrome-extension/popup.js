@@ -17,9 +17,10 @@ const element = (tag, className, text) => {
 const say = (...nodes) => status.replaceChildren(...nodes.filter(Boolean));
 
 async function currentTab() {
-  // Opened as an ordinary page (for a check or a test), the popup is told which tab it is about.
-  const named = new URLSearchParams(location.search).get("tab");
-  if (named) return chrome.tabs.get(Number(named));
+  // Opened as an ordinary page (for a check or a test), the popup is told which tab it is
+  // about. Opened from the toolbar, Chrome says which tab is in front and what it shows.
+  const named = new URLSearchParams(location.search);
+  if (named.get("tab")) return { id: Number(named.get("tab")), url: named.get("url") || "", title: named.get("title") || "" };
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   return tab;
 }
@@ -87,11 +88,11 @@ async function start() {
     if (mode === "medical") {
       // The receipt is checked in the side panel, beside the page it came from.
       const opened = openPanel(tab).catch(() => false);
-      chrome.runtime.sendMessage({ action: "save", mode, tabId: tab.id }).catch(() => {});
+      chrome.runtime.sendMessage({ action: "save", mode, tabId: tab.id, url: tab.url, title: tab.title }).catch(() => {});
       if ((await opened) !== false) window.close();
       return;
     }
-    chrome.runtime.sendMessage({ action: "save", mode, tabId: tab.id }).catch(() => {});
+    chrome.runtime.sendMessage({ action: "save", mode, tabId: tab.id, url: tab.url, title: tab.title }).catch(() => {});
   };
   primary.addEventListener("click", run(likely));
   secondary.addEventListener("click", run(other));

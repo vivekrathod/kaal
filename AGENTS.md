@@ -51,7 +51,7 @@ Receipt dates are stored as `YYYY-MM-DD` and amounts as plain decimals; `kaal me
 
 ## Chrome extension
 
-`chrome-extension/` is an unpacked Manifest V3 extension with no build step. It talks to kaal-server directly with its own device token (set on its settings page and kept in `chrome.storage.local`); there is no native helper and nothing is written to Downloads. `background.js` saves pages, `popup.js` is the one-button popup, `panel.js` is the side panel, `options.js` is the settings page, and `lib.js` holds the decisions that need no browser.
+`chrome-extension/` is an unpacked Manifest V3 extension with no build step. It talks to kaal-server directly with its own device token (set on its settings page and kept in `chrome.storage.local`); there is no native helper, nothing is written to Downloads, and it holds no access to any website: a page or file is read through Chrome's debugger on the tab being saved, and the server names the extension's origin for `/v1/` (`ExtensionCorsMiddleware`, `KAAL_EXTENSION_IDS`). `background.js` saves pages, `popup.js` is the one-button popup, `panel.js` is the side panel, `options.js` is the settings page, and `lib.js` holds the decisions that need no browser.
 
 The side panel shows the web app's own review screen. `chrome-extension/web/` holds copies of the web files it needs; edit the originals in `kaal/web/` and run `bin/sync-extension-web.py` (a test fails while they differ). In those shared files, show a picture or link to one of Kaal's files with `picture()` and `fileLink()` from `ui.js`, never a bare `/v1/...` address: the extension has no sign-in cookie and must fetch the file with its token.
 

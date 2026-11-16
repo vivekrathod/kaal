@@ -84,10 +84,12 @@ Medical receipts have their own search on the Receipts screen.
 
 Notes are written in Markdown, with a Preview switch beside the text. Pictures,
 PDFs and other files can be added while writing a note or from the note itself
-("Add files"). A file added to a new note is stored when the note is saved. In
-an existing note, "Insert in text" places a file where the cursor is, as
+("Add files"). "Insert in text" places a file where the cursor is, as
 `![name](attachment:ID)` for a picture or `[name](attachment:ID)` for anything
-else; files not placed in the text are listed under the note.
+else. That works in a new note too: its files are stored when the note is
+saved, and the text is given their ids then. A picture placed in the text shows
+there; a PDF linked on a line of its own shows there as a card with its first
+page; files not mentioned in the text are listed under the note.
 
 A picture, PDF or plain-text file can be opened in the browser
 (`GET /v1/notes/{id}/attachments/{attachment}/view`); the server checks that
@@ -99,6 +101,14 @@ offered the button. It is plain files in
 `kaal/web/` with no build step, and it only talks to the API below. The server
 tells the browser to run nothing but those files and never to show them inside
 another site.
+
+**The browser extension** calls the API from its own pages with its own token.
+A browser only allows that when the server names the page's origin, so the
+server names Kaal's extension (and nothing else) for `/v1/` addresses. No
+cookie is ever allowed across, so a signed-in browser session cannot be used
+this way. A build of the extension with a different key has a different id:
+list the allowed ids in `KAAL_EXTENSION_IDS` (comma separated), or set it to
+`none` to allow no extension.
 
 **Browsers.** A web page served from the same address signs in by sending a
 device token once to `POST /v1/session`. The server answers with a cookie that
@@ -349,6 +359,10 @@ The Chrome extension sends what you save straight to your Kaal server:
 - **Right-click** has two entries, "Save to Kaal" (a page, a link, or selected
   text) and "Save as medical receipt".
 - **The number on the icon** is how many receipts are waiting to be checked.
+- **No access to websites.** The extension reads the page or file you save
+  through the tab itself, at the moment you save, and holds no standing access
+  to any site. The sites you have saved receipts from are also learnt from the
+  server (`GET /v1/medical/sources`, host names only).
 
 Notes, totals, the Trash and settings are in the web app. Setting the extension
 up is described in [`chrome-extension/README.md`](chrome-extension/README.md).

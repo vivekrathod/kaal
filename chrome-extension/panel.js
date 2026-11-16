@@ -60,7 +60,7 @@ async function render() {
       h("div", { class: "actions" },
         state.settings
           ? h("button", { type: "button", class: "button primary", onClick: () => chrome.runtime.openOptionsPage() }, "Open settings")
-          : h("button", { type: "button", class: "button primary", onClick: () => chrome.runtime.sendMessage({ action: "save", mode: state.mode, tabId }).catch(() => {}) }, "Try again")));
+          : h("button", { type: "button", class: "button primary", onClick: () => chrome.runtime.sendMessage({ action: "save", mode: state.mode, tabId, url: state.url, title: state.title }).catch(() => {}) }, "Try again")));
     return;
   }
   if (state.stage === "saved") {

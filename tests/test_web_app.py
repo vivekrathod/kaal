@@ -122,7 +122,7 @@ def test_vault_text_is_never_written_into_the_page_as_markup():
 def test_the_editor_and_the_renderer_agree_on_how_a_note_refers_to_its_files():
     notes = (WEB / "views" / "notes.js").read_text()
     assert "](attachment:${file.id})" in notes
-    assert "attachment:([0-9a-fA-F]{6,32})" in (WEB / "markdown.js").read_text()
+    assert "attachment:([0-9a-fA-F]{6,32}|" in (WEB / "markdown.js").read_text()
     # New notes and edited ones can take files, and a note can be previewed before it is saved.
     assert "api.attachNoteFile(" in notes and "renderMarkdown(body.value" in notes
     assert '"/v1/library/notes/${id(noteId)}/attachments"'.replace('"', "`") in (WEB / "api.js").read_text()
@@ -133,6 +133,16 @@ def test_delete_for_good_is_offered_only_to_a_device_allowed_to_do_it():
         text = (WEB / "views" / name).read_text()
         assert '.includes("delete")' in text, name
         assert re.search(r"mayDelete \? twoStepButton\(\"Delete", text), name
+
+
+def test_a_new_notes_files_can_be_placed_before_saving_and_a_linked_pdf_is_shown_once():
+    notes = (WEB / "views" / "notes.js").read_text()
+    # Stand-in ids are swapped for the real ones after the files are stored.
+    assert "id: `new${++chosenSoFar}`" in notes and "(attachment:${waiting[position].id})" in notes
+    assert "new\\d{1,4}" in (WEB / "markdown.js").read_text()
+    # Cards under the note are only for PDFs the text does not mention.
+    assert 'isPdf(file) && !shownInText.has(file.id)' in notes and 'a.pdf-link' in notes
+    assert "save first, then edit the note" not in notes
 
 
 def test_search_words_travel_in_the_request_body_and_results_are_shown_as_text():

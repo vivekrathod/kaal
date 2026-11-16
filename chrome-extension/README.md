@@ -18,6 +18,9 @@ medical receipt beside the page it came from.
   text you selected) and "Save as medical receipt".
 - **The number on the icon** is how many receipts are waiting to be checked.
   The popup links to them in the web app.
+- **Receipt sites follow you.** The sites you have saved receipts from are
+  remembered by this browser and also learnt from the server, so a new browser
+  profile offers "Save receipt" first on them straight away.
 - **Keyboard:** Alt+Shift+K opens the popup, Alt+Shift+S saves the page with
   the main button's choice. Change them at `chrome://extensions/shortcuts`.
 
@@ -46,15 +49,26 @@ this computer only, readable by anything that can read the profile's files.
 
 ## What Chrome will ask for, and why
 
-- **Read and change all your data on all websites.** The extension fetches the
-  PDF or linked file you ask it to save, with your sign-in on that site, and
-  talks to your Kaal server, whose address Chrome cannot know in advance. It
-  does this only when you press save; it runs nothing in the pages you visit.
+The extension holds **no access to any website**. It asks for:
+
 - **Debugger.** Chrome gives an extension no other way to make a true PDF of a
-  page. Chrome shows a "debugging this browser" bar for the moment that takes.
+  page, and the same route fetches a PDF or linked file through the tab you
+  are looking at, so that your sign-in on that site applies. It is used only
+  for the moment a save takes, and Chrome shows a "debugging this browser" bar
+  while it does. Chrome describes this permission in broad terms ("access the
+  page debugger backend", "read and change all your data on all websites"),
+  because the debugger could do that; this extension attaches only to the tab
+  you save from, when you save.
+- **Active tab.** Chrome tells the extension which page is in front only when
+  you invoke it there: the toolbar button, a right-click entry, or the
+  keyboard shortcut.
 - **Side panel, context menus, storage, alarms.** The review panel, the two
   right-click entries, the saved address and token, and the periodic refresh of
-  the number on the icon.
+  the number on the icon and the list of receipt sites.
+
+It reaches your Kaal server because the server names this extension as allowed
+to call it (see `KAAL_EXTENSION_IDS` in the main README). The server must be
+version 0.19 or later.
 
 ## When something goes wrong
 

@@ -2366,6 +2366,27 @@ def medical_reimburse(args: argparse.Namespace) -> None:
     emit(result, ensure_ascii=False)
 
 
+def medical_sources(args: argparse.Namespace) -> None:
+    """The sites receipts were saved from, most recent first.
+
+    Only host names: no addresses, titles or receipt values. The browser
+    extension uses it to offer "Save receipt" first on those sites.
+    """
+    init_if_needed()
+    latest: dict[str, str] = {}
+    for note in load_index().get("notes", []):
+        if not is_medical_receipt(note) or note.get("trashed_at"):
+            continue
+        try:
+            parts = urlsplit((note.get("source") or {}).get("url") or "")
+        except ValueError:
+            continue
+        host = (parts.hostname or "").removeprefix("www.")
+        if parts.scheme in {"http", "https"} and host:
+            latest[host] = max(latest.get(host, ""), note.get("created", ""))
+    emit({"hosts": [host for host, _when in sorted(latest.items(), key=lambda item: item[1], reverse=True)][:200]}, indent=2, ensure_ascii=False)
+
+
 def medical_people(args: argparse.Namespace) -> None:
     """List, add or remove the family members receipts are assigned to."""
     init_if_needed()

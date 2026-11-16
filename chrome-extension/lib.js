@@ -47,6 +47,13 @@ export function rememberSite(address, receiptSites, limit = 200) {
   return host ? [host, ...known].slice(0, limit) : known;
 }
 
+// The sites this browser has saved receipts from, then any others the server knows of.
+export function mergeSites(local, server, limit = 200) {
+  const mine = (local || []).filter((site) => typeof site === "string" && site);
+  const theirs = (server || []).filter((site) => typeof site === "string" && site && !mine.includes(site));
+  return [...mine, ...theirs].slice(0, limit);
+}
+
 export function looksLikePdf(address) {
   try {
     return new URL(address).pathname.toLowerCase().endsWith(".pdf");

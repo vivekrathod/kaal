@@ -433,6 +433,9 @@ class Commands:
         else:
             _print(self.api.call("GET", "/v1/medical/providers"))
 
+    def medical_sources(self, args: Any) -> None:
+        _print(self.api.call("GET", "/v1/medical/sources"))
+
     def medical_people(self, args: Any) -> None:
         add, remove = list(getattr(args, "add", None) or []), list(getattr(args, "remove", None) or [])
         if add or remove:

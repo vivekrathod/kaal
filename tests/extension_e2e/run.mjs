@@ -52,9 +52,13 @@ step("3");
 // 3. A made-up receipt page, saved as an ordinary page from the popup.
 const receiptTab = await browser.newTab(`${SITE}/receipt.html`);
 await wait(800);
-const tabId = await sw.run(`chrome.tabs.query({ url: "${SITE}/receipt.html" }).then(t => t[0].id)`);
+// Without access to sites the extension cannot look a tab up by its address; the newest tab is the one just opened.
+const newestTab = () => sw.run("chrome.tabs.query({}).then(tabs => Math.max(...tabs.map(tab => tab.id)))");
+const popupFor = (id, address, title) => `${EXT}/popup.html?tab=${id}&url=${encodeURIComponent(address)}&title=${encodeURIComponent(title)}`;
+const tabId = await newestTab();
+out.hostAccess = await sw.run("chrome.permissions.getAll().then(all => all.origins)");
 const before = (await api("/v1/library/notes?limit=1")).meta.total;
-({ target, page } = await browser.newTab(`${EXT}/popup.html?tab=${tabId}`));
+({ target, page } = await browser.newTab(popupFor(tabId, `${SITE}/receipt.html`, "Lakeside Dental - Payment receipt")));
 await until(() => page.run("!document.getElementById('primary').hidden"), "popup buttons");
 out.popupFirst = await page.run("[document.getElementById('primary').textContent, document.getElementById('secondary').textContent]");
 await page.click("#primary");
@@ -99,15 +103,15 @@ await browser.closeTab(panel.target.id);
 
 step("6");
 // 6. The popup now offers the receipt first on this site, and a PDF tab is fetched, not printed.
-({ target, page } = await browser.newTab(`${EXT}/popup.html?tab=${tabId}`));
+({ target, page } = await browser.newTab(popupFor(tabId, `${SITE}/receipt.html`, "Lakeside Dental - Payment receipt")));
 await until(() => page.run("!document.getElementById('primary').hidden"), "popup buttons");
 out.popupSecond = await page.run("[document.getElementById('primary').textContent, document.getElementById('secondary').textContent, document.getElementById('waiting').textContent]");
 await browser.closeTab(target.id);
 const pdfTab = await browser.newTab(`${SITE}/statement.pdf`);
 await wait(1500);
-const pdfId = await sw.run(`chrome.tabs.query({ url: "${SITE}/statement.pdf" }).then(t => t[0] && t[0].id)`);
+const pdfId = await newestTab();
 if (pdfId) {
-  ({ target, page } = await browser.newTab(`${EXT}/popup.html?tab=${pdfId}`));
+  ({ target, page } = await browser.newTab(popupFor(pdfId, `${SITE}/statement.pdf`, "Made-up statement")));
   await until(() => page.run("!document.getElementById('primary').hidden"), "popup buttons");
   await page.click("#primary");
   const pdfState = await until(() => sw.run(`chrome.storage.session.get("tab:${pdfId}").then(s => { const v = s["tab:${pdfId}"]; return v && v.stage !== "saving" ? v : null; })`), "pdf save", 90000);
@@ -115,6 +119,8 @@ if (pdfId) {
   if (pdfState.noteId) {
     const detail = (await api(`/v1/medical/receipts/${pdfState.noteId}`)).result;
     out.pdf.fileName = ((detail.note.attachments || [])[0] || {}).name;
+    out.pdf.size = ((detail.note.attachments || [])[0] || {}).size;
+    out.pdf.sizeOnTheSite = (await (await fetch(`${SITE}/statement.pdf`)).arrayBuffer()).byteLength;
     out.pdf.source = (detail.note.source || {}).url;
   }
   await browser.closeTab(target.id);

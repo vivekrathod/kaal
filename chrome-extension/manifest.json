@@ -1,19 +1,17 @@
 {
   "manifest_version": 3,
   "name": "Kaal",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Save the page in front of you to your Kaal server, and check a medical receipt beside the page it came from.",
   "minimum_chrome_version": "116",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApybJtPACgI7ru7YW2AqfTwERDEMiDXk3AIvca1z04Xpf+wZdbDE/PXsxHCnSl4gz7FbR8xyd/enNDsfsGYH/55sAAugy4Nom8GLYcxbfE0ECde5W60YKjRY2Ycjmhuko5eWVrmWTb2weHYwUH/edlOmM9EFRho9nzbSVhaUZZR3vkquoIgcOwfrWT1a0eqdfmhOuKNY7EqsapwPyRZzutjsHVyQRYTlLZmbvK28rGKyUhIS57k7T/ZR/AHfENsWa6ryavTdHzZDGeCavzoMluyAloxJkkMFzpOEL+/2+wqSrtlIMbB1Uas8YcY0kg7PSoawaWWylzdxXnkPGoaVXbQIDAQAB",
   "permissions": [
+    "activeTab",
     "alarms",
     "contextMenus",
     "debugger",
     "sidePanel",
     "storage"
-  ],
-  "host_permissions": [
-    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js",

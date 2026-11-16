@@ -4,8 +4,14 @@
 // Every request to Kaal is made here or through web/api.js, with the token the
 // person pasted into the settings page. Nothing is written to Downloads and
 // no program outside the browser is involved.
+//
+// The extension has no access to websites of its own. A page is printed, and
+// a file fetched, through Chrome's debugger on the tab you are looking at,
+// for the moment a save takes; Kaal's server lets the extension's own pages
+// call it. Chrome tells the extension a tab's address only when you invoke
+// it there (the toolbar button, a right-click entry, the keyboard shortcut).
 
-import { MODES, chooseMode, rememberSite, looksLikePdf, isProtectedPage, fileNameFor, explain, stateKey } from "./lib.js";
+import { MODES, chooseMode, rememberSite, mergeSites, looksLikePdf, isProtectedPage, fileNameFor, explain, stateKey } from "./lib.js";
 
 const MENU_GENERAL = "kaal-save";
 const MENU_MEDICAL = "kaal-save-receipt";
@@ -75,69 +81,115 @@ async function refreshCount() {
   }
 }
 
-// --- turning what is in front of you into a file
-
-async function fetchFile(address, title) {
-  let response;
+// Sites receipts were saved from, as the server knows them, so that a new
+// browser profile offers "Save receipt" first on them too.
+async function refreshSites() {
   try {
-    response = await fetch(address, { credentials: "include" });
+    const known = await call("GET", "/v1/medical/sources");
+    const { receiptSites = [] } = await chrome.storage.local.get("receiptSites");
+    const merged = mergeSites(receiptSites, known.result.hosts);
+    if (merged.length !== receiptSites.length) await chrome.storage.local.set({ receiptSites: merged });
   } catch {
-    throw new Problem("Chrome couldn't read that file.", address.startsWith("file:")
-      ? "For a file on this computer, turn on “Allow access to file URLs” for Kaal on Chrome's extensions page, or add the file in Kaal's web app."
-      : "Open it in its own tab and save from there.");
+    // Not connected, or offline: the sites this browser remembers still work.
   }
-  if (!response.ok) throw new Problem(`That file couldn't be fetched (${response.status}).`, "Open it in its own tab, sign in if asked, and save from there.");
-  const blob = await response.blob();
-  if (!blob.size) throw new Problem("That file is empty.");
-  return new File([blob], fileNameFor(title, address, blob.type), { type: blob.type || "application/octet-stream" });
 }
 
-// Chrome has no other way to give an extension a true PDF of a page. The
-// "is being debugged" bar shows for the moment this takes.
-async function printPage(tab) {
-  const target = { tabId: tab.id };
+// --- turning what is in front of you into a file
+
+const FILE_HINT = "Open it in its own tab, sign in if asked, and save from there. Or download it and add it in Kaal's web app.";
+
+// One debugger session per save. Chrome has no other way to give an extension
+// a true PDF of a page, and its "is being debugged" bar shows while this lasts.
+async function withDebugger(page, work) {
+  const target = { tabId: page.id };
   try {
     await chrome.debugger.attach(target, "1.3");
   } catch {
-    throw new Problem("Chrome wouldn't let Kaal print this page.", "Close the developer tools for this tab if they are open, then try again.");
+    throw new Problem("Chrome wouldn't let Kaal read this page.", "Close the developer tools for this tab if they are open, then try again.");
   }
   try {
-    // A PDF shown in a tab is already the file wanted, whatever its address looks like.
-    try {
-      const kind = await chrome.debugger.sendCommand(target, "Runtime.evaluate", { expression: "document.contentType", returnByValue: true });
-      if (kind && kind.result && kind.result.value === "application/pdf") return null;
-    } catch {
-      // Carry on and print.
-    }
-    const printed = await chrome.debugger.sendCommand(target, "Page.printToPDF", { printBackground: true, preferCSSPageSize: true });
-    const bytes = Uint8Array.from(atob(printed.data), (character) => character.charCodeAt(0));
-    return new File([bytes], fileNameFor(tab.title, "", "application/pdf"), { type: "application/pdf" });
-  } catch {
-    throw new Problem("Chrome couldn't print this page.", "Reload the page and try again.");
+    return await work((method, params) => chrome.debugger.sendCommand(target, method, params));
   } finally {
     await chrome.debugger.detach(target).catch(() => {});
   }
 }
 
-async function pageAsFile(tab) {
-  if (isProtectedPage(tab.url)) throw new Problem("Chrome doesn't let extensions save this kind of page.", "Open the page you want to keep and try again.");
-  if (looksLikePdf(tab.url) || tab.url.startsWith("file:")) return fetchFile(tab.url, tab.title);
-  return (await printPage(tab)) || fetchFile(tab.url, tab.title);
+// The tab's own page session fetches the file, so its sign-in applies, and the
+// extension needs no access to the site.
+async function loadThroughTab(command, address, title) {
+  let resource;
+  try {
+    const { frameTree } = await command("Page.getFrameTree");
+    ({ resource } = await command("Network.loadNetworkResource", { frameId: frameTree.frame.id, url: address, options: { disableCache: false, includeCredentials: true } }));
+  } catch {
+    throw new Problem("Chrome couldn't read that file.", address.startsWith("file:") ? "Add a file from this computer in Kaal's web app." : FILE_HINT);
+  }
+  const status = (resource && resource.httpStatusCode) || 0;
+  if (!resource || !resource.success || !resource.stream || status >= 400) {
+    throw new Problem(`That file couldn't be fetched${status ? ` (${status})` : ""}.`, FILE_HINT);
+  }
+  const parts = [];
+  try {
+    for (;;) {
+      const part = await command("IO.read", { handle: resource.stream, size: 1048576 });
+      if (part.data) parts.push(part.base64Encoded ? Uint8Array.from(atob(part.data), (character) => character.charCodeAt(0)) : new TextEncoder().encode(part.data));
+      if (part.eof) break;
+    }
+  } finally {
+    await command("IO.close", { handle: resource.stream }).catch(() => {});
+  }
+  const headers = resource.headers || {};
+  const type = String(headers["content-type"] || headers["Content-Type"] || "").split(";")[0].trim();
+  const file = new File(parts, fileNameFor(title, address, type), { type: type || "application/octet-stream" });
+  if (!file.size) throw new Problem("That file is empty.");
+  return file;
 }
+
+async function printPage(command, page) {
+  try {
+    const printed = await command("Page.printToPDF", { printBackground: true, preferCSSPageSize: true });
+    const bytes = Uint8Array.from(atob(printed.data), (character) => character.charCodeAt(0));
+    return new File([bytes], fileNameFor(page.title, "", "application/pdf"), { type: "application/pdf" });
+  } catch {
+    throw new Problem("Chrome couldn't print this page.", "Reload the page and try again.");
+  }
+}
+
+// A PDF shown in a tab is already the file wanted, whatever its address looks like.
+async function showsPdf(command) {
+  try {
+    const kind = await command("Runtime.evaluate", { expression: "document.contentType", returnByValue: true });
+    return Boolean(kind && kind.result && kind.result.value === "application/pdf");
+  } catch {
+    return false;
+  }
+}
+
+function pageAsFile(page) {
+  if (isProtectedPage(page.url)) throw new Problem("Chrome doesn't let extensions save this kind of page.", "Open the page you want to keep and try again.");
+  return withDebugger(page, async (command) => (looksLikePdf(page.url) || page.url.startsWith("file:") || await showsPdf(command)
+    ? loadThroughTab(command, page.url, page.title)
+    : printPage(command, page)));
+}
+
+const linkAsFile = (page, address) => withDebugger(page, (command) => loadThroughTab(command, address, page.title));
 
 // --- saving
 
-async function save(tab, mode, { linkUrl = "", selectionText = "" } = {}) {
-  if (!tab || !tab.id) return;
-  await setState(tab.id, { stage: "saving", mode });
-  badge(tab.id, "…");
-  const source = { source_url: linkUrl || tab.url || "", source_title: tab.title || "", captured_at: new Date().toISOString() };
+// `page` is { id, url, title }: the tab a save was asked for on.
+async function save(page, mode, { linkUrl = "", selectionText = "" } = {}) {
+  if (!page || !Number.isInteger(page.id)) return;
+  const about = { mode, url: page.url || "", title: page.title || "" };   // kept so "Try again" can repeat it
+  await setState(page.id, { stage: "saving", ...about });
+  badge(page.id, "…");
+  const source = { source_url: linkUrl || page.url || "", source_title: page.title || "", captured_at: new Date().toISOString() };
   try {
+    if (!page.url) throw new Problem("Chrome didn't tell Kaal which page this is.", "Use the Kaal button in the toolbar, or right-click the page.");
     let saved;
     if (selectionText.trim() && mode === "general") {
-      saved = await call("POST", "/v1/captures/text", { json: { text: selectionText.slice(0, 100000), title: tab.title || "", ...source } });
+      saved = await call("POST", "/v1/captures/text", { json: { text: selectionText.slice(0, 100000), title: page.title || "", ...source } });
     } else {
-      const file = linkUrl ? await fetchFile(linkUrl, tab.title) : await pageAsFile(tab);
+      const file = linkUrl ? await linkAsFile(page, linkUrl) : await pageAsFile(page);
       const form = new FormData();
       form.append("file", file, file.name);
       for (const [name, value] of Object.entries(source)) form.append(name, value);
@@ -145,15 +197,15 @@ async function save(tab, mode, { linkUrl = "", selectionText = "" } = {}) {
     }
     if (mode === "medical") {
       const { receiptSites = [] } = await chrome.storage.local.get("receiptSites");
-      await chrome.storage.local.set({ receiptSites: rememberSite(tab.url, receiptSites) });
+      await chrome.storage.local.set({ receiptSites: rememberSite(page.url, receiptSites) });
     }
-    await setState(tab.id, { stage: mode === "medical" ? "review" : "saved", mode, noteId: saved.result.id });
-    badge(tab.id, "OK");
+    await setState(page.id, { stage: mode === "medical" ? "review" : "saved", ...about, noteId: saved.result.id });
+    badge(page.id, "OK");
     refreshCount();
   } catch (error) {
     const known = error instanceof Problem;
-    await setState(tab.id, { stage: "error", mode, message: known ? error.message : "Something went wrong while saving.", hint: known ? error.hint : "", settings: known && error.settings });
-    badge(tab.id, "!", false);
+    await setState(page.id, { stage: "error", ...about, message: known ? error.message : "Something went wrong while saving.", hint: known ? error.hint : "", settings: known && error.settings });
+    badge(page.id, "!", false);
   }
 }
 
@@ -173,13 +225,15 @@ function install() {
     chrome.contextMenus.create({ id: MENU_MEDICAL, title: "Save as medical receipt", contexts: ["page", "link", "action"] });
   });
   chrome.alarms.create(COUNT_ALARM, { periodInMinutes: 10 });
-  refreshCount();
+  refresh();
 }
 
+const refresh = () => Promise.all([refreshCount(), refreshSites()]);
+
 chrome.runtime.onInstalled.addListener(install);
-chrome.runtime.onStartup.addListener(refreshCount);
+chrome.runtime.onStartup.addListener(refresh);
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === COUNT_ALARM) refreshCount();
+  if (alarm.name === COUNT_ALARM) refresh();
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
@@ -196,14 +250,16 @@ chrome.commands.onCommand.addListener((command, tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove(stateKey(tabId)));
 
-chrome.runtime.onMessage.addListener((message, _sender, respond) => {
-  if (!message || typeof message !== "object") return undefined;
+chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  // Only the extension's own popup, panel and settings page are listened to.
+  if (!message || typeof message !== "object" || sender.id !== chrome.runtime.id) return undefined;
   if (message.action === "save" && MODES[message.mode] && Number.isInteger(message.tabId)) {
-    chrome.tabs.get(message.tabId).then((tab) => save(tab, message.mode)).then(() => respond({ ok: true }), () => respond({ ok: false }));
+    const page = { id: message.tabId, url: typeof message.url === "string" ? message.url : "", title: typeof message.title === "string" ? message.title : "" };
+    save(page, message.mode).then(() => respond({ ok: true }), () => respond({ ok: false }));
     return true;
   }
   if (message.action === "count") {
-    refreshCount().then(() => respond({ ok: true }));
+    refresh().then(() => respond({ ok: true }));
     return true;
   }
   if (message.action === "close-panel" && Number.isInteger(message.tabId)) {

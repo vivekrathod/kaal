@@ -219,6 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
     medical_people_parser.add_argument("--add", action="append", default=[], metavar="NAME", help="Add a family member; repeat for more")
     medical_people_parser.add_argument("--remove", action="append", default=[], metavar="NAME", help="Remove a family member; repeat for more")
     medical_people_parser.set_defaults(func=core.medical_people)
+    medical_sub.add_parser("sources", help="List the sites receipts were saved from (host names only)").set_defaults(func=core.medical_sources)
     medical_trash_parser = medical_sub.add_parser("trash", help="Move a receipt to recoverable trash")
     medical_trash_parser.add_argument("note_id")
     medical_trash_parser.set_defaults(func=core.medical_trash)

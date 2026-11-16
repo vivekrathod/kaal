@@ -57,6 +57,31 @@ class ServerConfigError(Exception):
     pass
 
 
+# The id Chrome gives Kaal's extension, which follows from the key in its manifest.
+OFFICIAL_EXTENSION_ID = "ebmkcbpcihgiaoimcpncmadadogclmld"
+CORS_METHODS = b"GET, POST, PUT, PATCH, DELETE"
+CORS_HEADERS = b"Authorization, Content-Type, Accept, X-Kaal-Request"
+
+
+def extension_origins(environ: dict[str, str] | None = None) -> tuple[str, ...]:
+    """Origins of the browser extensions allowed to call the API from their pages.
+
+    Kaal's own extension by default. KAAL_EXTENSION_IDS replaces the list (comma
+    separated ids, for a build with a different key); "none" allows no extension.
+    """
+    env = os.environ if environ is None else environ
+    raw = (env.get("KAAL_EXTENSION_IDS") or "").strip()
+    if not raw:
+        return (f"chrome-extension://{OFFICIAL_EXTENSION_ID}",)
+    if raw.lower() == "none":
+        return ()
+    ids = [item.strip() for item in raw.split(",") if item.strip()]
+    bad = [item for item in ids if not re.fullmatch(r"[a-p]{32}", item)]
+    if bad:
+        raise ServerConfigError("KAAL_EXTENSION_IDS must be Chrome extension ids (32 letters a to p), separated by commas.")
+    return tuple(f"chrome-extension://{item}" for item in ids)
+
+
 @dataclass
 class Settings:
     home: Path
@@ -73,6 +98,8 @@ class Settings:
     # Browsers only send the session cookie over HTTPS. KAAL_COOKIE_SECURE=0
     # allows plain http, for development against a non-loopback address.
     cookie_secure: bool = True
+    # Browser extensions whose pages may call the API (see ExtensionCorsMiddleware).
+    extension_origins: tuple[str, ...] = (f"chrome-extension://{OFFICIAL_EXTENSION_ID}",)
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "Settings":
@@ -90,6 +117,7 @@ class Settings:
             port=int(env.get("KAAL_PORT") or DEFAULT_PORT),
             background_extraction=(env.get("KAAL_BACKGROUND_EXTRACTION") or "1").strip() != "0",
             cookie_secure=(env.get("KAAL_COOKIE_SECURE") or "1").strip() != "0",
+            extension_origins=extension_origins(env),
         )
 
 
@@ -167,6 +195,45 @@ class RateLimiter:
 
 class _TooLarge(Exception):
     pass
+
+
+class ExtensionCorsMiddleware:
+    """Let Kaal's browser extension read the API's answers from its own pages.
+
+    A browser hides another site's answers from a page unless that site names
+    the page's origin. Only the listed extension origins are named, and only
+    for the API. Cookies are never allowed across, so a browser's signed-in
+    session cannot be used this way: every such request needs its own token.
+    """
+
+    def __init__(self, app: Any, origins: tuple[str, ...]) -> None:
+        self.app = app
+        self.origins = frozenset(origins)
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope["type"] != "http" or not scope.get("path", "").startswith("/v1/"):
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers") or [])
+        origin = headers.get(b"origin", b"").decode("latin-1")
+        if origin not in self.origins:
+            await self.app(scope, receive, send)
+            return
+        named = [(b"access-control-allow-origin", origin.encode("latin-1")), (b"vary", b"Origin"), (b"access-control-expose-headers", b"X-Kaal-Version")]
+        if scope["method"] == "OPTIONS" and b"access-control-request-method" in headers:
+            # The browser asking, before the real request, whether it may send it.
+            await send({"type": "http.response.start", "status": 204, "headers": named + [
+                (b"access-control-allow-methods", CORS_METHODS), (b"access-control-allow-headers", CORS_HEADERS),
+                (b"access-control-max-age", b"600"), (b"content-length", b"0"), (b"cache-control", b"no-store")]})
+            await send({"type": "http.response.body", "body": b""})
+            return
+
+        async def named_send(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                message = {**message, "headers": list(message.get("headers") or []) + named}
+            await send(message)
+
+        await self.app(scope, receive, named_send)
 
 
 class BodyLimitMiddleware:
@@ -507,6 +574,11 @@ def create_app(settings: Settings) -> FastAPI:
         log.info("%s %s %s %s %dms", request.method, template, response.status_code, token_name, (time.monotonic() - started) * 1000)
         return response
 
+    # Added last so that it is the outermost layer: the browser's permission
+    # check is answered without touching the vault, the log or the rate limit.
+    if settings.extension_origins:
+        app.add_middleware(ExtensionCorsMiddleware, origins=settings.extension_origins)
+
     @app.exception_handler(StarletteHTTPException)
     async def http_error(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
         return _error(exc.status_code, str(exc.detail), headers=getattr(exc, "headers", None))
@@ -799,6 +871,10 @@ def create_app(settings: Settings) -> FastAPI:
     @app.post("/v1/medical/providers/forget", tags=["medical"], dependencies=[require("write")])
     def medical_providers_forget(request: Request, body: ProviderForget):
         return _run(S(request), core.medical_providers, forget=body.forget)
+
+    @app.get("/v1/medical/sources", tags=["medical"], dependencies=[require("read", "reveal")])
+    def medical_sources(request: Request):
+        return _run(S(request), core.medical_sources)
 
     @app.get("/v1/medical/people", tags=["medical"], dependencies=[require("read", "reveal")])
     def medical_people(request: Request):
