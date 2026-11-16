@@ -32,7 +32,7 @@ process that opens the vault or reads the key. Every endpoint runs the same code
 as the local CLI, and the API is described in [`docs/openapi.json`](docs/openapi.json).
 
 ```bash
-pip install '.[server]'               # add ,extract for Docling and MarkItDown
+pip install '.[server]'
 export KAAL_HOME=/srv/kaal KAAL_VAULT=/srv/kaal/data
 export KAAL_KEY_PROVIDER=file KAAL_KEY_FILE=/etc/kaal/master.key
 kaal init                             # new vault and key, or `kaal import` an export
@@ -190,11 +190,10 @@ denial-of-service protection.
 ## Local receipt extraction and confirmation
 
 - Text/Markdown-like files can be extracted into an `extracted.md` sidecar with `--extract`.
-- PDF receipts start with `pdftotext -layout`, preserving printed columns when a PDF has a native text layer.
-- A non-empty text layer is not automatically considered adequate: medical PDF receipts use the small ordered route `pdftotext -layout` → macOS Vision OCR → Docling, stopping when explicit paid-amount and date evidence is present. A PDF attached to an ordinary note is read from its text layer, or by OCR when it has none; Docling and MarkItDown are tried only if both give nothing.
+- A PDF, whether a receipt or a file on an ordinary note, is read from its own text layer (`pdftotext -layout`, which keeps printed columns). A scan with no usable text layer is read by OCR (Tesseract), as is a photo. Nothing else is tried.
 - Kaal never guesses the paid amount or date from an unlabelled total, balance, or date-like value. Ambiguous fields stay blank for review.
 - The narrow exception is an explicitly **SALE/PAYMENT - APPROVED** card receipt with a labelled **Total Amount**: that is recorded as the completed card payment. A bare `Total` or `Total Amount` is still rejected.
-- Kaal records field provenance (`labelled-text`, `docling-structured`, `ai-grounded`, `ai-unverified`, `ai-amount-due`, `manual`, or `confirmed`). Manual corrections and confirmed values survive re-extraction.
+- Kaal records field provenance (`labelled-text`, `ai-grounded`, `ai-unverified`, `ai-amount-due`, `manual`, or `confirmed`). Manual corrections and confirmed values survive re-extraction.
 - A receipt cannot be marked reviewed until it has a paid amount and at least one receipt date (service date or payment date). Marking it reviewed confirms non-manual values currently shown in the review screen.
 
 ### Reading receipt fields with a model (optional, off by default)
@@ -209,9 +208,8 @@ KAAL_RECEIPT_AI_MODEL=haiku           # default
 KAAL_RECEIPT_AI_TIMEOUT=90            # seconds, default
 ```
 
-With this on, a receipt PDF's own text layer is used as it is (a scan with no
-text layer is read by OCR; Docling is not used), and the model is given that
-text plus an image of the first pages, or the photo itself. It runs with no
+With this on, the model is given the receipt's text (its own text layer, or OCR
+for a scan) plus an image of the first pages, or the photo itself. It runs with no
 tools, no saved session, no user or project settings and an empty working
 directory, so nothing printed on a receipt can make it do anything.
 
@@ -250,11 +248,6 @@ captured with whatever the label rules find, and the reason is recorded on it.
 `kaal status` shows whether the model is configured and its command exists.
 This sends receipt text and page images to the model's provider: see the
 threat model.
-
-Current installed support on this machine:
-
-- Tesseract: `/etc/profiles/per-user/vrathod/bin/tesseract`
-- MarkItDown: installed in `/Users/vrathod/.secure-notes/.venv`
 
 ## Commands
 

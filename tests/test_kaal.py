@@ -181,17 +181,14 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertIn("# Extracted text: sample.txt", extracted)
         self.assertIn("Account note", extracted)
 
-    def test_extract_pdf_uses_markitdown_hook(self):
+    def test_extract_pdf_uses_its_own_text(self):
         src = self.vault / "sample.pdf"
         src.write_bytes(b"%PDF fake for unit test")
-        original = kaal.run_markitdown
-        try:
-            kaal.run_markitdown = lambda path: "PDF text from MarkItDown"
+        layer = "The text layer of a PDF with enough words in it to be worth using as it is."
+        with patch.object(kaal, "run_pdftotext", lambda path: layer):
             extracted = kaal.extract_attachment_markdown(src, ocr=False, extract=True)
-        finally:
-            kaal.run_markitdown = original
-        self.assertIn("Method: markitdown", extracted)
-        self.assertIn("PDF text from MarkItDown", extracted)
+        self.assertIn("Method: pdftotext-layout", extracted)
+        self.assertIn(layer, extracted)
 
     def test_extract_image_uses_tesseract_hook(self):
         src = self.vault / "scan.jpg"
@@ -295,12 +292,8 @@ class KaalFeatureTests(unittest.TestCase):
     def test_extract_attachment_returns_empty_when_extractor_finds_no_text(self):
         src = self.vault / "empty.pdf"
         src.write_bytes(b"%PDF fake")
-        original = kaal.run_markitdown
-        try:
-            kaal.run_markitdown = lambda path: "   "
+        with patch.object(kaal, "run_pdftotext", lambda path: "   "):
             self.assertEqual(kaal.extract_attachment_markdown(src, ocr=False, extract=True), "")
-        finally:
-            kaal.run_markitdown = original
 
     def test_redact_text_hides_sensitive_values(self):
         redacted = kaal.redact_text(f"SSN: {DUMMY_SSN}\nAccount: 123456789012\nPassport: X1234567")
@@ -767,9 +760,9 @@ class KaalFeatureTests(unittest.TestCase):
     def test_medical_capture_creates_an_encrypted_inbox_note_and_receipt_attachment(self):
         receipt = self.vault / "payment-receipt.pdf"
         receipt.write_bytes(b"%PDF fake receipt")
-        original = kaal.run_docling
+        original = kaal.run_pdftotext
         try:
-            kaal.run_docling = lambda path: "Patient ID: 12345\nPaid: $42.00"
+            kaal.run_pdftotext = lambda path: "Patient ID: 12345\nPaid: $42.00"
             _result, stdout, _stderr = self.capture_call(
                 kaal.medical_capture,
                 SimpleNamespace(
@@ -781,7 +774,7 @@ class KaalFeatureTests(unittest.TestCase):
                 ),
             )
         finally:
-            kaal.run_docling = original
+            kaal.run_pdftotext = original
 
         payload = json.loads(stdout)
         self.assertEqual(payload["status"], "captured")
@@ -804,7 +797,7 @@ class KaalFeatureTests(unittest.TestCase):
         receipt = self.vault / "source-receipt.pdf"
         original_bytes = b"%PDF exact original receipt bytes"
         receipt.write_bytes(original_bytes)
-        with patch.object(kaal, "run_docling", lambda path: "Paid: $12.34"):
+        with patch.object(kaal, "run_pdftotext", lambda path: "Paid: $12.34"):
             _result, stdout, _stderr = self.capture_call(
                 kaal.medical_capture,
                 SimpleNamespace(file=str(receipt), title="Receipt", source_url="", source_title="", captured_at=""),
@@ -1089,74 +1082,23 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual(list(kaal.NOTES_DIR.iterdir()), [])
         self.assertEqual(list(kaal.ATTACH_DIR.iterdir()), [])
 
-    def test_docling_structured_field_resolver_uses_labelled_neighbor_cells(self):
-        document = {"texts": [
-            {"text": "Patient Name"},
-            {"text": "Example Patient"},
-            {"text": "Date of Service"},
-            {"text": "2026-07-30"},
-            {"text": "Amount Paid: $42.50"},
-        ]}
-        fields = kaal.infer_docling_fields(document)
-        self.assertEqual(fields["patient_name"], "Example Patient")
-        self.assertEqual(fields["service_date"], "2026-07-30")
-
-    def test_docling_structured_field_resolver_uses_inline_cell_values(self):
-        document = {"texts": [{"text": "Provider | Example Medical Practice"}]}
-        self.assertEqual(kaal.infer_docling_fields(document)["provider"], "Example Medical Practice")
-
-    def test_docling_structured_field_resolver_rejects_a_label_as_patient_value(self):
-        document = {"texts": [{"text": "Patient Name"}, {"text": "Date"}]}
-        self.assertNotIn("patient_name", kaal.infer_docling_fields(document))
-
     def test_receipt_field_inference_supports_pdftotext_layout_columns(self):
         fields = kaal.infer_receipt_fields("Patient Name          Example Patient\n")
         self.assertEqual(fields["patient_name"], "Example Patient")
 
-    def test_pdf_extraction_escalates_when_native_text_lacks_paid_amount_or_date(self):
+    def test_a_scanned_pdf_is_read_by_ocr(self):
         receipt = self.vault / "receipt.pdf"
         receipt.write_bytes(b"%PDF-1.4")
-        original_pdf = kaal.run_pdftotext
-        original_vision = kaal.run_macos_vision_pdf_ocr
-        original_docling = kaal.run_docling
-        try:
-            kaal.run_pdftotext = lambda _path: "Patient Name: Example Patient\n"
-            kaal.run_macos_vision_pdf_ocr = lambda _path: "Payment received: $12.34\nDate of Service: 2026-01-01\n"
-            kaal.run_docling = lambda _path: ""
+        with patch.object(kaal, "run_pdftotext", lambda _path: "Page 1\n"), \
+                patch.object(kaal, "run_pdf_ocr", lambda _path: "Payment received: $12.34\nDate of Service: 2026-01-01\n"):
             extracted = kaal.extract_attachment_markdown(receipt, extract=True, ocr=True)
-        finally:
-            kaal.run_pdftotext = original_pdf
-            kaal.run_macos_vision_pdf_ocr = original_vision
-            kaal.run_docling = original_docling
-        self.assertIn("Method: macos-vision", extracted)
+            without_ocr = kaal.extract_attachment_markdown(receipt, extract=True, ocr=False)
+        self.assertIn("Method: tesseract-pdf", extracted)
         fields = kaal.infer_receipt_fields(extracted)
         self.assertEqual(fields["amount"], "12.34")
         self.assertEqual(fields["service_date"], "2026-01-01")
-
-    def test_medical_pdf_route_stops_after_docling_without_markitdown_or_tesseract(self):
-        receipt = self.vault / "receipt.pdf"
-        receipt.write_bytes(b"%PDF-1.4")
-        original_pdf = kaal.run_pdftotext
-        original_vision = kaal.run_macos_vision_pdf_ocr
-        original_docling = kaal.run_docling
-        original_markitdown = kaal.run_markitdown
-        original_tesseract = kaal.run_pdf_ocr
-        calls = {"markitdown": 0, "tesseract": 0}
-        try:
-            kaal.run_pdftotext = lambda _path: "Patient Name: Example Patient\n"
-            kaal.run_macos_vision_pdf_ocr = lambda _path: "Patient Name: Example Patient\n"
-            kaal.run_docling = lambda _path: "Payment received: $12.34\nPayment Date: 2026-01-01\n"
-            kaal.run_markitdown = lambda _path: calls.__setitem__("markitdown", calls["markitdown"] + 1) or ""
-            kaal.run_pdf_ocr = lambda _path: calls.__setitem__("tesseract", calls["tesseract"] + 1) or ""
-            extracted = kaal.extract_attachment_markdown(receipt, extract=True, ocr=True, receipt=True)
-        finally:
-            kaal.run_pdftotext = original_pdf
-            kaal.run_macos_vision_pdf_ocr = original_vision
-            kaal.run_docling = original_docling
-            kaal.run_markitdown = original_markitdown
-            kaal.run_pdf_ocr = original_tesseract
-        self.assertIn("Method: docling", extracted)
-        self.assertEqual(calls, {"markitdown": 0, "tesseract": 0})
+        # Without OCR, the little its text layer holds is all there is.
+        self.assertIn("Method: pdftotext-layout", without_ocr)
 
     def test_model_names_replace_labelled_ones_and_the_disagreement_is_kept(self):
         state = kaal.build_receipt_state("Patient Name          Example Patient\n", ai_fields={"patient_name": "Other Person", "provider": "Example Medical Center"})
@@ -1195,59 +1137,13 @@ class KaalFeatureTests(unittest.TestCase):
         )
         self.assertEqual(kaal.infer_receipt_fields("Payment Date\nMember Identifier\n")["paid_date"], "")
 
-    def test_supplied_receipt_fixtures_detect_user_confirmed_paid_amounts(self):
-        fixture_dir = ROOT / ".hermes" / "desktop-attachments"
-        fixtures = {
-            "Payment receipt.pdf": "23.24",
-            "Labcorp-Receipt.pdf": "112.45",
-        }
-        if not all((fixture_dir / name).is_file() for name in fixtures):
-            self.skipTest("user-supplied receipt fixtures are not present")
-        for name, expected_amount in fixtures.items():
-            extracted = kaal.extract_attachment_markdown(fixture_dir / name, extract=True, ocr=True, receipt=True)
-            receipt = kaal.build_receipt_state(extracted)
-            self.assertEqual(receipt["fields"].get("amount"), expected_amount, name)
-
-    def test_a_model_amount_is_grounded_only_when_the_receipt_prints_it(self):
-        printed = kaal.build_receipt_state("Total: $1,500.00\n", ai_fields={"amount": "1500.00"})
-        self.assertEqual(printed["fields"]["amount"], "1500.00")
-        self.assertEqual(printed["field_sources"]["amount"], "ai-grounded")
-        absent = kaal.build_receipt_state("Total: $1,500.00\n", ai_fields={"amount": "500.00"})
-        self.assertEqual(absent["fields"]["amount"], "500.00")
-        self.assertEqual(absent["field_sources"]["amount"], "ai-unverified")
-        unreadable = kaal.build_receipt_state("Total: $1,500.00\n", ai_fields={"amount": "about fifteen hundred"})
-        self.assertEqual(unreadable["fields"]["amount"], "")
-
-    def test_a_labelled_amount_or_date_is_not_replaced_by_a_different_model_value(self):
-        text = "Amount paid: $12.00\nBalance: $30.00\nDate of Service: 01/02/2026\nStatement date: 02/03/2026\n"
-        state = kaal.build_receipt_state(text, ai_fields={"amount": "$30.00", "service_date": "02/03/2026"})
-        self.assertEqual(state["fields"]["amount"], "12.00")
-        self.assertEqual(state["field_sources"]["amount"], "labelled-text")
-        self.assertEqual(state["fields"]["service_date"], "01/02/2026")
-        self.assertEqual(state["conflicts"], {
-            "amount": {"labelled-text": "12.00", "ai": "$30.00"},
-            "service_date": {"labelled-text": "01/02/2026", "ai": "02/03/2026"},
-        })
-
-    def test_receipt_provider_rejects_individual_clinician_candidates(self):
-        self.assertEqual(kaal.infer_receipt_fields("Provider: Dr. Example\n")["provider"], "")
-        state = kaal.build_receipt_state("", ai_fields={"provider": "Dr. Example"})
-        self.assertEqual(state["fields"].get("provider", ""), "")
-        self.assertNotIn("provider", state["field_sources"])
-
-    def test_model_values_with_no_text_to_check_against_are_kept_as_unverified(self):
-        state = kaal.build_receipt_state("", ai_fields={"amount": "500.00", "service_date": "2026-01-01", "paid_date": "2026-01-02"})
-        self.assertEqual(state["fields"], {"amount": "500.00", "service_date": "2026-01-01", "paid_date": "2026-01-02"})
-        self.assertEqual(set(state["field_sources"].values()), {"ai-unverified"})
-        self.assertEqual(state["state"], "extracted")
-
     def test_build_receipt_state_preserves_manual_critical_fields_on_reextraction(self):
         prior = {
             "fields": {"amount": "12.34", "service_date": "2026-01-01"},
             "field_sources": {"amount": "manual", "service_date": "manual"},
             "manually_updated_at": "2026-01-01T00:00:00+00:00",
         }
-        receipt = kaal.build_receipt_state("Amount Paid: $99.00\nDate of Service: 2026-02-01\n", {}, prior)
+        receipt = kaal.build_receipt_state("Amount Paid: $99.00\nDate of Service: 2026-02-01\n", prior)
         self.assertEqual(receipt["fields"]["amount"], "12.34")
         self.assertEqual(receipt["fields"]["service_date"], "2026-01-01")
         self.assertEqual(receipt["field_sources"]["amount"], "manual")

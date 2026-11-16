@@ -66,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("query")
     sp.add_argument("file")
     sp.add_argument("--sensitivity", default="auto", choices=["auto", "sensitive", "public", "encrypted", "plaintext", "encrypt", "plain"], help="Classification override; default auto")
-    sp.add_argument("--extract", action="store_true", help="Extract text/Markdown when supported, e.g. text files and PDFs via MarkItDown")
+    sp.add_argument("--extract", action="store_true", help="Keep the file's text beside it: a text file as it is, a PDF's own text")
     sp.add_argument("--ocr", action="store_true", help="OCR image attachments with Tesseract when available")
     sp.set_defaults(func=core.attach_file)
 

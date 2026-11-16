@@ -18,10 +18,6 @@ server = [
   "uvicorn>=0.30",
   "python-multipart>=0.0.9",
 ]
-extract = [
-  "docling>=2",
-  "markitdown>=0.1",
-]
 dev = [
   "pytest>=8",
   "httpx2>=2",
@@ -38,7 +34,7 @@ kaal-server = "kaal.server:main"
 packages = ["kaal"]
 
 [tool.setuptools.package-data]
-kaal = ["vision_ocr.swift", "web/*", "web/*/*"]
+kaal = ["web/*", "web/*/*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "kaal.__version__" }

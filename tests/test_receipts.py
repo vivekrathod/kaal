@@ -216,7 +216,7 @@ def test_reextraction_keeps_confirmed_values_and_the_reimbursement(vault):
         "reimbursed_at": "2026-03-01",
         "reimbursement_note": "ref 7",
     }
-    fresh = kaal.build_receipt_state("Amount Paid: $99.00\nDate of Service: 02/02/2026\n", {}, prior)
+    fresh = kaal.build_receipt_state("Amount Paid: $99.00\nDate of Service: 02/02/2026\n", prior)
     assert fresh["fields"]["amount"] == "12.34"
     assert fresh["fields"]["service_date"] == "2026-01-01"
     assert fresh["field_sources"]["amount"] == "confirmed"

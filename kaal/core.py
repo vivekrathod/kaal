@@ -516,63 +516,6 @@ def safe_read_text(path: Path, limit: int = 1_000_000) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def run_markitdown(path: Path) -> str:
-    try:
-        from markitdown import MarkItDown  # type: ignore
-        result = MarkItDown().convert(str(path))
-        return getattr(result, "text_content", "") or ""
-    except Exception:
-        cli = shutil.which("markitdown")
-        if not cli:
-            return ""
-        proc = subprocess.run([cli, str(path)], text=True, capture_output=True)
-        return proc.stdout if proc.returncode == 0 else ""
-
-
-def run_docling(path: Path) -> str:
-    """Run the repository venv's Docling CLI and return its layout-aware Markdown."""
-    cli = Path(sys.executable).with_name("docling")
-    if not cli.is_file():
-        return ""
-    environment = os.environ.copy()
-    # The Hermes shell may export a different Python environment. Docling's
-    # executable must see only the Kaal venv that owns its compiled packages.
-    environment.pop("PYTHONPATH", None)
-    with tempfile.TemporaryDirectory(prefix="kaal-docling-") as td:
-        try:
-            proc = subprocess.run([str(cli), "convert", str(path), "--to", "md", "--to", "json", "--output", td, "--quiet"], text=True, capture_output=True, timeout=240, env=environment)
-        except (OSError, subprocess.TimeoutExpired):
-            return ""
-        if proc.returncode != 0:
-            return ""
-        outputs = sorted(Path(td).glob("*.md"))
-        return "\n\n".join(output.read_text(encoding="utf-8") for output in outputs)
-
-
-def run_docling_json(path: Path) -> dict[str, Any]:
-    """Return Docling's structured local document output for a PDF, if available."""
-    cli = Path(sys.executable).with_name("docling")
-    if not cli.is_file():
-        return {}
-    environment = os.environ.copy()
-    environment.pop("PYTHONPATH", None)
-    with tempfile.TemporaryDirectory(prefix="kaal-docling-json-") as td:
-        try:
-            proc = subprocess.run([str(cli), "convert", str(path), "--to", "json", "--output", td, "--quiet"], text=True, capture_output=True, timeout=240, env=environment)
-        except (OSError, subprocess.TimeoutExpired):
-            return {}
-        if proc.returncode != 0:
-            return {}
-        outputs = sorted(Path(td).glob("*.json"))
-        if len(outputs) != 1:
-            return {}
-        try:
-            data = json.loads(outputs[0].read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return data if isinstance(data, dict) else {}
-
-
 def run_tesseract(path: Path) -> str:
     tesseract = shutil.which("tesseract")
     if not tesseract:
@@ -603,26 +546,13 @@ def run_pdf_ocr(path: Path, *, max_pages: int = 10) -> str:
         return "\n\n".join(text for image in sorted(Path(td).glob("page-*.png")) if (text := run_tesseract(image)).strip())
 
 
-def run_macos_vision_pdf_ocr(path: Path) -> str:
-    """Use macOS Vision's accurate recognizer when its local framework is available."""
-    helper = Path(__file__).with_name("vision_ocr.swift")
-    swift = shutil.which("swift")
-    if sys.platform != "darwin" or not swift or not helper.exists():
-        return ""
-    try:
-        proc = subprocess.run([swift, str(helper), str(path)], text=True, capture_output=True, timeout=180)
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return proc.stdout if proc.returncode == 0 else ""
-
-
 def text_layer_is_real(text: str) -> bool:
     """Whether a PDF's own text is worth using: more than a stray header, and mostly letters and digits."""
     solid = re.sub(r"\s+", "", text or "")
     return len(solid) >= 50 and sum(char.isalnum() for char in solid) / len(solid) >= 0.5
 
 
-def receipt_pdf_text(path: Path, *, ocr: bool) -> tuple[str, str]:
+def pdf_text(path: Path, *, ocr: bool) -> tuple[str, str]:
     """Text of a PDF as (method, text).
 
     A real text layer is used as it is. Whether the label rules can find
@@ -633,10 +563,9 @@ def receipt_pdf_text(path: Path, *, ocr: bool) -> tuple[str, str]:
     if text_layer_is_real(text):
         return "pdftotext-layout", text
     if ocr:
-        for method, reader in (("macos-vision", run_macos_vision_pdf_ocr), ("tesseract-pdf", run_pdf_ocr)):
-            read = reader(path)
-            if read.strip():
-                return method, read
+        read = run_pdf_ocr(path)
+        if read.strip():
+            return "tesseract-pdf", read
     return ("pdftotext-layout", text) if text.strip() else ("", "")
 
 
@@ -652,13 +581,9 @@ def extracted_plain_text(extracted_md: str) -> str:
     return re.sub(r"```(?:text)?|# Extracted text:.*|Method:.*", "", extracted_md or "", flags=re.IGNORECASE).strip()
 
 
-def receipt_nonnegotiable_evidence_score(text: str) -> int:
-    """Score only explicit paid-amount and date evidence from one extractor."""
-    fields = infer_receipt_fields(text)
-    return int(bool(fields.get("amount"))) + int(bool(fields.get("service_date") or fields.get("paid_date")))
-
-
-def extract_attachment_markdown(path: Path, *, ocr: bool = False, extract: bool = True, receipt: bool = False) -> str:
+def extract_attachment_markdown(path: Path, *, ocr: bool = False, extract: bool = True) -> str:
+    """The text of a file as an ``extracted.md`` sidecar: a text file as it is, a
+    PDF's own text or OCR when it is a scan, and OCR for a picture."""
     if not extract and not ocr:
         return ""
     suffix = path.suffix.lower()
@@ -667,38 +592,8 @@ def extract_attachment_markdown(path: Path, *, ocr: bool = False, extract: bool 
     if extract and suffix in TEXT_ATTACHMENT_SUFFIXES:
         text = safe_read_text(path)
         method = "text"
-    elif extract and suffix in PDF_ATTACHMENT_SUFFIXES and (not receipt or receipt_ai_enabled()):
-        # A PDF's text is its own text layer, or OCR when it is a scan. That is
-        # all an ordinary attachment needs, and all a receipt needs when a
-        # model reads its fields. The slow converters run only when both come
-        # back empty.
-        method, text = receipt_pdf_text(path, ocr=ocr)
-        if not text.strip() and not receipt:
-            for fallback, reader in (("docling", run_docling), ("markitdown", run_markitdown)):
-                text = reader(path)
-                if text.strip():
-                    method = fallback
-                    break
     elif extract and suffix in PDF_ATTACHMENT_SUFFIXES:
-        # A receipt read by the label rules alone: hunt for a rendering in
-        # which the rules can find a paid amount and a date.
-        candidates = [("pdftotext-layout", run_pdftotext(path))]
-        # A non-empty native PDF text layer is not enough if it lacks one of the
-        # fields the user must verify. For PDFs, macOS Vision is the one local
-        # layout-aware retry. Only if both fast sources remain insufficient do
-        # we pay for the legacy conversion fallbacks.
-        if receipt_nonnegotiable_evidence_score(candidates[0][1]) < 2:
-            if ocr:
-                candidates.append(("macos-vision", run_macos_vision_pdf_ocr(path)))
-            best_local_score = max(receipt_nonnegotiable_evidence_score(candidate_text) for _candidate_method, candidate_text in candidates)
-            if best_local_score < 2:
-                candidates.append(("docling", run_docling(path)))
-        candidates = [(candidate_method, candidate_text) for candidate_method, candidate_text in candidates if candidate_text.strip()]
-        if candidates:
-            method, text = max(
-                enumerate(candidates),
-                key=lambda item: (receipt_nonnegotiable_evidence_score(item[1][1]), -item[0]),
-            )[1]
+        method, text = pdf_text(path, ocr=ocr)
     elif ocr and suffix in IMAGE_ATTACHMENT_SUFFIXES:
         text = run_tesseract(path)
         method = "tesseract"
@@ -1276,7 +1171,7 @@ def library_attach(args: argparse.Namespace) -> None:
     with vault_capture_lock():
         index = load_index()
         meta = library_note_meta(index, args.note_id, allow_trashed=False)
-        attachment = attach_file_to_note(meta, src, sensitivity="auto", extract=True, ocr=True, receipt=False)
+        attachment = attach_file_to_note(meta, src, sensitivity="auto", extract=True, ocr=True)
     emit({"status": "attached", "id": meta["id"], "attachment": library_attachment_summary(attachment)}, ensure_ascii=False)
 
 
@@ -1443,13 +1338,13 @@ def safe_attachment_filename(name: str, att_id: str, *, max_bytes: int = 180) ->
     return f"{out or 'attachment'}-{digest}{suffix}"
 
 
-def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "auto", extract: bool = False, ocr: bool = False, attachment_name: str | None = None, source: dict[str, Any] | None = None, receipt: bool = False) -> dict[str, Any]:
+def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "auto", extract: bool = False, ocr: bool = False, attachment_name: str | None = None, source: dict[str, Any] | None = None) -> dict[str, Any]:
     data = src.read_bytes()
     stored_name = attachment_name or src.name
     nid = meta["id"]
     att_id = secrets.token_hex(6)
     disk_name = safe_attachment_filename(stored_name, att_id)
-    extracted_md = extract_attachment_markdown(src, ocr=ocr, extract=extract, receipt=receipt)
+    extracted_md = extract_attachment_markdown(src, ocr=ocr, extract=extract)
     storage, classification = decide_storage(extracted_md, sensitivity=sensitivity, context=f"{stored_name}\n{meta.get('title','')}")
     # Attachments of a note labelled sensitive carry the same label.
     if meta.get("sensitivity") == "sensitive":
@@ -1485,16 +1380,6 @@ def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "
         os.chmod(original, 0o600)
     if extracted_md:
         write_attachment_extracted_sidecar(meta, attachment_meta, extracted_md)
-    if extracted_md and src.suffix.lower() in PDF_ATTACHMENT_SUFFIXES and "Method: docling" in extracted_md:
-        docling_json = run_docling_json(src)
-        if docling_json:
-            payload = json.dumps(docling_json, ensure_ascii=False).encode("utf-8")
-            if storage == "encrypted":
-                secure_write_json(out_dir / "docling.json.enc", {"encrypted": encrypt_bytes(payload, aad=f"{nid}:{att_id}:docling.json".encode())})
-            else:
-                (out_dir / "docling.json").write_bytes(payload)
-                os.chmod(out_dir / "docling.json", 0o600)
-            attachment_meta["docling_json"] = True
     write_attachment_metadata(nid, attachment_meta)
     index = load_index()
     for n in index.get("notes", []):
@@ -1603,42 +1488,30 @@ def ocr_attachments(args: argparse.Namespace) -> None:
                 continue
             is_medical_receipt = "medical" in note.get("tags", []) and "receipt" in note.get("tags", [])
             try:
-                docling_json: dict[str, Any] = {}
                 with tempfile.TemporaryDirectory(prefix="kaal-ocr-") as td:
                     os.chmod(td, 0o700)
                     tmp = Path(td) / (att.get("stored_name") or att.get("name") or f"attachment-{att['id']}")
                     tmp.write_bytes(attachment_original_bytes(note, att))
                     os.chmod(tmp, 0o600)
-                    extracted_md = extract_attachment_markdown(tmp, ocr=ocr, extract=extract, receipt=is_medical_receipt)
-                    if extracted_md and tmp.suffix.lower() in PDF_ATTACHMENT_SUFFIXES and "Method: docling" in extracted_md:
-                        docling_json = run_docling_json(tmp)
+                    extracted_md = extract_attachment_markdown(tmp, ocr=ocr, extract=extract)
                     ai_fields, ai_info = receipt_ai_candidates(tmp, extracted_md) if is_medical_receipt else ({}, {})
                 if extracted_md:
                     write_attachment_extracted_sidecar(note, att, extracted_md)
                     att["extracted_markdown"] = True
                     att["extracted_at"] = now_iso()
                     extracted += 1
-                    if docling_json:
-                        out_dir = attachment_note_dir(note["id"]) / att["id"]
-                        payload = json.dumps(docling_json, ensure_ascii=False).encode("utf-8")
-                        if att.get("storage") == "encrypted":
-                            secure_write_json(out_dir / "docling.json.enc", {"encrypted": encrypt_bytes(payload, aad=f"{note['id']}:{att['id']}:docling.json".encode())})
-                        else:
-                            (out_dir / "docling.json").write_bytes(payload)
-                            os.chmod(out_dir / "docling.json", 0o600)
-                        att["docling_json"] = True
                 else:
                     att["extracted_markdown"] = False
                     att["extraction_attempted_at"] = now_iso()
                     no_text += 1
                 if "medical" in note.get("tags", []) and "receipt" in note.get("tags", []):
                     prior_receipt = note.get("receipt", {})
-                    note["receipt"] = build_receipt_state(extracted_md, docling_json, prior_receipt, ai_fields=ai_fields, ai_info=ai_info)
+                    note["receipt"] = build_receipt_state(extracted_md, prior_receipt, ai_fields=ai_fields, ai_info=ai_info)
                 write_attachment_metadata(note["id"], att)
             except Exception as e:
                 if "medical" in note.get("tags", []) and "receipt" in note.get("tags", []):
                     # A failed re-extraction must not cost the user what they typed or confirmed.
-                    failed = build_receipt_state("", {}, note.get("receipt", {}))
+                    failed = build_receipt_state("", note.get("receipt", {}))
                     failed["state"], failed["error"] = "error", str(e)[:500]
                     note["receipt"] = failed
                 errors.append({"note_id": note.get("id", ""), "attachment_id": att.get("id", ""), "name": att.get("name", ""), "error": str(e)})
@@ -1708,47 +1581,6 @@ def infer_receipt_fields(extracted_text: str) -> dict[str, str]:
     return fields
 
 
-def infer_docling_fields(document: dict[str, Any]) -> dict[str, str]:
-    """Resolve labelled Docling text cells while preserving conservative defaults."""
-    entries = [str(item.get("text", "")).strip() for item in document.get("texts", []) if isinstance(item, dict) and str(item.get("text", "")).strip()]
-    result: dict[str, str] = {}
-    labels = {
-        "patient_name": r"\b(?:patient|member)\s*(?:name)?\b",
-        "provider": r"\b(?:provider|facility|practice)\s*(?:name)?\b",
-        "service_date": r"\b(?:date\s+of\s+service|service\s+date|visit\s+date)\b",
-        "paid_date": r"\b(?:payment\s+date|date\s+paid|paid\s+on)\b",
-        "insurer": r"\b(?:insurance|insurer|plan)\s*(?:name)?\b",
-    }
-    generic_labels = {"date", "patient", "patient name", "member", "member name", "provider", "service date", "date of service", "payment date", "amount", "amount paid", "total", "total paid"}
-
-    def plausible_value(field: str, value: str) -> bool:
-        normalized = re.sub(r"\s+", " ", value).strip()
-        if not normalized or normalized.casefold() in generic_labels:
-            return False
-        if field == "patient_name":
-            words = re.findall(r"[A-Za-z][A-Za-z'’-]*", normalized)
-            return len(words) >= 2
-        if field == "provider" and re.match(r"(?:dr\.?|doctor)\s+", normalized, flags=re.IGNORECASE):
-            return False
-        return True
-
-    for index, entry in enumerate(entries):
-        normalized = re.sub(r"\s+", " ", entry).strip()
-        for field, pattern in labels.items():
-            if field in result or not re.search(pattern, normalized, flags=re.IGNORECASE):
-                continue
-            inline = re.split(r"[:|]\s*", normalized, maxsplit=1)
-            if len(inline) == 2 and plausible_value(field, inline[1]):
-                result[field] = inline[1].strip()[:200]
-                continue
-            for candidate in entries[index + 1:index + 4]:
-                candidate = re.sub(r"\s+", " ", candidate).strip()
-                if plausible_value(field, candidate) and not any(re.match(other, candidate, flags=re.IGNORECASE) for other in labels.values()):
-                    result[field] = candidate[:200]
-                    break
-    return result
-
-
 def receipt_extraction_state(extracted_text: str = "", error: str = "") -> dict[str, Any]:
     """Candidates from the label rules alone: explicit receipt evidence, never semantic guesses."""
     fields = infer_receipt_fields(extracted_text) if extracted_text else {}
@@ -1773,7 +1605,7 @@ def receipt_ai_candidates(path: Path, extracted_md: str) -> tuple[dict[str, str]
         return {}, {"backend": os.environ.get("KAAL_RECEIPT_AI", "") or "off", "error": error.kind}
 
 
-def build_receipt_state(extracted_text: str, docling_json: dict[str, Any] | None = None, prior_receipt: dict[str, Any] | None = None, *, ai_fields: dict[str, str] | None = None, ai_info: dict[str, str] | None = None) -> dict[str, Any]:
+def build_receipt_state(extracted_text: str, prior_receipt: dict[str, Any] | None = None, *, ai_fields: dict[str, str] | None = None, ai_info: dict[str, str] | None = None) -> dict[str, Any]:
     """Use one conservative field path for capture and re-extraction.
 
     Text/layout candidates are suggestions. Only values a person typed or
@@ -1781,10 +1613,6 @@ def build_receipt_state(extracted_text: str, docling_json: dict[str, Any] | None
     durable fact. Reimbursement is the user's record and always survives.
     """
     receipt = receipt_extraction_state(extracted_text)
-    for field, value in infer_docling_fields(docling_json or {}).items():
-        if value and not receipt["fields"].get(field):
-            receipt["fields"][field] = value
-            receipt["field_sources"][field] = "docling-structured"
     if ai_fields:
         if receipt["state"] == "no_text":
             receipt["state"] = "extracted"
@@ -1883,7 +1711,6 @@ def browser_capture(args: argparse.Namespace) -> None:
                 extract=True,
                 ocr=True,
                 source=source,
-                receipt=False,
             )
         except Exception:
             # Keep the browser source intact and avoid an empty generic note if
@@ -1999,7 +1826,6 @@ def medical_capture(args: argparse.Namespace) -> None:
                 extract=not defer,
                 ocr=not defer,
                 source=source,
-                receipt=True,
             )
         except Exception:
             # Do not leave an empty inbox entry if copying or extracting the
@@ -2017,12 +1843,11 @@ def medical_capture(args: argparse.Namespace) -> None:
         index = load_index()
         saved = medical_receipt_meta(index, meta["id"])
         extracted_text = read_attachment_extracted_sidecar(meta, attachment)
-        docling_json = read_attachment_docling_sidecar(meta, attachment)
         if defer:
             saved["receipt"] = {"state": receipts.STATE_PENDING, "attempted_at": now_iso(), "fields": {}, "field_sources": {}}
         else:
             ai_fields, ai_info = receipt_ai_candidates(src, extracted_text)
-            saved["receipt"] = build_receipt_state(extracted_text, docling_json, ai_fields=ai_fields, ai_info=ai_info)
+            saved["receipt"] = build_receipt_state(extracted_text, ai_fields=ai_fields, ai_info=ai_info)
         saved["updated"] = now_iso()
         save_index(index)
     emit({
@@ -2057,7 +1882,7 @@ def reextract_receipt(note_id: str, outer_lock: Any = None) -> str:
     """
     note = next((item for item in load_index().get("notes", []) if item.get("id") == note_id and is_medical_receipt(item)), None)
     attachment = (note.get("attachments") or [None])[0] if note else None
-    extracted_md, docling_json, ai_fields, ai_info, failure = "", {}, {}, {}, ""
+    extracted_md, ai_fields, ai_info, failure = "", {}, {}, ""
     if note is not None and attachment is not None:
         try:
             with tempfile.TemporaryDirectory(prefix="kaal-receipt-") as directory:
@@ -2065,9 +1890,7 @@ def reextract_receipt(note_id: str, outer_lock: Any = None) -> str:
                 copy = Path(directory) / (attachment.get("stored_name") or attachment.get("name") or f"attachment-{attachment['id']}")
                 copy.write_bytes(attachment_original_bytes(note, attachment))
                 os.chmod(copy, 0o600)
-                extracted_md = extract_attachment_markdown(copy, ocr=True, extract=True, receipt=True)
-                if extracted_md and copy.suffix.lower() in PDF_ATTACHMENT_SUFFIXES and "Method: docling" in extracted_md:
-                    docling_json = run_docling_json(copy)
+                extracted_md = extract_attachment_markdown(copy, ocr=True, extract=True)
                 ai_fields, ai_info = receipt_ai_candidates(copy, extracted_md)
         except (Exception, KaalError) as error:
             failure = type(error).__name__
@@ -2080,7 +1903,7 @@ def reextract_receipt(note_id: str, outer_lock: Any = None) -> str:
         prior = current.get("receipt", {})
         if stored is None or failure:
             # Keep whatever a person typed or confirmed; only the automatic part failed.
-            failed = build_receipt_state("", {}, prior)
+            failed = build_receipt_state("", prior)
             failed["state"], failed["error"] = "error", failure or "the receipt has no stored original"
             current["receipt"] = failed
         else:
@@ -2088,20 +1911,11 @@ def reextract_receipt(note_id: str, outer_lock: Any = None) -> str:
                 write_attachment_extracted_sidecar(current, stored, extracted_md)
                 stored["extracted_markdown"] = True
                 stored["extracted_at"] = now_iso()
-                if docling_json:
-                    out_dir = attachment_note_dir(current["id"]) / stored["id"]
-                    payload = json.dumps(docling_json, ensure_ascii=False).encode("utf-8")
-                    if stored.get("storage") == "encrypted":
-                        secure_write_json(out_dir / "docling.json.enc", {"encrypted": encrypt_bytes(payload, aad=f"{current['id']}:{stored['id']}:docling.json".encode())})
-                    else:
-                        (out_dir / "docling.json").write_bytes(payload)
-                        os.chmod(out_dir / "docling.json", 0o600)
-                    stored["docling_json"] = True
             else:
                 stored["extracted_markdown"] = False
                 stored["extraction_attempted_at"] = now_iso()
             write_attachment_metadata(current["id"], stored)
-            current["receipt"] = build_receipt_state(extracted_md, docling_json, prior, ai_fields=ai_fields, ai_info=ai_info)
+            current["receipt"] = build_receipt_state(extracted_md, prior, ai_fields=ai_fields, ai_info=ai_info)
         current["updated"] = now_iso()
         save_index(index)
     return "error" if stored is None or failure else "done"
@@ -2525,12 +2339,9 @@ def extract_receipt_fields(path: Path) -> tuple[dict[str, str], str]:
     Returns the normalised candidate fields and the name of the text method
     that was used. Nothing is stored.
     """
-    extracted = extract_attachment_markdown(path, ocr=True, extract=True, receipt=True)
-    docling_json: dict[str, Any] = {}
-    if extracted and path.suffix.lower() in PDF_ATTACHMENT_SUFFIXES and "Method: docling" in extracted:
-        docling_json = run_docling_json(path)
+    extracted = extract_attachment_markdown(path, ocr=True, extract=True)
     ai_fields, ai_info = receipt_ai_candidates(path, extracted)
-    receipt = build_receipt_state(extracted, docling_json, ai_fields=ai_fields, ai_info=ai_info)
+    receipt = build_receipt_state(extracted, ai_fields=ai_fields, ai_info=ai_info)
     receipts.upgrade(receipt, reviewed=False, people=[], provider_names=medical_provider_names(load_index()))
     method = re.search(r"^Method: (.+)$", extracted, flags=re.MULTILINE)
     return receipt["fields"], method.group(1).strip() if method else "none"
