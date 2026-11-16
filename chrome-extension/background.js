@@ -1,291 +1,217 @@
-const HOST_NAME = "com.kaal.receipt_capture";
-const STAGING_DIRECTORY = "Kaal Capture/";
-const GENERAL_CAPTURE_MENU = "kaal-capture-current-item";
-const MEDICAL_CAPTURE_MENU = "kaal-capture-current-receipt";
-const GENERAL_LINK_MENU = "kaal-capture-linked-item";
-const MEDICAL_LINK_MENU = "kaal-capture-linked-receipt";
-const GENERAL_SELECTION_MENU = "kaal-capture-selected-text";
-const INBOX_MENU = "kaal-open-dashboard";
+// The extension's worker: turns the page in front of you into a file, sends it
+// to Kaal, and tells the popup and side panel how that went.
+//
+// Every request to Kaal is made here or through web/api.js, with the token the
+// person pasted into the settings page. Nothing is written to Downloads and
+// no program outside the browser is involved.
 
-const CAPTURE_MODES = Object.freeze({
-  general: Object.freeze({
-    hostAction: "capture-general",
-    hostLocalAction: "capture-general-local-file",
-    stagingPrefix: "item",
-    statusLabel: "Saved to Kaal",
-  }),
-  medical: Object.freeze({
-    hostAction: "capture",
-    hostLocalAction: "capture-local-file",
-    stagingPrefix: "receipt",
-    statusLabel: "Saved as medical receipt",
-  }),
-});
+import { MODES, chooseMode, rememberSite, looksLikePdf, isProtectedPage, fileNameFor, explain, stateKey } from "./lib.js";
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({
-      id: GENERAL_CAPTURE_MENU,
-      title: "Save this page to Kaal",
-      contexts: ["page", "action"],
-    });
-    chrome.contextMenus.create({
-      id: MEDICAL_CAPTURE_MENU,
-      title: "Save this page as medical receipt",
-      contexts: ["page", "action"],
-    });
-    chrome.contextMenus.create({
-      id: GENERAL_LINK_MENU,
-      title: "Save linked item to Kaal",
-      contexts: ["link"],
-    });
-    chrome.contextMenus.create({
-      id: MEDICAL_LINK_MENU,
-      title: "Save linked item as medical receipt",
-      contexts: ["link"],
-    });
-    chrome.contextMenus.create({
-      id: GENERAL_SELECTION_MENU,
-      title: "Save selected text to Kaal",
-      contexts: ["selection"],
-    });
-    chrome.contextMenus.create({
-      id: INBOX_MENU,
-      title: "Open Kaal dashboard",
-      contexts: ["page", "action"],
-    });
-  });
-});
+const MENU_GENERAL = "kaal-save";
+const MENU_MEDICAL = "kaal-save-receipt";
+const COUNT_ALARM = "kaal-count";
 
-function timestampForFilename() {
-  return new Date().toISOString().replace(/[:.]/g, "-");
-}
-
-function cleanFilenamePart(value) {
-  return (value || "receipt")
-    .replace(/[^a-z0-9._ -]+/gi, " ")
-    .trim()
-    .slice(0, 60) || "receipt";
-}
-
-function stagingFilename(title, mode, extension = "pdf") {
-  return `${STAGING_DIRECTORY}${mode.stagingPrefix}-${timestampForFilename()}-${cleanFilenamePart(title)}.${extension}`;
-}
-
-function extensionFromUrl(url, fallback = "bin") {
-  try {
-    const extension = new URL(url).pathname.split(".").pop().toLowerCase();
-    return /^[a-z0-9]{1,16}$/.test(extension) ? extension : fallback;
-  } catch {
-    return fallback;
+class Problem extends Error {
+  constructor(message, hint = "", settings = false) {
+    super(message);
+    this.hint = hint;
+    this.settings = settings;
   }
 }
 
-function setResult(tabId, status, detail = "") {
-  chrome.action.setBadgeBackgroundColor({ tabId, color: status === "OK" ? "#188038" : "#b3261e" });
-  chrome.action.setBadgeText({ tabId, text: status });
-  chrome.action.setTitle({ tabId, title: detail || (status === "OK" ? "Saved to Kaal — right-click the icon to open the receipt inbox" : "Kaal capture failed") });
+// --- talking to Kaal
+
+async function connection() {
+  const { server = "", token = "" } = await chrome.storage.local.get(["server", "token"]);
+  return { server, token };
 }
 
-function sendNative(payload) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendNativeMessage(HOST_NAME, payload, (response) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      if (!response?.ok) {
-        reject(new Error(response?.error || "Kaal rejected the capture"));
-        return;
-      }
-      resolve(response);
-    });
-  });
-}
-
-async function waitForDownload(downloadId) {
-  // A small data-URL PDF can complete before downloads.download() resolves.
-  // Check first so we do not wait forever for an already-fired onChanged event.
-  const [initial] = await chrome.downloads.search({ id: downloadId });
-  if (initial?.state === "complete") return;
-  if (initial?.state === "interrupted") throw new Error("Chrome interrupted the receipt download");
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      chrome.downloads.onChanged.removeListener(listener);
-      reject(new Error("Timed out waiting for Chrome to finish the receipt download"));
-    }, 120_000);
-    function listener(delta) {
-      if (delta.id !== downloadId || !delta.state) return;
-      if (delta.state.current === "complete") {
-        clearTimeout(timeout);
-        chrome.downloads.onChanged.removeListener(listener);
-        resolve();
-      } else if (delta.state.current === "interrupted") {
-        clearTimeout(timeout);
-        chrome.downloads.onChanged.removeListener(listener);
-        reject(new Error("Chrome interrupted the receipt download"));
-      }
-    }
-    chrome.downloads.onChanged.addListener(listener);
-  });
-}
-
-async function downloadedPath(downloadId) {
-  await waitForDownload(downloadId);
-  const [item] = await chrome.downloads.search({ id: downloadId });
-  if (!item?.filename) throw new Error("Chrome did not report a saved receipt path");
-  return item.filename;
-}
-
-async function downloadUrl(url, title, mode) {
-  const downloadId = await chrome.downloads.download({
-    url,
-    filename: stagingFilename(title, mode, mode === CAPTURE_MODES.medical ? "pdf" : extensionFromUrl(url)),
-    conflictAction: "uniquify",
-    saveAs: false,
-  });
-  return downloadedPath(downloadId);
-}
-
-async function printPageToPdf(tab, mode) {
-  const target = { tabId: tab.id };
-  await chrome.debugger.attach(target, "1.3");
+async function call(method, path, { json, form } = {}) {
+  const { server, token } = await connection();
+  if (!server || !token) throw new Problem("Kaal isn't connected yet.", "Open the extension's settings and enter Kaal's address and a token.", true);
+  const headers = { Authorization: `Bearer ${token}`, Accept: "application/json" };
+  if (json !== undefined) headers["Content-Type"] = "application/json";
+  let response;
   try {
-    const result = await chrome.debugger.sendCommand(target, "Page.printToPDF", {
-      printBackground: true,
-      preferCSSPageSize: true,
-    });
-    const dataUrl = `data:application/pdf;base64,${result.data}`;
-    const downloadId = await chrome.downloads.download({
-      url: dataUrl,
-      filename: stagingFilename(tab.title, mode),
-      conflictAction: "uniquify",
-      saveAs: false,
-    });
-    return downloadedPath(downloadId);
+    response = await fetch(server + path, { method, headers, body: json !== undefined ? JSON.stringify(json) : form, credentials: "omit" });
+  } catch {
+    const told = explain(0);
+    throw new Problem(told.message, told.hint);
+  }
+  let data = null;
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
+  if (!response.ok) {
+    const told = explain(response.status, data && data.error);
+    throw new Problem(told.message, told.hint, Boolean(told.settings));
+  }
+  return data;
+}
+
+// --- what the popup and the side panel are told
+
+async function setState(tabId, state) {
+  await chrome.storage.session.set({ [stateKey(tabId)]: { ...state, at: Date.now() } });
+}
+
+function badge(tabId, text, good = true) {
+  chrome.action.setBadgeBackgroundColor({ tabId, color: good ? "#1f5f55" : "#a3271f" });
+  chrome.action.setBadgeText({ tabId, text });
+}
+
+// The number on the icon: receipts waiting to be checked.
+async function refreshCount() {
+  try {
+    const waiting = await call("GET", "/v1/medical/receipts?inbox=true&limit=1");
+    const total = (waiting.meta || {}).total || 0;
+    await chrome.storage.session.set({ waiting: total });
+    chrome.action.setBadgeBackgroundColor({ color: "#1f5f55" });
+    chrome.action.setBadgeText({ text: total ? String(Math.min(total, 99)) : "" });
+  } catch {
+    chrome.action.setBadgeText({ text: "" });
+  }
+}
+
+// --- turning what is in front of you into a file
+
+async function fetchFile(address, title) {
+  let response;
+  try {
+    response = await fetch(address, { credentials: "include" });
+  } catch {
+    throw new Problem("Chrome couldn't read that file.", address.startsWith("file:")
+      ? "For a file on this computer, turn on “Allow access to file URLs” for Kaal on Chrome's extensions page, or add the file in Kaal's web app."
+      : "Open it in its own tab and save from there.");
+  }
+  if (!response.ok) throw new Problem(`That file couldn't be fetched (${response.status}).`, "Open it in its own tab, sign in if asked, and save from there.");
+  const blob = await response.blob();
+  if (!blob.size) throw new Problem("That file is empty.");
+  return new File([blob], fileNameFor(title, address, blob.type), { type: blob.type || "application/octet-stream" });
+}
+
+// Chrome has no other way to give an extension a true PDF of a page. The
+// "is being debugged" bar shows for the moment this takes.
+async function printPage(tab) {
+  const target = { tabId: tab.id };
+  try {
+    await chrome.debugger.attach(target, "1.3");
+  } catch {
+    throw new Problem("Chrome wouldn't let Kaal print this page.", "Close the developer tools for this tab if they are open, then try again.");
+  }
+  try {
+    // A PDF shown in a tab is already the file wanted, whatever its address looks like.
+    try {
+      const kind = await chrome.debugger.sendCommand(target, "Runtime.evaluate", { expression: "document.contentType", returnByValue: true });
+      if (kind && kind.result && kind.result.value === "application/pdf") return null;
+    } catch {
+      // Carry on and print.
+    }
+    const printed = await chrome.debugger.sendCommand(target, "Page.printToPDF", { printBackground: true, preferCSSPageSize: true });
+    const bytes = Uint8Array.from(atob(printed.data), (character) => character.charCodeAt(0));
+    return new File([bytes], fileNameFor(tab.title, "", "application/pdf"), { type: "application/pdf" });
+  } catch {
+    throw new Problem("Chrome couldn't print this page.", "Reload the page and try again.");
   } finally {
     await chrome.debugger.detach(target).catch(() => {});
   }
 }
 
-function looksLikePdf(url) {
+async function pageAsFile(tab) {
+  if (isProtectedPage(tab.url)) throw new Problem("Chrome doesn't let extensions save this kind of page.", "Open the page you want to keep and try again.");
+  if (looksLikePdf(tab.url) || tab.url.startsWith("file:")) return fetchFile(tab.url, tab.title);
+  return (await printPage(tab)) || fetchFile(tab.url, tab.title);
+}
+
+// --- saving
+
+async function save(tab, mode, { linkUrl = "", selectionText = "" } = {}) {
+  if (!tab || !tab.id) return;
+  await setState(tab.id, { stage: "saving", mode });
+  badge(tab.id, "…");
+  const source = { source_url: linkUrl || tab.url || "", source_title: tab.title || "", captured_at: new Date().toISOString() };
   try {
-    return new URL(url).pathname.toLowerCase().endsWith(".pdf");
-  } catch {
-    return false;
+    let saved;
+    if (selectionText.trim() && mode === "general") {
+      saved = await call("POST", "/v1/captures/text", { json: { text: selectionText.slice(0, 100000), title: tab.title || "", ...source } });
+    } else {
+      const file = linkUrl ? await fetchFile(linkUrl, tab.title) : await pageAsFile(tab);
+      const form = new FormData();
+      form.append("file", file, file.name);
+      for (const [name, value] of Object.entries(source)) form.append(name, value);
+      saved = mode === "medical" ? await call("POST", "/v1/medical/receipts", { form }) : await call("POST", "/v1/captures", { form });
+    }
+    if (mode === "medical") {
+      const { receiptSites = [] } = await chrome.storage.local.get("receiptSites");
+      await chrome.storage.local.set({ receiptSites: rememberSite(tab.url, receiptSites) });
+    }
+    await setState(tab.id, { stage: mode === "medical" ? "review" : "saved", mode, noteId: saved.result.id });
+    badge(tab.id, "OK");
+    refreshCount();
+  } catch (error) {
+    const known = error instanceof Problem;
+    await setState(tab.id, { stage: "error", mode, message: known ? error.message : "Something went wrong while saving.", hint: known ? error.hint : "", settings: known && error.settings });
+    badge(tab.id, "!", false);
   }
 }
 
-function isLocalFileUrl(url) {
-  try {
-    return new URL(url).protocol === "file:";
-  } catch {
-    return false;
-  }
+// The side panel can only be opened in the same breath as the click or key
+// press that asked for it, so it opens first and fills in as the save goes on.
+function openPanel(tab) {
+  chrome.sidePanel.setOptions({ tabId: tab.id, path: `panel.html?tab=${tab.id}`, enabled: true });
+  chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
 }
 
-function localFilePath(url) {
-  const parsed = new URL(url);
-  return decodeURIComponent(parsed.pathname);
-}
+// --- menus, the keyboard shortcut, and messages from the popup and panel
 
-async function submitCapture(tab, sourcePath, sourceUrl, sourceTitle, mode, action = mode.hostAction, cleanupStaging = true) {
-  const response = await sendNative({
-    action,
-    path: sourcePath,
-    sourceUrl: sourceUrl || "",
-    sourceTitle: sourceTitle || "",
-    capturedAt: new Date().toISOString(),
-    cleanupStaging,
+function install() {
+  chrome.sidePanel.setOptions({ enabled: false });
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({ id: MENU_GENERAL, title: "Save to Kaal", contexts: ["page", "link", "selection", "action"] });
+    chrome.contextMenus.create({ id: MENU_MEDICAL, title: "Save as medical receipt", contexts: ["page", "link", "action"] });
   });
-  setResult(tab.id, "OK", `${mode.statusLabel}: ${response.result?.title || "capture"}`);
-  return response;
+  chrome.alarms.create(COUNT_ALARM, { periodInMinutes: 10 });
+  refreshCount();
 }
 
-async function captureCurrentTab(tab, mode) {
-  if (!tab?.id || !tab.url) throw new Error("No capturable browser tab is active");
-  setResult(tab.id, "…", `${mode.statusLabel.replace("Saved", "Saving")}…`);
-  if (isLocalFileUrl(tab.url)) {
-    // A local download must not be downloaded again via file://. The native
-    // host copies it only from Downloads and leaves the original untouched.
-    return submitCapture(tab, localFilePath(tab.url), tab.url, tab.title, mode, mode.hostLocalAction, false);
-  }
-  const path = looksLikePdf(tab.url) ? await downloadUrl(tab.url, tab.title, mode) : await printPageToPdf(tab, mode);
-  return submitCapture(tab, path, tab.url, tab.title, mode);
-}
-
-async function captureLinkedItem(info, tab, mode) {
-  if (!tab?.id || !info.linkUrl) throw new Error("No receipt link was selected");
-  setResult(tab.id, "…", `${mode.statusLabel.replace("Saved", "Saving linked")}…`);
-  const path = await downloadUrl(info.linkUrl, tab.title, mode);
-  return submitCapture(tab, path, info.linkUrl, tab.title, mode);
-}
-
-async function captureSelectedText(info, tab) {
-  if (!tab?.id || !info.selectionText?.trim()) throw new Error("No text is selected");
-  setResult(tab.id, "…", "Saving selected text to Kaal…");
-  const response = await sendNative({
-    action: "capture-selection",
-    text: info.selectionText,
-    title: tab.title || "Browser selection",
-    sourceUrl: tab.url || "",
-    sourceTitle: tab.title || "",
-    capturedAt: new Date().toISOString(),
-  });
-  setResult(tab.id, "OK", `Saved selected text to Kaal: ${response.result?.title || "selection"}`);
-  return response;
-}
-
-async function showCaptureError(tab, error) {
-  const detail = error instanceof Error ? error.message : String(error);
-  if (tab?.id) setResult(tab.id, "ERR", `Kaal capture failed: ${detail}`);
-  const errorUrl = `${chrome.runtime.getURL("error.html")}#${encodeURIComponent(detail)}`;
-  await chrome.tabs.create({ url: errorUrl, active: true });
-}
-
-function openReceiptInbox() {
-  return chrome.tabs.create({ url: chrome.runtime.getURL("inbox.html"), active: true });
-}
-
-chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === INBOX_MENU) {
-    openReceiptInbox().catch((error) => console.error("Could not open Kaal dashboard", error));
-    return;
-  }
-  if (info.menuItemId === GENERAL_SELECTION_MENU) {
-    captureSelectedText(info, tab).catch((error) => {
-      console.error("Kaal selected-text capture failed", error);
-      showCaptureError(tab, error).catch((reportingError) => console.error("Could not display Kaal capture error", reportingError));
-    });
-    return;
-  }
-  const mode = [MEDICAL_CAPTURE_MENU, MEDICAL_LINK_MENU].includes(info.menuItemId) ? CAPTURE_MODES.medical : CAPTURE_MODES.general;
-  const capture = [GENERAL_LINK_MENU, MEDICAL_LINK_MENU].includes(info.menuItemId)
-    ? captureLinkedItem(info, tab, mode)
-    : captureCurrentTab(tab, mode);
-  capture.catch((error) => {
-    console.error("Kaal capture failed", error);
-    showCaptureError(tab, error).catch((reportingError) => console.error("Could not display Kaal capture error", reportingError));
-  });
+chrome.runtime.onInstalled.addListener(install);
+chrome.runtime.onStartup.addListener(refreshCount);
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === COUNT_ALARM) refreshCount();
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.action === "open-dashboard") {
-    openReceiptInbox().then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: String(error) }));
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (!tab || !tab.id) return;
+  openPanel(tab);
+  save(tab, info.menuItemId === MENU_MEDICAL ? "medical" : "general", { linkUrl: info.linkUrl || "", selectionText: info.selectionText || "" });
+});
+
+chrome.commands.onCommand.addListener((command, tab) => {
+  if (command !== "save" || !tab || !tab.id) return;
+  openPanel(tab);
+  chrome.storage.local.get("receiptSites").then(({ receiptSites = [] }) => save(tab, chooseMode(tab.url, receiptSites)));
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove(stateKey(tabId)));
+
+chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  if (!message || typeof message !== "object") return undefined;
+  if (message.action === "save" && MODES[message.mode] && Number.isInteger(message.tabId)) {
+    chrome.tabs.get(message.tabId).then((tab) => save(tab, message.mode)).then(() => respond({ ok: true }), () => respond({ ok: false }));
     return true;
   }
-  if (message?.action !== "capture-current-tab") return;
-  const mode = CAPTURE_MODES[message.mode];
-  if (!mode) {
-    sendResponse({ ok: false, error: "Unknown Kaal capture mode" });
-    return;
+  if (message.action === "count") {
+    refreshCount().then(() => respond({ ok: true }));
+    return true;
   }
-  chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => captureCurrentTab(tab, mode))
-    .then((response) => sendResponse({ ok: true, result: response.result }))
-    .catch((error) => {
-      const detail = error instanceof Error ? error.message : String(error);
-      chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => showCaptureError(tab, error));
-      sendResponse({ ok: false, error: detail });
-    });
-  return true;
+  if (message.action === "close-panel" && Number.isInteger(message.tabId)) {
+    chrome.sidePanel.setOptions({ tabId: message.tabId, enabled: false });
+    chrome.storage.session.remove(stateKey(message.tabId));
+    chrome.action.setBadgeText({ tabId: message.tabId });  // back to the count shown on every tab
+    refreshCount();
+    respond({ ok: true });
+  }
+  return undefined;
 });

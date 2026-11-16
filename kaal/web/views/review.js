@@ -1,5 +1,5 @@
 import { api, previewUrl, originalUrl } from "/web/api.js";
-import { h, replace, notice, actionButton, twoStepButton, formatMoney, formatDate, today } from "/web/ui.js";
+import { h, replace, notice, actionButton, twoStepButton, picture, fileLink, formatMoney, formatDate, today } from "/web/ui.js";
 
 const FIELDS = [
   { key: "amount", label: "Amount paid", type: "text", inputmode: "decimal", placeholder: "0.00" },
@@ -57,7 +57,8 @@ function toIsoDate(value) {
   return `${year}-${us[1].padStart(2, "0")}-${us[2].padStart(2, "0")}`;
 }
 
-export function reviewView(container, noteId, { go, expired }) {
+// `backLink` lets a host with no receipt list (the extension's side panel) leave it out.
+export function reviewView(container, noteId, { go, expired, backLink }) {
   let alive = true;
   let timer = null;
   const status = h("div", {});
@@ -79,7 +80,7 @@ export function reviewView(container, noteId, { go, expired }) {
     if (detail.receipt.status === "extracting") timer = setTimeout(load, 2000);
   }
 
-  const back = () => h("a", { href: "#/receipts", class: "back" }, "‹ Receipts");
+  const back = () => (backLink === undefined ? h("a", { href: "#/receipts", class: "back" }, "‹ Receipts") : backLink);
 
   function draw({ note, receipt, evidence }, people) {
     const attachment = (note.attachments || [])[0];
@@ -89,12 +90,12 @@ export function reviewView(container, noteId, { go, expired }) {
     const pages = h("div", { class: "pages" });
     if (attachment) {
       const original = originalUrl(note.id, attachment.id);
-      const first = h("img", { src: previewUrl(note.id, attachment.id, 1), alt: "The receipt", class: "page-image" });
-      first.addEventListener("error", () => replace(pages, h("p", { class: "empty" }, "No preview for this file. ", h("a", { href: original, target: "_blank", rel: "noopener" }, "Open the original"))));
-      pages.append(h("a", { href: original, target: "_blank", rel: "noopener", title: "Open the original" }, first));
+      const first = picture(previewUrl(note.id, attachment.id, 1), { alt: "The receipt", class: "page-image" });
+      first.addEventListener("error", () => replace(pages, h("p", { class: "empty" }, "No preview for this file. ", fileLink(original, {}, "Open the original"))));
+      pages.append(fileLink(original, { title: "Open the original" }, first));
       // Only a PDF can have a second page; it is simply dropped if there is none.
       if (/\.pdf$/i.test(attachment.name || "")) {
-        const second = h("img", { src: previewUrl(note.id, attachment.id, 2), alt: "The receipt, page 2", class: "page-image" });
+        const second = picture(previewUrl(note.id, attachment.id, 2), { alt: "The receipt, page 2", class: "page-image" });
         second.addEventListener("error", () => second.remove());
         pages.append(second);
       }

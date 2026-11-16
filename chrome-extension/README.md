@@ -1,152 +1,84 @@
-# Kaal Capture Chrome extension
+# Kaal for Chrome
 
-This unpacked Chrome extension captures browser items into local Kaal storage without uploading them.
+Saves the page in front of you to your Kaal server, and lets you check a
+medical receipt beside the page it came from.
 
-## Capture modes
+## What it does
 
-- **Save to Kaal:** saves the current page, PDF, Downloads file, or linked item as a normal Kaal note and managed attachment. Kaal applies its standard automatic sensitivity classification; the original download stays untouched.
-- **Save as medical receipt:** creates the distinct plaintext `medical`, `receipt`, `inbox` record used by the receipt dashboard and review lifecycle.
-- **Save selected text to Kaal:** right-click selected page text to create a normal Kaal note containing only that selection and its sanitized page provenance. It never triggers medical receipt processing.
+- **One main button.** Click the Kaal icon. The button says **Save to Kaal**,
+  or **Save receipt** on a site you have saved receipts from before. The other
+  choice is a link underneath.
+- **A web page is kept as a PDF**, printed by Chrome from the tab you are
+  looking at, so a page behind a sign-in is saved as you see it. A tab that is
+  already a PDF, and a linked file, are kept unchanged.
+- **A receipt opens in the side panel**, beside the page. It shows the values
+  Kaal read and where each came from. "Looks right" marks it reviewed; "Save
+  for later" leaves it in the inbox. The panel then closes.
+- **Right-click** has two entries: "Save to Kaal" (the page, a link, or the
+  text you selected) and "Save as medical receipt".
+- **The number on the icon** is how many receipts are waiting to be checked.
+  The popup links to them in the web app.
+- **Keyboard:** Alt+Shift+K opens the popup, Alt+Shift+S saves the page with
+  the main button's choice. Change them at `chrome://extensions/shortcuts`.
 
-The toolbar popup presents both choices explicitly. Page and link context menus do the same. HTML pages are printed to a PDF through Chrome's authenticated current tab; PDFs and linked files are downloaded unchanged. A Downloads `file://` item is copied directly into Kaal without re-downloading it.
+Notes, totals, the Trash and settings are in Kaal's web app.
 
-The local Native Messaging host invokes one of:
+## Setting it up
 
-```bash
-kaal capture <artifact> --source-url <url> --source-title <title>
-kaal medical capture <artifact> --source-url <url> --source-title <title>
-```
+1. Open `chrome://extensions`, turn on **Developer mode**, choose **Load
+   unpacked** and pick this `chrome-extension` folder. After an update, press
+   the reload arrow on the extension's card.
+2. On the server, create a token for this browser (skip this if you already
+   have one for it):
 
-General-capture URL provenance strips query strings and fragments before Kaal stores it. The extension only talks to the host on the same Mac; it does not access any cloud API.
+   ```bash
+   kaal-server token create chrome-extension --scopes read,reveal,write
+   ```
 
-## One-time installation on macOS
+3. Open the extension's **Settings** (the button in the popup), enter Kaal's
+   address (for example `https://kaal.example.ts.net`) and paste the token.
+   "Save and test" says who the server thinks you are.
 
-From the Kaal checkout:
+The address and token are kept in this Chrome profile's extension storage, on
+this computer only, readable by anything that can read the profile's files.
+"Disconnect" removes them. Revoke the token on the server
+(`kaal-server token revoke chrome-extension`) if the computer is lost.
 
-```bash
-.venv/bin/python bin/install-chrome-receipt-capture.py
-```
+## What Chrome will ask for, and why
 
-If Chrome is launched with a dedicated `--user-data-dir`, Chrome looks for a
-user-level Native Messaging manifest in that profile's own
-`NativeMessagingHosts/` directory. Install an additional manifest for that
-profile (the default installation remains appropriate for ordinary Chrome):
+- **Read and change all your data on all websites.** The extension fetches the
+  PDF or linked file you ask it to save, with your sign-in on that site, and
+  talks to your Kaal server, whose address Chrome cannot know in advance. It
+  does this only when you press save; it runs nothing in the pages you visit.
+- **Debugger.** Chrome gives an extension no other way to make a true PDF of a
+  page. Chrome shows a "debugging this browser" bar for the moment that takes.
+- **Side panel, context menus, storage, alarms.** The review panel, the two
+  right-click entries, the saved address and token, and the periodic refresh of
+  the number on the icon.
 
-```bash
-.venv/bin/python bin/install-chrome-receipt-capture.py \
-  --chrome-app-support "$HOME/.hermes/chrome-debug"
-```
+## When something goes wrong
 
-If Chrome uses a non-default download directory, install with its absolute
-directory so Kaal can trust only that directory's `Kaal Capture/` staging
-subfolder:
+The popup or the side panel says what happened and what to do. The common ones:
 
-```bash
-.venv/bin/python bin/install-chrome-receipt-capture.py \
-  --downloads-dir "/absolute/path/to/Chrome Downloads"
-```
+- **"Kaal isn't connected yet"** or **"didn't accept this extension's token"**:
+  open Settings and enter the address and a current token.
+- **"Can't reach Kaal"**: this computer is not on the network the server is on.
+- **"Chrome wouldn't let Kaal print this page"**: the developer tools are open
+  on that tab, or it is one of Chrome's own pages.
+- **A file on this computer** (`file://`): turn on "Allow access to file URLs"
+  on the extension's card, or add the file in the web app.
 
-Then in Chrome:
+## Upgrading from the earlier version
 
-1. Visit `chrome://extensions`.
-2. Enable **Developer mode**.
-3. Select **Load unpacked** and choose this `chrome-extension` directory.
-4. Pin **Kaal Capture** to the toolbar.
+The earlier extension passed captures through a helper program on the Mac. That
+helper is gone. Its registration file can be deleted:
+`~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.kaal.receipt_capture.json`
+(and the same file inside any other Chrome profile folder it was installed
+for). Any `Kaal Capture` folder left in Downloads is no longer used.
 
-The extension has a fixed public extension ID, so the host manifest installed above is already restricted to this extension alone.
+## For developers
 
-## Normal use
-
-1. Open a page, PDF, Downloads file, or linked item in Chrome. To save just text, select it first.
-2. Click the Kaal toolbar icon and select **Save to Kaal** for a normal capture, or **Save as medical receipt** for a paid medical receipt. The same choices are available from the page/link context menus; selected text has its own **Save selected text to Kaal** context-menu item.
-3. The toolbar badge stays `OK` when Kaal copied the artifact; `ERR` opens a page with the actual failure reason.
-### Manage Kaal Notes
-
-Choose **Open Kaal dashboard** from the toolbar popup or page context menu.
-The default **Notes** tab is a metadata-first view of the 100 newest
-non-medical Kaal notes: browser captures, selected-text captures, manually
-created notes, imports, and other ordinary records. Medical receipts remain in
-the dedicated **Medical Receipts** tab so their evidence and review workflow is
-not mixed into regular notes. The Notes toolbar includes **Trash**, which changes
-to **Back to notes** while viewing recoverable deleted notes.
-
-Notes actions are local-only:
-
-- **New note** and **Edit** create or update titles, tags, and Markdown bodies.
-- **Reveal note** (or **Edit**) explicitly retrieves its body. Note bodies are
-  never prefetched into the dashboard.
-- An optional local file can be attached when saving a new or edited note.
-  Chrome stages it in the configured `Kaal Capture/` directory; Kaal copies it
-  into managed storage and leaves the selected original untouched.
-- **Extract / OCR attachments** uses the generic Kaal extraction pipeline;
-  **View extracted text** is also explicit and capped by the host.
-- **Move to Trash** is recoverable. In Notes Trash, **Restore** reverses it;
-  **Delete permanently** requires typing the note record ID and removes only
-  Kaal-managed note, attachment, and sidecar copies.
-
-CLI equivalents are available for diagnostics and automation:
-
-```bash
-kaal library list
-kaal library show <note-id>
-kaal library trash <note-id>
-kaal library restore <note-id>
-kaal library purge <note-id> --yes
-```
-
-### Verify captured receipts
-
-Open the **Medical Receipts** dashboard tab. Use **Needs review**, **Reviewed**,
-or **Trash** to narrow the receipt list. It lists the 100 newest receipt
-records, including capture date, inbox status, original
-attachment filename, extraction status, source, tags, and Kaal record ID. Click
-**Extract / OCR text** to retry text extraction for that specific receipt; medical
-PDFs use `pdftotext -layout`, macOS Vision OCR, then Docling as needed.
-Once text exists, **View extracted text** displays it only after you explicitly
-request it.
-
-### Manage receipts safely
-
-The dashboard has a local title/source/ID filter plus **Current receipts** and
-**Trash** views. Use **Move to Trash** for normal deletion: it immediately
-hides the record from the current list but keeps Kaal's note, attachment copy,
-and sidecar text so **Restore** can undo it. The original browser download is
-never moved or deleted.
-
-In the Trash view, **Delete permanently** requires typing the receipt record
-ID. You can also select multiple trashed receipts and use **Delete selected
-permanently**; this requires typing all selected IDs exactly, comma-separated.
-Only then does Kaal erase its own note, attachment copies, extracted-text
-sidecars, and metadata. This action cannot be undone.
-
-For active receipts, use **Mark reviewed** after checking the stored receipt
-and optional extracted text. This removes the `inbox` status; **Return to
-inbox** reverses that decision.
-
-Chrome briefly uses a `Kaal Capture/` subdirectory inside the download location
-registered during installation. The native host deletes only a successfully
-copied file from that exact absolute directory whose path matches this
-extension's generated `receipt-<timestamp>-<title>.pdf` pattern; it never
-deletes a file elsewhere.
-
-List captured receipts:
-
-```bash
-kaal medical list --inbox
-```
-
-Manage from the CLI if needed:
-
-```bash
-kaal medical trash <receipt-id>
-kaal medical restore <receipt-id>
-kaal medical purge <receipt-id> --yes
-kaal medical purge-bulk <receipt-id> <receipt-id> --yes
-```
-
-## Permissions
-
-- `downloads`: save the original PDF/link or generated page PDF.
-- `debugger`: invoke Chrome's `Page.printToPDF` for the active authenticated HTML receipt page. This is only used after you click the extension button.
-- `nativeMessaging`: pass the local staging-file path and page metadata to Kaal.
-- `activeTab`, `tabs`, `contextMenus`: identify the clicked tab/link and offer the capture controls.
+No build step. `lib.js` holds the decisions that need no browser
+(`tests/test_extension.py` runs it under Node). `web/` holds copies of the web
+app's files that the side panel shares; change the originals in `kaal/web/` and
+run `bin/sync-extension-web.py`.

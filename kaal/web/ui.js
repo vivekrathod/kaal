@@ -1,6 +1,8 @@
 // Small helpers for building the page. Everything shown comes from the vault,
 // so text is always set as text, never as HTML.
 
+import { fileAddress, holdsToken } from "/web/api.js";
+
 export function h(tag, attributes = {}, ...children) {
   const element = document.createElement(tag);
   for (const [name, value] of Object.entries(attributes || {})) {
@@ -42,6 +44,30 @@ export function fromTree(node) {
     attributes[name] = value;
   }
   return h(node.tag, attributes, (node.children || []).map(fromTree));
+}
+
+// A picture of one of Kaal's files. It fires "error" if the file has no picture.
+export function picture(path, attributes = {}) {
+  const image = h("img", attributes);
+  fileAddress(path).then((address) => { image.src = address; }, () => image.dispatchEvent(new Event("error")));
+  return image;
+}
+
+// A link that opens one of Kaal's files in a new tab.
+export function fileLink(path, attributes = {}, ...children) {
+  const fetched = holdsToken();
+  const link = h("a", { href: fetched ? "#" : path, target: "_blank", rel: "noopener", ...attributes }, ...children);
+  if (fetched) {
+    link.addEventListener("click", async (event) => {
+      event.preventDefault();
+      try {
+        window.open(await fileAddress(path), "_blank", "noopener");
+      } catch {
+        link.dispatchEvent(new Event("error"));
+      }
+    });
+  }
+  return link;
 }
 
 export function replace(container, ...children) {

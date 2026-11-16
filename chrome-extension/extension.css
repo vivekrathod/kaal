@@ -1,0 +1,21 @@
+/* On top of web/app.css, which is the web app's own stylesheet. */
+body.popup { width: 320px; padding: 14px; }
+body.popup h1 { font-size: 1.05rem; margin: 0; }
+.popup-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+.popup .button.primary { width: 100%; }
+.popup .link { padding: 8px 0 0; text-decoration: underline; color: var(--accent); }
+.popup .notice { margin: 12px 0 0; }
+.popup .hint { margin-top: 6px; }
+.waiting { display: block; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 0.92rem; text-decoration: none; }
+[hidden] { display: none !important; }
+
+body.panel .page { padding: 12px 12px 48px; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.panel-head .brand { font-weight: 650; }
+.panel-links { display: flex; align-items: center; gap: 6px; }
+body.panel .review-image { max-height: 32vh; }
+.stack { display: grid; gap: 10px; justify-items: start; }
+
+body.options .page { max-width: 560px; padding-top: 6vh; }
+body.options .card { display: grid; gap: 14px; }
+body.options ul { margin: 0; padding-left: 20px; color: var(--muted); font-size: 0.92rem; }

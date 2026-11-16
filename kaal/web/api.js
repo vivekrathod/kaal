@@ -16,8 +16,20 @@ let newerVersion = false;
 export const appVersion = () => loadedVersion;
 export const updateWaiting = () => newerVersion;
 
+// The web app is served by Kaal and signed in with a cookie, so it needs
+// neither of these. A client that lives elsewhere and holds its own token (the
+// browser extension) calls connect() once before anything else.
+let server = "";
+let bearer = "";
+export function connect(address, token) {
+  server = String(address || "").replace(/\/+$/, "");
+  bearer = String(token || "");
+}
+export const serverAddress = () => server;
+export const holdsToken = () => Boolean(bearer);
+
 async function request(method, path, { json, form, params } = {}) {
-  let url = path;
+  let url = server + path;
   if (params) {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) {
@@ -28,6 +40,7 @@ async function request(method, path, { json, form, params } = {}) {
   // The server refuses a cookie-authenticated change without this header; a
   // page on another site cannot add it.
   const headers = { "X-Kaal-Request": "1", Accept: "application/json" };
+  if (bearer) headers.Authorization = `Bearer ${bearer}`;
   let body;
   if (json !== undefined) {
     headers["Content-Type"] = "application/json";
@@ -37,7 +50,7 @@ async function request(method, path, { json, form, params } = {}) {
   }
   let response;
   try {
-    response = await fetch(url, { method, headers, body, credentials: "same-origin" });
+    response = await fetch(url, { method, headers, body, credentials: bearer ? "omit" : "same-origin" });
   } catch {
     throw new ApiError(0, "Can't reach Kaal. Check your connection and try again.", "unavailable");
   }
@@ -100,6 +113,21 @@ export const api = {
   },
   noteFileText: (noteId, attachmentId) => result(request("GET", `/v1/library/notes/${id(noteId)}/attachments/${id(attachmentId)}/extracted-text`)).then((data) => data.text || ""),
 };
+
+// The address to give a picture or a link for one of Kaal's files. The web
+// app's cookie travels with the file's own address. A client with a token has
+// to fetch the file itself and show the copy it now holds.
+export async function fileAddress(path) {
+  if (!bearer) return path;
+  let response;
+  try {
+    response = await fetch(server + path, { headers: { Authorization: `Bearer ${bearer}` }, credentials: "omit" });
+  } catch {
+    throw new ApiError(0, "Can't reach Kaal. Check your connection and try again.", "unavailable");
+  }
+  if (!response.ok) throw new ApiError(response.status, `That file could not be opened (${response.status}).`);
+  return URL.createObjectURL(await response.blob());
+}
 
 export const previewUrl = (noteId, attachmentId, page = 1) => `/v1/medical/receipts/${id(noteId)}/attachments/${id(attachmentId)}/preview?page=${page}`;
 export const originalUrl = (noteId, attachmentId) => `/v1/medical/receipts/${id(noteId)}/attachments/${id(attachmentId)}/content`;

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="color-scheme" content="light dark">
+  <title>Kaal settings</title>
+  <link rel="stylesheet" href="web/app.css">
+  <link rel="stylesheet" href="extension.css">
+</head>
+<body class="options">
+  <main class="page">
+    <form id="form" class="card" novalidate>
+      <h1>Connect to Kaal</h1>
+      <p class="muted">The extension sends what you save straight to your Kaal server. It needs the server's address and a device token of its own.</p>
+      <div class="field">
+        <label for="server">Kaal's address</label>
+        <input id="server" type="url" inputmode="url" placeholder="https://kaal.example.ts.net" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="token">Token</label>
+        <input id="token" type="password" autocomplete="off" spellcheck="false">
+        <p class="hint">Create one on the server with <code>kaal-server token create chrome-extension --scopes read,reveal,write</code>. It is kept in this browser profile only. Leave this empty to keep the token already saved.</p>
+      </div>
+      <div id="status" role="status" aria-live="polite"></div>
+      <div class="actions">
+        <button type="submit" id="save" class="button primary">Save and test</button>
+        <button type="button" id="forget" class="button danger">Disconnect</button>
+      </div>
+      <ul>
+        <li>The main button saves the page in front of you. On a site you have saved receipts from before, it saves a receipt.</li>
+        <li>A receipt opens beside the page so you can check it straight away.</li>
+        <li>Shortcuts can be changed at chrome://extensions/shortcuts.</li>
+      </ul>
+    </form>
+  </main>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

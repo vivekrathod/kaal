@@ -122,9 +122,8 @@ token_file = "~/.config/kaal/mac-cli.token"
 
 Every command then runs remotely and prints exactly what it prints locally.
 Files you attach are uploaded, and exports are written on your machine.
-`KAAL_LOCAL=1` forces local mode. For the Chrome extension, reinstall its helper with
-`bin/install-chrome-receipt-capture.py --kaal-config PATH`, pointing at a config
-that holds the extension's own token.
+`KAAL_LOCAL=1` forces local mode. The Chrome extension talks to the server
+itself, with a token of its own entered on its settings page.
 
 **Checks and moving data.** `kaal verify [--deep]` compares the index with the
 files on disk and reports ids only. `kaal export --output FILE.tar` writes the
@@ -342,33 +341,27 @@ kaal export-attachment "Tax 2025" ATTACHMENT_ID --output /tmp/tax-document.pdf
 
 ## One-click browser capture from Chrome
 
-The Chrome extension presents two explicit capture choices:
+The Chrome extension sends what you save straight to your Kaal server:
 
-- **Save to Kaal** saves a webpage, PDF, local download, or linked item as a
-  normal Kaal note with an attached managed copy. Standard automatic sensitivity
-  classification applies, and source URL query strings/fragments are not kept.
-- **Save selected text to Kaal** appears when right-clicking selected browser
-  text and creates a normal note from that text plus sanitized page provenance.
-- **Save as medical receipt** uses the distinct medical receipt workflow below.
+- **One main button.** The popup offers **Save to Kaal** for the page in front
+  of you, or **Save receipt** on a site you have saved receipts from before,
+  with the other choice as a link underneath. A web page is kept as a PDF; a
+  PDF or a linked file is kept as it is.
+- **Receipts are checked on the spot.** Saving a receipt opens Chrome's side
+  panel beside the page with the web app's review screen: the values Kaal read,
+  where each came from, and "Looks right" or "Save for later".
+- **Right-click** has two entries, "Save to Kaal" (a page, a link, or selected
+  text) and "Save as medical receipt".
+- **The number on the icon** is how many receipts are waiting to be checked.
 
-General browser captures preserve the source artifact and never delete the
-original browser download:
+Notes, totals, the Trash and settings are in the web app. Setting the extension
+up is described in [`chrome-extension/README.md`](chrome-extension/README.md).
+
+The command line can save a file the same way:
 
 ```bash
 kaal capture /path/to/file --title "Useful reference"
 ```
-
-### Kaal Dashboard
-
-The extension's **Open Kaal dashboard** command opens a local two-tab view:
-
-- **Notes** is the generic interface for every non-medical Kaal note,
-  including browser captures, selected-text captures, manually created notes,
-  and imports. It supports metadata search; explicit body/extracted-text reveal;
-  create and edit of title/tags/body; optional managed local-file attachments;
-  generic extraction/OCR; and recoverable trash/restore.
-- **Medical Receipts** preserves the dedicated receipt inbox, evidence review,
-  and reporting workflow. Receipts never appear in Notes.
 
 Notes listing is metadata-first; note bodies and extracted text are sent to
 the browser only after an explicit reveal action. A note must be moved
@@ -453,10 +446,8 @@ receipts with no amount under `missing_amount`, so nothing is left out
 silently. `needs_review` shows how much of the total comes from receipts nobody
 has confirmed yet. Only a reviewed receipt can be marked reimbursed.
 
-For the one-click Chrome toolbar and right-click workflow, see
-[`chrome-extension/README.md`](chrome-extension/README.md). It includes the
-one-time local Native Messaging host installation and Chrome's **Load unpacked**
-step.
+For the Chrome toolbar and right-click workflow, see
+[`chrome-extension/README.md`](chrome-extension/README.md).
 
 Delete a note and its attachments:
 

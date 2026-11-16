@@ -51,15 +51,11 @@ kaal medical report --year 2026 --reimbursed no
 
 Receipt dates are stored as `YYYY-MM-DD` and amounts as plain decimals; `kaal medical update` refuses values it cannot read. `kaal medical reimburse` and `kaal medical people --add/--remove` change the user's records: run them only when asked.
 
-## Dashboard and Chrome extension
+## Chrome extension
 
-- The dashboard has two separate areas: **Notes** (generic non-medical notes) and **Medical Receipts**.
-- Chrome's Native Messaging host is local-only. Reinstall it after host changes:
+`chrome-extension/` is an unpacked Manifest V3 extension with no build step. It talks to kaal-server directly with its own device token (set on its settings page and kept in `chrome.storage.local`); there is no native helper and nothing is written to Downloads. `background.js` saves pages, `popup.js` is the one-button popup, `panel.js` is the side panel, `options.js` is the settings page, and `lib.js` holds the decisions that need no browser.
 
-```bash
-.venv/bin/python bin/install-chrome-receipt-capture.py
-.venv/bin/python bin/install-chrome-receipt-capture.py --chrome-app-support "$HOME/.hermes/chrome-debug"
-```
+The side panel shows the web app's own review screen. `chrome-extension/web/` holds copies of the web files it needs; edit the originals in `kaal/web/` and run `bin/sync-extension-web.py` (a test fails while they differ). In those shared files, show a picture or link to one of Kaal's files with `picture()` and `fileLink()` from `ui.js`, never a bare `/v1/...` address: the extension has no sign-in cookie and must fetch the file with its token.
 
 ## Development
 
@@ -71,7 +67,7 @@ Tests use a throwaway key file and never the Keychain, and never a real `~/.conf
 
 ```bash
 env -u PYTHONPATH .venv/bin/python -m pytest -q
-.venv/bin/python -m py_compile bin/secure-notes.py bin/kaal-receipt-host.py kaal/*.py
+.venv/bin/python -m py_compile bin/secure-notes.py bin/sync-extension-web.py kaal/*.py
 ```
 
 After changing an endpoint, regenerate the API spec (a test fails until you do):
