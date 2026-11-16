@@ -91,9 +91,12 @@ pytestmark = [
 
 @pytest.fixture()
 def stage(tmp_path, request):
-    # With `granted`, the extension is loaded already holding access to the made-up site,
-    # which is what it holds after the person agrees to Chrome's question for that site.
-    granted = bool(getattr(request, "param", False))
+    # "granted": the extension is loaded already holding access to the made-up site, which
+    # is what it holds after the person agrees to Chrome's question for that site.
+    # "asks": the browser is started with a window, and the test waits while a person
+    # answers Chrome's question in it. No switch answers it, so this one needs someone there.
+    variant = getattr(request, "param", "")
+    granted = variant == "granted"
     saved = core.VAULT
     settings = server.Settings(home=tmp_path, vault=tmp_path / "data", tokens_file=tmp_path / "tokens.json", tmp_dir=tmp_path / "tmp", rate_per_minute=10_000)
     core.configure_vault(settings.vault)
@@ -108,15 +111,20 @@ def stage(tmp_path, request):
     (site_dir / "receipt.html").write_text(RECEIPT_PAGE)
     (site_dir / "statement.pdf").write_bytes(made_up_pdf())
     class Site(http.server.SimpleHTTPRequestHandler):
-        """A made-up portal. One file always refuses; another refuses the tab and then gives in."""
+        """A made-up portal. One file always refuses, one refuses twice and then gives in,
+        and one refuses a read through the tab but allows an ordinary fetch."""
 
         asked = []
+        seen = []
 
         def do_GET(self):
             Site.asked.append(self.path)
-            if self.path.startswith("/locked.pdf") or (self.path.startswith("/stubborn.pdf") and Site.asked.count(self.path) <= 2):
+            Site.seen.append((self.path, {name: self.headers.get(name) for name in ("Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest", "Origin", "Referer")}))
+            through_the_tab = self.headers.get("Sec-Fetch-Mode") in ("navigate", "no-cors")
+            if (self.path.startswith("/locked.pdf") or (self.path.startswith("/stubborn.pdf") and Site.asked.count(self.path) <= 2)
+                    or (self.path.startswith("/tab-refuses.pdf") and through_the_tab)):
                 self.send_error(403)
-            elif self.path.startswith("/stubborn.pdf"):
+            elif self.path.startswith(("/stubborn.pdf", "/tab-refuses.pdf")):
                 self.path = "/statement.pdf"
                 super().do_GET()
             else:
@@ -140,7 +148,7 @@ def stage(tmp_path, request):
     # --use-mock-keychain: without it every web request waits on a hidden macOS Keychain prompt.
     profile = tempfile.mkdtemp(prefix="kaal-e2e-profile-")
     browser = subprocess.Popen(
-        [BROWSER, f"--user-data-dir={profile}", f"--remote-debugging-port={debug_port}", "--headless=new", "--use-mock-keychain", "--password-store=basic",
+        [BROWSER, f"--user-data-dir={profile}", f"--remote-debugging-port={debug_port}", *([] if variant == "asks" else ["--headless=new"]), "--use-mock-keychain", "--password-store=basic",
          f"--load-extension={extension}", "--no-first-run", "--no-default-browser-check", "--window-size=1200,900", "about:blank"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -154,7 +162,7 @@ def stage(tmp_path, request):
             time.sleep(0.1)
         else:
             pytest.fail("the browser or the server did not start")
-        yield SimpleNamespace(kaal=f"http://localhost:{kaal_port}", site=f"http://127.0.0.1:{site_port}", token=token, debug_port=debug_port, asked=Site.asked, pdf_bytes=len(made_up_pdf()))
+        yield SimpleNamespace(kaal=f"http://localhost:{kaal_port}", site=f"http://127.0.0.1:{site_port}", token=token, debug_port=debug_port, asked=Site.asked, seen=Site.seen, pdf_bytes=len(made_up_pdf()))
     finally:
         browser.terminate()
         try:
@@ -174,7 +182,22 @@ def drive(stage, script):
     return json.loads(done.stdout)
 
 
-@pytest.mark.parametrize("stage", [True], indirect=True)
+@pytest.mark.skipif(os.environ.get("KAAL_E2E_ASK") != "1", reason="set KAAL_E2E_ASK=1 and be ready to press Allow in the test browser")
+@pytest.mark.parametrize("stage", ["asks"], indirect=True)
+def test_asking_for_one_site_grants_only_that_site_and_then_fetches_from_it(stage):
+    out = drive(stage, "asks.mjs")
+    assert out["before"] == {"held": False, "all": []}
+    # Read through the tab first: refused, nothing saved, and the one site is named in the offer.
+    assert out["refused"]["stage"] == "error" and out["refused"]["site"] == stage.site
+    assert out["offer"] == f"Let Kaal fetch from {stage.site.removeprefix('http://')}"
+    # Pressing the offer asks Chrome; with the answer yes, exactly that site is granted and the save is repeated.
+    assert out["after"] == {"held": True, "all": [f"{stage.site}/*"]}
+    assert out["saved"]["stage"] == "saved" and out["file"]["size"] == stage.pdf_bytes
+    modes = [headers["Sec-Fetch-Mode"] for path, headers in stage.seen if path.startswith("/tab-refuses.pdf")]
+    assert modes == ["navigate", "no-cors", "no-cors", "cors"]  # the tab is still tried first; the direct fetch only after it fails
+
+
+@pytest.mark.parametrize("stage", ["granted"], indirect=True)
 def test_a_site_the_person_allowed_is_fetched_directly_when_the_tab_cannot_read_it(stage):
     out = drive(stage, "granted.mjs")
     assert out["accessHeld"] is True and out["connected"] == "Connected as “e2e-extension”."

@@ -116,3 +116,11 @@ KAAL_E2E=1 .venv/bin/python -m pytest -q tests/test_extension_e2e.py
 
 It cannot press the right-click entries or the keyboard shortcut; try those by
 hand after changing them.
+
+One more test needs a person. Chrome's question when the extension asks for
+access to a site cannot be answered by a test or a switch, so this one opens a
+visible test browser and waits up to three minutes for you to press "Allow":
+
+```bash
+KAAL_E2E=1 KAAL_E2E_ASK=1 .venv/bin/python -m pytest -q tests/test_extension_e2e.py -k asking
+```
