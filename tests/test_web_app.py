@@ -69,6 +69,13 @@ def test_the_page_has_no_inline_script_or_style_for_that_policy_to_block():
     ("/web/app.css", "text/css; charset=utf-8"),
     ("/web/app.webmanifest", "application/manifest+json"),
     ("/web/icon.svg", "image/svg+xml"),
+    ("/web/icon-32.png", "image/png"),
+    ("/web/icon-512.png", "image/png"),
+    # Asked for by browsers and phones whatever the page declares.
+    ("/favicon.ico", "image/png"),
+    ("/apple-touch-icon.png", "image/png"),
+    ("/apple-touch-icon-precomposed.png", "image/png"),
+    ("/robots.txt", "text/plain; charset=utf-8"),
 ])
 def test_assets_are_served_with_their_types(client, path, media_type):
     response = client.get(path)
@@ -134,6 +141,16 @@ def test_search_words_travel_in_the_request_body_and_results_are_shown_as_text()
     notes = (WEB / "views" / "notes.js").read_text()
     assert "api.searchNotes({ query, trash" in notes and "api.notes({ trash, limit" in notes
     assert 'h("mark", {}, match.found)' in notes and "turn !== latest" in notes
+
+
+def test_the_icons_the_page_and_the_manifest_name_exist(client):
+    manifest = json.loads((WEB / "app.webmanifest").read_text())
+    named = [icon["src"] for icon in manifest["icons"]] + re.findall(r'<link rel="(?:icon|apple-touch-icon)" href="([^"]+)"', (WEB / "index.html").read_text())
+    assert len(named) >= 5
+    for address in named:
+        assert client.get(address).status_code == 200, address
+    assert client.get("/apple-touch-icon.png").content == (WEB / "icon-180.png").read_bytes()
+    assert client.get("/robots.txt").text == "User-agent: *\nDisallow: /\n"
 
 
 def test_the_web_files_are_packaged_with_kaal():

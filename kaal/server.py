@@ -543,6 +543,20 @@ def create_app(settings: Settings) -> FastAPI:
     def web_asset(relative: str):
         return web_file(relative)
 
+    # Browsers and phones ask for these addresses whatever the page declares.
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        return web_file("icon-32.png")
+
+    @app.get("/apple-touch-icon.png", include_in_schema=False)
+    @app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
+    def touch_icon():
+        return web_file("icon-180.png")
+
+    @app.get("/robots.txt", include_in_schema=False)
+    def robots():
+        return Response(content="User-agent: *\nDisallow: /\n", media_type="text/plain; charset=utf-8", headers=WEB_HEADERS)
+
     @app.get("/v1/health", tags=["service"])
     def health() -> dict[str, str]:
         return {"status": "ok"}

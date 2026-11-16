@@ -5,5 +5,9 @@
   "display": "standalone",
   "background_color": "#f6f5f2",
   "theme_color": "#f6f5f2",
-  "icons": [{ "src": "/web/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+  "icons": [
+    { "src": "/web/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/web/icon-180.png", "sizes": "180x180", "type": "image/png", "purpose": "any" },
+    { "src": "/web/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
 }
