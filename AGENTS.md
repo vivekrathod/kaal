@@ -70,6 +70,12 @@ env -u PYTHONPATH .venv/bin/python -m pytest -q
 .venv/bin/python -m py_compile bin/secure-notes.py bin/sync-extension-web.py kaal/*.py
 ```
 
+After changing the Chrome extension or a web file it shares, also run its browser test, which is off by default (it needs Chrome for Testing or Chromium, and Node 22 or later):
+
+```bash
+KAAL_E2E=1 env -u PYTHONPATH .venv/bin/python -m pytest -q tests/test_extension_e2e.py
+```
+
 After changing an endpoint, regenerate the API spec (a test fails until you do):
 
 ```bash

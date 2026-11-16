@@ -82,3 +82,16 @@ No build step. `lib.js` holds the decisions that need no browser
 (`tests/test_extension.py` runs it under Node). `web/` holds copies of the web
 app's files that the side panel shares; change the originals in `kaal/web/` and
 run `bin/sync-extension-web.py`.
+
+`tests/test_extension_e2e.py` drives the extension in a real browser against a
+throwaway server and a made-up receipt page: connect, save a page, save a
+receipt, review it in the side panel. It is off by default and needs Chrome for
+Testing or Chromium (ordinary Chrome no longer loads an unpacked extension from
+the command line) and Node 22 or later:
+
+```bash
+KAAL_E2E=1 .venv/bin/python -m pytest -q tests/test_extension_e2e.py
+```
+
+It cannot press the right-click entries or the keyboard shortcut; try those by
+hand after changing them.
