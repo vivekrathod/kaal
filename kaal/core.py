@@ -2,7 +2,7 @@
 """Kaal core: the encrypted notes vault and its command handlers.
 
 Vault default: ~/.secure-notes (override with KAAL_VAULT; SECURE_NOTES_VAULT still works)
-Key storage: kaal.keys (macOS Keychain or an owner-only key file)
+Key storage: kaal.keys (an owner-only key file named by KAAL_KEY_FILE)
 Encryption: AES-256-GCM via Python cryptography.
 
 This script intentionally keeps plaintext out of the vault. Index metadata contains
@@ -64,8 +64,6 @@ def note_by_id(note_id: str) -> dict[str, Any]:
         if note.get("id") == note_id:
             return note
     die("Note not found.", kind="not_found")
-SERVICE = key_providers.DEFAULT_KEYCHAIN_SERVICE
-ACCOUNT = key_providers.DEFAULT_KEYCHAIN_ACCOUNT
 KEY_BYTES = key_providers.KEY_BYTES
 
 SENSITIVE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
@@ -428,11 +426,7 @@ def init_vault(args: argparse.Namespace) -> None:
     if not INDEX_PATH.exists():
         save_index({"version": 1, "created": now_iso(), "notes": []})
     described = provider.describe()
-    result = {"status": "initialized", "vault": str(VAULT), "key_provider": described["provider"]}
-    if described["provider"] == "keychain":
-        result["keychain_service"] = described["service"]
-    else:
-        result["key_file"] = described["path"]
+    result = {"status": "initialized", "vault": str(VAULT), "key_provider": described["provider"], "key_file": described["path"]}
     result["key_sha256_prefix"] = hashlib.sha256(key).hexdigest()[:12]
     emit(result, indent=2)
 
@@ -3160,7 +3154,6 @@ def status(args: argparse.Namespace) -> None:
         "index_exists": INDEX_PATH.exists(),
         "key_provider": provider_name,
         "key_exists": has_key,
-        "keychain_key_exists": has_key if provider_name == "keychain" else False,
         "notes": _note_count(),
         "index_encrypted": index_is_encrypted() if INDEX_PATH.exists() else None,
         "receipt_ai": receipt_ai_status(),

@@ -484,7 +484,7 @@ class KaalFeatureTests(unittest.TestCase):
         payload = json.loads(stdout)
         self.assertTrue(payload["vault_exists"])
         self.assertTrue(payload["index_exists"])
-        self.assertFalse(payload["keychain_key_exists"])
+        self.assertNotIn("keychain_key_exists", payload)
         self.assertEqual(payload["notes"], 1)
 
     def test_classify_command_reads_file(self):

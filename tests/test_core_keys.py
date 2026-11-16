@@ -76,7 +76,7 @@ class CoreKeyProviderTests(unittest.TestCase):
         payload = json.loads(stdout)
         self.assertEqual(payload["key_provider"], "file")
         self.assertTrue(payload["key_exists"])
-        self.assertFalse(payload["keychain_key_exists"])
+        self.assertNotIn("keychain_key_exists", payload)
         self.assertNotIn(key_file.read_text().strip(), stdout)
 
 

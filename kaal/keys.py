@@ -1,14 +1,10 @@
 """Vault key retrieval.
 
-Kaal encrypts sensitive notes with one 32-byte AES-256 key, stored as base64
-text. Where the key lives is a deployment choice:
+Kaal encrypts everything with one 32-byte AES-256 key, stored as base64 text in
+a file that only its owner can read, named by ``KAAL_KEY_FILE``. The key is
+never kept in the vault and never included in a backup.
 
-* ``keychain`` (default on macOS): a macOS Keychain generic-password item.
-* ``file`` (default elsewhere): a file readable only by its owner, named by
-  ``KAAL_KEY_FILE``. This is what ``kaal-server`` uses on Linux.
-
-``KAAL_KEY_PROVIDER`` picks one explicitly. Nothing in this module prints,
-logs or embeds key material in an error message.
+Nothing in this module prints, logs or embeds key material in an error message.
 """
 from __future__ import annotations
 
@@ -16,20 +12,13 @@ import base64
 import binascii
 import os
 import secrets
-import shutil
 import stat
-import subprocess
-import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol
 
 KEY_BYTES = 32
-DEFAULT_KEYCHAIN_SERVICE = "Hermes Secure Notes"
-DEFAULT_KEYCHAIN_ACCOUNT = "vault-key-v1"
 MAX_KEY_FILE_BYTES = 4096
-
-SecurityRunner = Callable[..., subprocess.CompletedProcess]
 
 
 class KeyProviderError(Exception):
@@ -62,60 +51,6 @@ def decode_key(text: str, *, source: str) -> bytes:
     if len(key) != KEY_BYTES:
         raise KeyProviderError(f"{source} has the wrong size ({len(key)} bytes); expected {KEY_BYTES}.")
     return key
-
-
-def _run_security(args: list[str], input_text: str | None = None) -> subprocess.CompletedProcess:
-    if not shutil.which("security"):
-        raise KeyProviderError(
-            "macOS security CLI not found. On this system set KAAL_KEY_PROVIDER=file and KAAL_KEY_FILE."
-        )
-    return subprocess.run(["security", *args], input=input_text, text=True, capture_output=True, check=False)
-
-
-class KeychainKeyProvider:
-    name = "keychain"
-
-    def __init__(
-        self,
-        service: str = DEFAULT_KEYCHAIN_SERVICE,
-        account: str = DEFAULT_KEYCHAIN_ACCOUNT,
-        *,
-        runner: SecurityRunner | None = None,
-        executable: str | None = None,
-    ) -> None:
-        self.service = service
-        self.account = account
-        self._run = runner or _run_security
-        self._executable = executable or sys.executable
-
-    def describe(self) -> dict[str, str]:
-        return {"provider": self.name, "service": self.service, "account": self.account}
-
-    def key_exists(self) -> bool:
-        if self._run is _run_security and not shutil.which("security"):
-            return False
-        # Without -w, `security` reports the item's attributes, never the secret.
-        return self._run(["find-generic-password", "-s", self.service, "-a", self.account]).returncode == 0
-
-    def get_key(self, create: bool = False) -> bytes:
-        proc = self._run(["find-generic-password", "-s", self.service, "-a", self.account, "-w"])
-        if proc.returncode == 0:
-            return decode_key(proc.stdout, source="Keychain item")
-        if not create:
-            raise KeyProviderError("Vault key not found in the Keychain. Run: kaal init")
-        key = new_key()
-        add = self._run([
-            "add-generic-password",
-            "-U",
-            "-s", self.service,
-            "-a", self.account,
-            "-w", encode_key(key),
-            "-T", "/usr/bin/security",
-            "-T", self._executable,
-        ])
-        if add.returncode != 0:
-            raise KeyProviderError(f"Could not store the key in the Keychain: {(add.stderr or add.stdout).strip()}")
-        return key
 
 
 class FileKeyProvider:
@@ -172,20 +107,16 @@ class FileKeyProvider:
         return key
 
 
-def provider_from_env(environ: Mapping[str, str] | None = None, *, platform: str | None = None) -> KeyProvider:
+def provider_from_env(environ: Mapping[str, str] | None = None) -> KeyProvider:
     env = os.environ if environ is None else environ
-    platform = platform or sys.platform
-    choice = (env.get("KAAL_KEY_PROVIDER") or "").strip().lower()
-    if not choice:
-        choice = "keychain" if platform == "darwin" else "file"
+    choice = (env.get("KAAL_KEY_PROVIDER") or "file").strip().lower()
     if choice == "keychain":
-        return KeychainKeyProvider(
-            service=env.get("KAAL_KEYCHAIN_SERVICE") or DEFAULT_KEYCHAIN_SERVICE,
-            account=env.get("KAAL_KEYCHAIN_ACCOUNT") or DEFAULT_KEYCHAIN_ACCOUNT,
+        raise KeyProviderError(
+            "Kaal no longer reads its key from the macOS Keychain. Put the key in an owner-only file and name it with KAAL_KEY_FILE."
         )
-    if choice == "file":
-        path = (env.get("KAAL_KEY_FILE") or "").strip()
-        if not path:
-            raise KeyProviderError("KAAL_KEY_FILE must name the key file when the file key provider is used.")
-        return FileKeyProvider(path)
-    raise KeyProviderError("KAAL_KEY_PROVIDER must be 'keychain' or 'file'.")
+    if choice != "file":
+        raise KeyProviderError("KAAL_KEY_PROVIDER, if set, must be 'file'.")
+    path = (env.get("KAAL_KEY_FILE") or "").strip()
+    if not path:
+        raise KeyProviderError("KAAL_KEY_FILE must name the file that holds the vault key.")
+    return FileKeyProvider(path)

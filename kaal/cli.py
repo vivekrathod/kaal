@@ -19,7 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=prog, description=description)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp = sub.add_parser("init", help="Initialize vault and Keychain key")
+    sp = sub.add_parser("init", help="Create the vault and its key file")
     sp.set_defaults(func=core.init_vault)
 
     sp = sub.add_parser("status", help="Show vault status")
