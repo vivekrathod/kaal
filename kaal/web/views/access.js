@@ -147,8 +147,21 @@ export function sharingView(container, _params, context) {
         }
         attempt(async () => draw({ ...shared, members: await api.setMember(login.value.trim(), role.value) }));
       });
+      const newName = h("input", { type: "text", id: "vault-rename", maxlength: "80", value: shared.vault.name, autocomplete: "off" });
+      const renameForm = h("form", { class: "inline-form", novalidate: true }, newName, h("button", { type: "submit", class: "button" }, "Rename"));
+      renameForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!newName.value.trim()) {
+          replace(status, notice("A vault needs a name.", "error"));
+          return;
+        }
+        attempt(async () => { await api.renameVault(newName.value.trim()); await context.refresh(); });
+      });
       membersCard = h("section", { class: "card section" },
-        h("h1", {}, `Who shares “${shared.vault.name}”`),
+        h("h1", {}, `“${shared.vault.name}”`),
+        h("label", { for: "vault-rename" }, "Name of this vault"),
+        renameForm,
+        h("h2", { class: "sub" }, "Who shares it"),
         h("ul", { class: "plain" }, shared.members.map((member) => {
           const pick = h("select", { "aria-label": `Role of ${member.login}` }, ROLES.map(([value, label]) => h("option", { value, selected: value === member.role }, label.split(":")[0])));
           pick.addEventListener("change", () => attempt(async () => draw({ ...shared, members: await api.setMember(member.login, pick.value) })).then(() => { pick.value = member.role; }));

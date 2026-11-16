@@ -75,16 +75,18 @@ export function signInView({ onSignedIn }) {
     const [loginLabel, login] = field("login", "Choose a sign-in name", { type: "text", autocomplete: "username", maxlength: "64" });
     const [nameLabel, name] = field("name", "Your name (optional)", { type: "text", autocomplete: "name", maxlength: "100" });
     name.required = false;
+    const [vaultLabel, vault] = field("vault-name", "Name your vault (optional)", { type: "text", autocomplete: "off", maxlength: "80", placeholder: "My notes" });
+    vault.required = false;
     const [passwordLabel, password] = field("new-password", "Password", { type: "password", autocomplete: "new-password" });
     const [againLabel, again] = field("again", "Password again", { type: "password", autocomplete: "new-password" });
     replace(page, form({
       title: "Create an account",
       intro: "You get a vault of your own. Nobody else here can see into it.",
-      fields: [loginLabel, login, nameLabel, name, passwordLabel, password, againLabel, again],
+      fields: [loginLabel, login, nameLabel, name, vaultLabel, vault, passwordLabel, password, againLabel, again],
       submitLabel: "Create account",
       busyLabel: "Creating…",
       check: () => (!login.value.trim() ? "Choose a sign-in name." : password.value.length < 10 ? "Choose a password of at least 10 characters." : password.value !== again.value ? "The two passwords don't match." : null),
-      send: () => api.signUp(login.value.trim(), name.value.trim(), password.value),
+      send: () => api.signUp(login.value.trim(), name.value.trim(), password.value, vault.value.trim()),
       done: (signedIn) => replace(page, recoveryCodesCard(signedIn.recovery_codes || [], () => onSignedIn(signedIn))),
       wrong: (error) => (error.status === 429 ? "Too many new accounts just now. Try again later." : error.message),
       footer: h("p", { class: "muted small choices" }, link("Back to sign in", withPassword)),

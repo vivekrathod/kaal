@@ -340,6 +340,7 @@ def test_every_route_works_on_the_servers_vault_and_never_on_the_default(tmp_pat
     call("DELETE", f"/v1/account/tokens/{made_token['token']['id']}", headers=person)
     call("POST", "/v1/account/vaults", json={"name": "Made-up second vault"}, headers=person)
     call("GET", "/v1/vault/members", headers=person)
+    call("POST", "/v1/vault/name", json={"name": "Made-up name"}, headers=person)
 
     # administrators, and open sign-up
     added = result(call("POST", "/v1/admin/people", json={"login": "made-up-person"}, headers=person))["account"]["id"]

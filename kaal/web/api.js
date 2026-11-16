@@ -83,13 +83,14 @@ export const api = {
   chooseVault: (vault) => result(request("POST", "/v1/session/vault", { json: { vault } })),
 
   signInOptions: () => result(request("GET", "/v1/sign-in/options")),
-  signUp: (login, name, password) => result(request("POST", "/v1/sign-up", { json: { login, name, password } })),
+  signUp: (login, name, password, vaultName) => result(request("POST", "/v1/sign-up", { json: { login, name, password, vault_name: vaultName } })),
 
   account: () => result(request("GET", "/v1/account")),
   tokens: () => result(request("GET", "/v1/account/tokens")).then((data) => data.tokens),
   createToken: (name, scopes, vault) => result(request("POST", "/v1/account/tokens", { json: { name, scopes, vault } })),
   revokeToken: (tokenId) => result(request("DELETE", `/v1/account/tokens/${id(tokenId)}`)),
   createVault: (name) => result(request("POST", "/v1/account/vaults", { json: { name } })).then((data) => data.vault),
+  renameVault: (name) => result(request("POST", "/v1/vault/name", { json: { name } })).then((data) => data.vault),
   members: () => result(request("GET", "/v1/vault/members")),
   setMember: (login, role) => result(request("POST", "/v1/vault/members", { json: { login, role } })).then((data) => data.members),
   removeMember: (accountId) => result(request("DELETE", `/v1/vault/members/${id(accountId)}`)).then((data) => data.members),

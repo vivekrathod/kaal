@@ -314,6 +314,15 @@ class AccountStore:
         db.execute("INSERT INTO memberships (account_id, vault_id, role, created) VALUES (?, ?, 'owner', ?)", (account["id"], vault_id, now))
         return self._vault(db.execute("SELECT * FROM vaults WHERE id = ?", (vault_id,)).fetchone())
 
+    def rename_vault(self, vault_id: str, name: str) -> dict[str, Any]:
+        cleaned = (name or "").strip()[:80]
+        if not cleaned:
+            raise AccountError("A vault needs a name.")
+        with self._db(write=True) as db:
+            if db.execute("UPDATE vaults SET name = ? WHERE id = ?", (cleaned, vault_id)).rowcount == 0:
+                raise AccountError(f"No vault {vault_id!r}.")
+            return self._vault(db.execute("SELECT * FROM vaults WHERE id = ?", (vault_id,)).fetchone())
+
     def remove_vault_record(self, vault_id: str) -> None:
         """Forget a vault that was recorded but whose folder could not be made."""
         with self._db(write=True) as db:

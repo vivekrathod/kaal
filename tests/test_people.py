@@ -193,6 +193,32 @@ def test_an_owner_shares_their_vault_and_takes_it_back(house):
     assert house.browser().get("/v1/vault/members", headers=token).status_code == 403
 
 
+def test_a_person_names_their_vault_when_signing_up_and_can_rename_it(house):
+    house.store.put("signup", "open")
+    newcomer = house.browser()
+    told = newcomer.post("/v1/sign-up", json={"login": "riley", "password": GOOD, "vault_name": "  Riley's papers "}).json()["result"]
+    assert told["vault"]["name"] == "Riley's papers"
+    plain = house.browser().post("/v1/sign-up", json={"login": "casey", "password": GOOD}).json()["result"]
+    assert plain["vault"]["name"] == "My notes"
+
+    assert newcomer.post("/v1/library/notes", json={"title": "Kept", "body": "b"}).status_code == 200
+    renamed = newcomer.post("/v1/vault/name", json={"name": "Receipts and notes"}).json()["result"]["vault"]
+    assert renamed["name"] == "Receipts and notes" and renamed["id"] == told["vault"]["id"]
+    assert newcomer.get("/v1/session").json()["result"]["vault"]["name"] == "Receipts and notes"
+    assert [n["title"] for n in newcomer.get("/v1/library/notes").json()["result"]] == ["Kept"], "only the name changed"
+    assert newcomer.post("/v1/vault/name", json={"name": "   "}).status_code == 400
+
+    # Only an owner renames a vault, and an administrator names the vault of someone they add.
+    main = house.store.defaults()[1]
+    house.store.grant("riley", main, "editor")
+    newcomer.post("/v1/session/vault", json={"vault": main})
+    assert newcomer.post("/v1/vault/name", json={"name": "Taken over"}).status_code == 403
+    admin = house.signed_in("owner")
+    made = admin.post("/v1/admin/people", json={"login": "sam", "vault_name": "Sam's vault"}).json()["result"]
+    assert made["vault"]["name"] == "Sam's vault"
+    assert house.browser().post("/v1/vault/name", json={"name": "x"}, headers={"Authorization": f"Bearer {house.old_token}"}).status_code == 403
+
+
 def test_a_person_can_make_more_vaults_of_their_own_up_to_a_limit(house):
     owner = house.signed_in("owner")
     made = owner.post("/v1/account/vaults", json={"name": " Household "}).json()["result"]["vault"]

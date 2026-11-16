@@ -811,6 +811,7 @@ class PasswordProof(BaseModel):
 class PersonNew(BaseModel):
     login: str = Field(min_length=1, max_length=64)
     name: str = Field(default="", max_length=100)
+    vault_name: str = Field(default="", max_length=80)
     admin: bool = False
     own_vault: bool = True
 
@@ -827,6 +828,7 @@ class SignUp(BaseModel):
     login: str = Field(min_length=1, max_length=64)
     name: str = Field(default="", max_length=100)
     password: str = Field(min_length=1, max_length=1024)
+    vault_name: str = Field(default="", max_length=80)
 
 
 class MemberChange(BaseModel):
@@ -1216,6 +1218,16 @@ def create_app(settings: Settings) -> FastAPI:
             return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind)
         return answer({"vault": {"id": vault["id"], "name": vault["name"], "role": "owner"}})
 
+    @app.post("/v1/vault/name", tags=["account"])
+    def vault_rename(request: Request, body: VaultNew, person: dict[str, Any] = require_owner()):
+        """Give the open vault another name. Only the name changes."""
+        state = S(request)
+        try:
+            vault = state.accounts.rename_vault(person["vault"], body.name)
+        except accounts.AccountError as error:
+            return _error(400, str(error), "invalid")
+        return answer({"vault": {"id": vault["id"], "name": vault["name"], "role": "owner"}})
+
     @app.get("/v1/vault/members", tags=["account"])
     def vault_members(request: Request, person: dict[str, Any] = require_owner()):
         state = S(request)
@@ -1262,7 +1274,7 @@ def create_app(settings: Settings) -> FastAPI:
         state = S(request)
         try:
             made = state.accounts.add_account(body.login, body.name, admin=body.admin)
-            vault = create_vault(state.accounts, "My notes", made["id"]) if body.own_vault else None
+            vault = create_vault(state.accounts, body.vault_name.strip() or "My notes", made["id"]) if body.own_vault else None
         except accounts.AccountError as error:
             return _error(409 if "already" in str(error) else 400, str(error), "conflict" if "already" in str(error) else "invalid")
         except core.KaalError as error:
@@ -1327,7 +1339,7 @@ def create_app(settings: Settings) -> FastAPI:
         except accounts.AccountError as error:
             return _error(409 if "already" in str(error) else 400, "That sign-in name is taken." if "already" in str(error) else str(error),
                           "conflict" if "already" in str(error) else "invalid")
-        create_vault(state.accounts, "My notes", made["id"])
+        create_vault(state.accounts, body.vault_name.strip() or "My notes", made["id"])
         state.accounts.set_password(made["id"], passwords.hash_password(body.password))
         return start_session(request, state, made, recovery_codes=state.accounts.new_recovery_codes(made["id"]))
 

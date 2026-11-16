@@ -120,7 +120,7 @@ wait, from one minute up to fifteen. Settings shows a person their signed-in
 browsers and lets them sign any of them out.
 
 In the web app, Settings has three more pages for people signed in as
-themselves. **Vaults and sharing**: open another of your vaults, create one,
+themselves. **Vaults and sharing**: rename your vault, open another, create one,
 and (as an owner) let someone into the open vault as viewer, editor or owner,
 or take them out. **Tokens**: make and revoke tokens for your own scripts and
 the browser extension; a token can do no more than your role in its vault, and

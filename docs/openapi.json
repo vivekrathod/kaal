@@ -486,6 +486,12 @@
             "default": true,
             "title": "Own Vault",
             "type": "boolean"
+          },
+          "vault_name": {
+            "default": "",
+            "maxLength": 80,
+            "title": "Vault Name",
+            "type": "string"
           }
         },
         "required": [
@@ -739,6 +745,12 @@
             "minLength": 1,
             "title": "Password",
             "type": "string"
+          },
+          "vault_name": {
+            "default": "",
+            "maxLength": 80,
+            "title": "Vault Name",
+            "type": "string"
           }
         },
         "required": [
@@ -932,7 +944,7 @@
   "info": {
     "description": "An encrypted notes vault. Every request needs `Authorization: Bearer <token>` except /v1/health.",
     "title": "Kaal",
-    "version": "0.22.1"
+    "version": "0.22.2"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -4005,6 +4017,46 @@
           }
         },
         "summary": "Vault Member Remove",
+        "tags": [
+          "account"
+        ]
+      }
+    },
+    "/v1/vault/name": {
+      "post": {
+        "description": "Give the open vault another name. Only the name changes.",
+        "operationId": "vault_rename_v1_vault_name_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VaultNew"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Vault Rename",
         "tags": [
           "account"
         ]
