@@ -127,14 +127,14 @@ def test_an_administrator_can_switch_people_off_and_share_the_job_but_not_lock_e
 
 def test_accounts_are_by_invitation_until_an_administrator_opens_sign_up(house):
     stranger = house.browser()
-    assert stranger.get("/v1/sign-in/options").json()["result"] == {"signup": "invitation"}
+    assert stranger.get("/v1/sign-in/options").json()["result"] == {"signup": "invitation", "services": []}
     refused = stranger.post("/v1/sign-up", json={"login": "stranger", "password": GOOD})
     assert refused.status_code == 403 and house.store.account("stranger") is None
 
     admin = house.signed_in("owner")
     assert admin.post("/v1/admin/sign-up", json={"signup": "anything"}).status_code == 400
     assert admin.post("/v1/admin/sign-up", json={"signup": "open"}).json()["result"] == {"signup": "open"}
-    assert stranger.get("/v1/sign-in/options").json()["result"] == {"signup": "open"}
+    assert stranger.get("/v1/sign-in/options").json()["result"] == {"signup": "open", "services": []}
 
     assert stranger.post("/v1/sign-up", json={"login": "stranger", "password": "short"}).status_code == 400
     assert stranger.post("/v1/sign-up", json={"login": "owner", "password": GOOD}).status_code == 409

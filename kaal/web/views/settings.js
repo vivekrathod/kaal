@@ -1,6 +1,6 @@
 import { api, appVersion } from "/web/api.js";
-import { h, replace, notice, actionButton, formatDate } from "/web/ui.js";
-import { recoveryCodesCard } from "/web/views/signin.js";
+import { h, replace, notice, actionButton, twoStepButton, formatDate } from "/web/ui.js";
+import { recoveryCodesCard, SERVICE_PROBLEMS } from "/web/views/signin.js";
 
 const secret = (id, label, autocomplete) => [h("label", { for: id }, label), h("input", { type: "password", id, name: id, autocomplete, required: true })];
 
@@ -41,6 +41,26 @@ function accountSection(account, { status, attempt, redraw, signOut }) {
     });
   });
 
+  // Sign-in services the installation offers: connect one, or take a connection away.
+  const connections = (account.connections || []).map((entry) => {
+    if (entry.connected) {
+      return h("li", { class: "line" },
+        h("span", {}, entry.name, h("span", { class: "muted-text" }, entry.email ? ` · connected as ${entry.email}` : " · connected")),
+        twoStepButton("Disconnect", "Really disconnect?", () => attempt(async () => { await api.disconnect(entry.service); await redraw(); })));
+    }
+    const proof = account.has_password ? h("input", { type: "password", id: `connect-${entry.service}`, autocomplete: "current-password", placeholder: "Your password", "aria-label": `Your password, to connect ${entry.name}` }) : null;
+    const connectForm = h("form", { class: "inline-form", novalidate: true }, proof, h("button", { type: "submit", class: "button" }, `Connect ${entry.name}`));
+    connectForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (proof && !proof.value) {
+        replace(status, notice("Enter your password to connect it.", "error"));
+        return;
+      }
+      attempt(async () => location.assign(await api.connect(entry.service, proof ? proof.value : "")));
+    });
+    return h("li", { class: "line" }, h("span", {}, entry.name, h("span", { class: "muted-text" }, " · not connected")), connectForm);
+  });
+
   const others = account.sessions.filter((entry) => !entry.current);
   return [
     h("section", { class: "card section" },
@@ -50,12 +70,19 @@ function accountSection(account, { status, attempt, redraw, signOut }) {
       h("ul", { class: "plain" },
         h("li", { class: "line" }, h("a", { href: "#/settings/sharing" }, "Vaults and sharing"), h("span", { class: "muted-text" }, "Open another vault, or let someone into this one")),
         h("li", { class: "line" }, h("a", { href: "#/settings/tokens" }, "Tokens"), h("span", { class: "muted-text" }, "For scripts and the browser extension")),
-        account.account.admin ? h("li", { class: "line" }, h("a", { href: "#/settings/people" }, "People"), h("span", { class: "muted-text" }, "Who has an account here")) : null),
+        account.account.admin ? h("li", { class: "line" }, h("a", { href: "#/settings/people" }, "People"), h("span", { class: "muted-text" }, "Who has an account here")) : null,
+        account.account.admin ? h("li", { class: "line" }, h("a", { href: "#/settings/sign-in" }, "Sign-in services"), h("span", { class: "muted-text" }, "Let people sign in with Google")) : null),
       h("p", { class: "muted" }, `Kaal ${appVersion() || ""}`),
       h("button", { type: "button", class: "button", onClick: signOut }, "Sign out")),
-    h("section", { class: "card section" },
+    connections.length ? h("section", { class: "card section" },
+      h("h1", {}, "Sign in with"),
+      h("p", { class: "muted" }, "Once connected, you can sign in to Kaal with that account instead of typing a password."),
+      h("ul", { class: "plain" }, connections)) : null,
+    account.has_password ? h("section", { class: "card section" },
       h("h1", {}, "Password"),
-      passwordForm),
+      passwordForm) : h("section", { class: "card section" },
+      h("h1", {}, "Password"),
+      h("p", { class: "muted" }, "You have no password here; you sign in through the service above. To add one as well, ask whoever runs this Kaal for a setup link.")),
     h("section", { class: "card section" },
       h("h1", {}, "Signed-in browsers"),
       h("ul", { class: "plain" }, account.sessions.map((entry) => h("li", { class: "line" },
@@ -63,7 +90,7 @@ function accountSection(account, { status, attempt, redraw, signOut }) {
           h("span", { class: "muted-text" }, ` · since ${formatDate(entry.created.slice(0, 10))}`)),
         entry.current ? null : actionButton("Sign out", () => attempt(async () => { await api.endSession(entry.id); await redraw(); }), { kind: "small" })))),
       others.length > 1 ? actionButton("Sign out all the others", () => attempt(async () => { await api.endOtherSessions(); await redraw(); })) : null),
-    h("section", { class: "card section" },
+    !account.has_password ? null : h("section", { class: "card section" },
       h("h1", {}, "Recovery codes"),
       h("p", { class: "muted" }, account.recovery_codes_left
         ? `You have ${account.recovery_codes_left} unused. One of them lets you choose a new password if you forget yours.`
@@ -74,9 +101,12 @@ function accountSection(account, { status, attempt, redraw, signOut }) {
   ];
 }
 
-export function settingsView(container, _params, { session, signOut, expired }) {
+export function settingsView(container, params, { session, signOut, expired }) {
   let alive = true;
   const status = h("div", {});
+  // Back from a sign-in service after pressing Connect.
+  if (params.connected) status.append(notice("Connected. You can now sign in that way."));
+  if (params.problem) status.append(notice(`Not connected. ${SERVICE_PROBLEMS[params.problem] || SERVICE_PROBLEMS.failed}`, "error"));
 
   const attempt = async (work) => {
     status.replaceChildren();

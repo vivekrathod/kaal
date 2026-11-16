@@ -92,6 +92,39 @@ _MIGRATIONS: tuple[str, ...] = (
         used_at TEXT
     );
     """,
+    # 3: signing in through another service, such as Google.
+    """
+    CREATE TABLE signin_services (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        issuer TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        secret TEXT NOT NULL,
+        created TEXT NOT NULL
+    );
+    CREATE TABLE identities (
+        service TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        email TEXT NOT NULL DEFAULT '',
+        created TEXT NOT NULL,
+        last_used TEXT,
+        PRIMARY KEY (service, subject),
+        UNIQUE (account_id, service)
+    );
+    CREATE TABLE signin_flows (
+        state_sha256 TEXT PRIMARY KEY,
+        service TEXT NOT NULL,
+        purpose TEXT NOT NULL CHECK (purpose IN ('sign-in', 'connect', 'setup')),
+        account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+        setup_sha256 TEXT,
+        nonce TEXT NOT NULL,
+        verifier TEXT NOT NULL,
+        redirect TEXT NOT NULL,
+        created TEXT NOT NULL,
+        expires TEXT NOT NULL
+    );
+    """,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 SESSION_PREFIX = "ks"
@@ -99,6 +132,8 @@ SESSION_DAYS = 30
 SESSION_TOUCH_SECONDS = 300   # how stale "last seen" may get before it is written again
 SETUP_HOURS = 24
 RECOVERY_CODE_COUNT = 8
+FLOW_MINUTES = 10             # how long a trip to a sign-in service and back may take
+_SERVICE_ID = re.compile(r"[a-z][a-z0-9-]{0,31}")
 
 
 class AccountError(Exception):
@@ -251,8 +286,9 @@ class AccountStore:
                                   "(SELECT 1 FROM setup_codes c WHERE c.account_id = a.id AND c.used_at IS NULL AND c.expires > ?) AS link_waiting "
                                   "FROM accounts a ORDER BY a.rowid", (now, now)).fetchall():
                 vaults = db.execute("SELECT v.id, v.name, m.role FROM memberships m JOIN vaults v ON v.id = m.vault_id WHERE m.account_id = ? ORDER BY m.rowid", (row["id"],))
+                services = [found["service"] for found in db.execute("SELECT service FROM identities WHERE account_id = ? ORDER BY rowid", (row["id"],))]
                 people.append({**self._account(row), "has_password": bool(row["has_password"]), "browsers": row["browsers"], "link_waiting": bool(row["link_waiting"]),
-                               "vaults": [{"id": v["id"], "name": v["name"], "role": v["role"]} for v in vaults]})
+                               "services": services, "vaults": [{"id": v["id"], "name": v["name"], "role": v["role"]} for v in vaults]})
         return people
 
     def set_admin(self, id_or_login: str, admin: bool) -> dict[str, Any]:
@@ -515,13 +551,15 @@ class AccountStore:
             db.execute("INSERT INTO setup_codes (code_sha256, account_id, created, expires) VALUES (?, ?, ?, ?)", (_sha(code), row["id"], _now(), _later(hours=hours)))
         return code
 
-    def setup_account(self, code: str, *, spend: bool = False) -> dict[str, Any] | None:
-        """The account a setup code is for, while it is unused and in date. ``spend`` uses it up."""
+    def setup_account(self, code: str, *, spend: bool = False, hashed: str | None = None) -> dict[str, Any] | None:
+        """The account a setup code is for, while it is unused and in date. ``spend`` uses it up.
+        ``hashed`` names the code by its hash, for a caller that never held the code itself."""
+        code_hash = hashed or _sha(code or "")
         with self._db(write=spend) as db:
             row = db.execute("SELECT a.* FROM setup_codes c JOIN accounts a ON a.id = c.account_id "
-                             "WHERE c.code_sha256 = ? AND c.used_at IS NULL AND c.expires > ? AND a.disabled_at IS NULL", (_sha(code or ""), _now())).fetchone()
+                             "WHERE c.code_sha256 = ? AND c.used_at IS NULL AND c.expires > ? AND a.disabled_at IS NULL", (code_hash, _now())).fetchone()
             if row is not None and spend:
-                db.execute("UPDATE setup_codes SET used_at = ? WHERE code_sha256 = ?", (_now(), _sha(code)))
+                db.execute("UPDATE setup_codes SET used_at = ? WHERE code_sha256 = ?", (_now(), code_hash))
             return self._account(row)
 
     def set_login(self, id_or_login: str, new_login: str) -> dict[str, Any]:
@@ -541,3 +579,117 @@ class AccountStore:
         if cleaned:
             with self._db(write=True) as db:
                 db.execute("UPDATE accounts SET name = ? WHERE id = ?", (cleaned, account_id))
+
+    # --- sign-in services: Google, or any other OpenID Connect provider
+
+    @staticmethod
+    def _service(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        return {"id": row["id"], "name": row["name"], "issuer": row["issuer"], "client_id": row["client_id"], "secret": row["secret"], "created": row["created"]}
+
+    def put_service(self, service_id: str, name: str, issuer: str, client_id: str, secret: str) -> dict[str, Any]:
+        """Add a sign-in service or replace its settings. ``secret`` arrives already encrypted.
+
+        People stay connected when only the client changes; a different issuer
+        is a different set of people, so their connections are dropped."""
+        service_id, name, issuer, client_id = (service_id or "").strip().lower(), (name or "").strip()[:40], (issuer or "").strip().rstrip("/"), (client_id or "").strip()
+        if not _SERVICE_ID.fullmatch(service_id):
+            raise AccountError("A sign-in service's id is 1 to 32 lower-case letters, digits and dashes, starting with a letter.")
+        if not name or not client_id or not secret:
+            raise AccountError("A sign-in service needs a name, a client id and a client secret.")
+        if not issuer.startswith("https://"):
+            raise AccountError("A sign-in service's address must start with https://")
+        with self._db(write=True) as db:
+            before = db.execute("SELECT issuer FROM signin_services WHERE id = ?", (service_id,)).fetchone()
+            if before is not None and before["issuer"] != issuer:
+                db.execute("DELETE FROM identities WHERE service = ?", (service_id,))
+            db.execute("INSERT INTO signin_services (id, name, issuer, client_id, secret, created) VALUES (?, ?, ?, ?, ?, ?) "
+                       "ON CONFLICT(id) DO UPDATE SET name = excluded.name, issuer = excluded.issuer, client_id = excluded.client_id, secret = excluded.secret",
+                       (service_id, name, issuer, client_id, secret, _now()))
+            return self._service(db.execute("SELECT * FROM signin_services WHERE id = ?", (service_id,)).fetchone())
+
+    def service(self, service_id: str) -> dict[str, Any] | None:
+        with self._db() as db:
+            return self._service(db.execute("SELECT * FROM signin_services WHERE id = ?", (service_id,)).fetchone())
+
+    def services(self) -> list[dict[str, Any]]:
+        with self._db() as db:
+            return [self._service(row) for row in db.execute("SELECT * FROM signin_services ORDER BY rowid")]
+
+    def remove_service(self, service_id: str) -> bool:
+        """Stop offering a service. People's connections are kept, in case it is added again."""
+        with self._db(write=True) as db:
+            return db.execute("DELETE FROM signin_services WHERE id = ?", (service_id,)).rowcount > 0
+
+    # --- identities: which person at a sign-in service is which account here
+
+    @staticmethod
+    def _identity(row: sqlite3.Row) -> dict[str, Any]:
+        return {"service": row["service"], "subject": row["subject"], "account": row["account_id"], "email": row["email"], "created": row["created"], "last_used": row["last_used"]}
+
+    def identity_account(self, service_id: str, subject: str) -> dict[str, Any] | None:
+        """The account connected to this person at this service; notes that it was just used."""
+        with self._db(write=True) as db:
+            row = db.execute("SELECT a.* FROM identities i JOIN accounts a ON a.id = i.account_id WHERE i.service = ? AND i.subject = ?", (service_id, subject)).fetchone()
+            if row is not None:
+                db.execute("UPDATE identities SET last_used = ? WHERE service = ? AND subject = ?", (_now(), service_id, subject))
+            return self._account(row)
+
+    def connect_identity(self, account_id: str, service_id: str, subject: str, email: str = "") -> None:
+        """Let this person at this service sign in as this account. One per service per account."""
+        with self._db(write=True) as db:
+            taken = db.execute("SELECT account_id FROM identities WHERE service = ? AND subject = ?", (service_id, subject)).fetchone()
+            if taken is not None and taken["account_id"] != account_id:
+                raise AccountError("That account at the sign-in service is already connected to another account here.")
+            db.execute("DELETE FROM identities WHERE account_id = ? AND service = ?", (account_id, service_id))
+            db.execute("INSERT INTO identities (service, subject, account_id, email, created) VALUES (?, ?, ?, ?, ?)", (service_id, subject, account_id, (email or "")[:254], _now()))
+
+    def identities_of(self, account_id: str) -> list[dict[str, Any]]:
+        with self._db() as db:
+            return [self._identity(row) for row in db.execute("SELECT * FROM identities WHERE account_id = ? ORDER BY rowid", (account_id,))]
+
+    def disconnect_identity(self, account_id: str, service_id: str) -> bool:
+        """Remove a connection, unless it is the person's only way in."""
+        with self._db(write=True) as db:
+            if db.execute("SELECT 1 FROM identities WHERE account_id = ? AND service = ?", (account_id, service_id)).fetchone() is None:
+                return False
+            has_password = db.execute("SELECT 1 FROM passwords WHERE account_id = ?", (account_id,)).fetchone() is not None
+            others = db.execute("SELECT COUNT(*) FROM identities i JOIN signin_services s ON s.id = i.service WHERE i.account_id = ? AND i.service != ?",
+                                (account_id, service_id)).fetchone()[0]
+            if not has_password and not others:
+                raise AccountError("That is your only way to sign in. Choose a password first.")
+            db.execute("DELETE FROM identities WHERE account_id = ? AND service = ?", (account_id, service_id))
+            return True
+
+    def free_login(self, wanted: str) -> str:
+        """A sign-in name nobody has yet, as close to ``wanted`` as possible."""
+        base = re.sub(r"[^a-z0-9._+-]", "", (wanted or "").lower()).lstrip("._+-")[:56] or "person"
+        with self._db() as db:
+            taken = {row["login"].lower() for row in db.execute("SELECT login FROM accounts WHERE login LIKE ?", (base + "%",))}
+        return next(name for name in (base, *(f"{base}{number}" for number in range(2, 10_000))) if name not in taken)
+
+    # --- flows: one trip to a sign-in service and back
+
+    def start_flow(self, service_id: str, purpose: str, *, nonce: str, verifier: str, redirect: str,
+                   account_id: str | None = None, setup_code: str | None = None) -> str:
+        """Remember a trip that is about to start; returns its ``state``, which is not stored."""
+        state = secrets.token_urlsafe(32)
+        with self._db(write=True) as db:
+            db.execute("DELETE FROM signin_flows WHERE expires <= ?", (_now(),))
+            db.execute("INSERT INTO signin_flows (state_sha256, service, purpose, account_id, setup_sha256, nonce, verifier, redirect, created, expires) "
+                       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       (_sha(state), service_id, purpose, account_id, _sha(setup_code) if setup_code else None, nonce, verifier, redirect, _now(), _later(minutes=FLOW_MINUTES)))
+        return state
+
+    def finish_flow(self, state: str) -> dict[str, Any] | None:
+        """The trip a ``state`` belongs to, which is used up by asking. None when unknown or too old."""
+        with self._db(write=True) as db:
+            row = db.execute("SELECT * FROM signin_flows WHERE state_sha256 = ?", (_sha(state or ""),)).fetchone()
+            if row is None:
+                return None
+            db.execute("DELETE FROM signin_flows WHERE state_sha256 = ?", (row["state_sha256"],))
+            if row["expires"] <= _now():
+                return None
+            return {"service": row["service"], "purpose": row["purpose"], "account": row["account_id"], "setup": row["setup_sha256"],
+                    "nonce": row["nonce"], "verifier": row["verifier"], "redirect": row["redirect"]}

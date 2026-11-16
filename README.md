@@ -119,7 +119,43 @@ passwords for one sign-in name are free, after which each further try has to
 wait, from one minute up to fifteen. Settings shows a person their signed-in
 browsers and lets them sign any of them out.
 
-In the web app, Settings has three more pages for people signed in as
+**Signing in with Google (optional).** An installation can also let people
+sign in through Google, or any other OpenID Connect service, instead of typing
+a password. Nothing is offered until whoever runs the installation sets it up:
+
+1. In the [Google Cloud console](https://console.cloud.google.com/apis/credentials),
+   create an OAuth client ID of type "Web application". Under "Authorized
+   redirect URIs" add `https://YOUR-KAAL-ADDRESS/v1/sign-in/with/google/callback`.
+2. Give Kaal the client ID and client secret: as an administrator, in the web
+   app under Settings → Sign-in services; or on the server, with the secret in
+   a file so that it is never part of a command line:
+
+   ```bash
+   kaal-server sign-in add google --client-id ID --secret-file /path/to/secret --address https://YOUR-KAAL-ADDRESS
+   kaal-server sign-in list           # also prints the redirect address to register
+   kaal-server sign-in remove google
+   ```
+
+The sign-in page then shows "Continue with Google". A Google account signs in
+as the Kaal account it is connected to, and is connected in one of three ways:
+a person who is signed in connects it under Settings (proving their password
+first); a person with a setup link presses "Continue with Google" on it
+instead of choosing a password; or, where sign-up is open, a Google account
+nobody has connected gets a new Kaal account with a vault of its own. An email
+address that happens to match a sign-in name connects nothing.
+
+Kaal asks Google only who the person is (`openid email profile`), keeps
+Google's id for them and their email address, and asks for no access to their
+mail, files or contacts. The client secret is stored encrypted with the
+installation's key. The browser makes the trip with a one-time code (the
+authorization-code flow with PKCE), every statement's signature, issuer,
+audience, expiry and nonce is checked, and a trip can be finished only once,
+within ten minutes, by the browser that started it. Another OpenID Connect
+service is added the same way with `--issuer https://…` and an id of your own
+in place of `google`. Tokens are unaffected: scripts, the command-line client
+and the browser extension keep using theirs.
+
+In the web app, Settings has more pages for people signed in as
 themselves. **Vaults and sharing**: rename your vault, open another, create one,
 and (as an owner) let someone into the open vault as viewer, editor or owner,
 or take them out. **Tokens**: make and revoke tokens for your own scripts and
@@ -127,7 +163,8 @@ the browser extension; a token can do no more than your role in its vault, and
 its secret is shown once. **People**, for administrators: add a person and get
 their setup link, make a new link for someone who lost their password, switch
 an account off or on, share the administrator's job, and choose whether
-strangers may create accounts.
+strangers may create accounts. **Sign-in services**, for administrators: offer
+Google or another OpenID Connect service, or stop offering one.
 
 Accounts are by invitation unless an administrator opens sign-up, in which
 case the sign-in page offers "Create an account". Open sign-up is capped at

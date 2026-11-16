@@ -224,7 +224,8 @@ export function peopleView(container, _params, context) {
             h("strong", {}, person.name), person.name !== person.login ? h("span", { class: "muted-text" }, ` · ${person.login}`) : null,
             h("span", { class: "muted-text" }, [
               person.admin ? " · administrator" : "",
-              person.disabled_at ? " · switched off" : !person.has_password ? (person.link_waiting ? " · has a setup link, not used yet" : " · has no password yet") : "",
+              person.disabled_at ? " · switched off" : (person.services || []).length ? ` · signs in with ${person.services.join(", ")}`
+                : !person.has_password ? (person.link_waiting ? " · has a setup link, not used yet" : " · has no password yet") : "",
               person.browsers ? ` · ${person.browsers} browser${person.browsers === 1 ? "" : "s"} signed in` : "",
             ].join(""))),
           h("span", { class: "row" },
@@ -246,6 +247,69 @@ export function peopleView(container, _params, context) {
   attempt(async () => {
     const all = await api.everyone();
     if (alive()) draw(all);
+  });
+  return leave;
+}
+
+// For administrators: which services people may sign in through.
+export function signInServicesView(container, _params, context) {
+  const { status, attempt, alive, leave } = page(container, context);
+  const callbackFor = (service) => `${location.origin}/v1/sign-in/with/${service}/callback`;
+
+  function draw(told) {
+    const kind = h("select", { id: "service-kind" }, h("option", { value: "google" }, "Google"), h("option", { value: "other" }, "Another OpenID Connect service"));
+    const name = h("input", { type: "text", id: "service-name", maxlength: "40", autocomplete: "off", placeholder: "What the button should say" });
+    const issuer = h("input", { type: "url", id: "service-issuer", maxlength: "300", autocomplete: "off", placeholder: "https://…", spellcheck: "false" });
+    const other = h("div", { class: "stack", hidden: true }, h("label", { for: "service-name" }, "Name"), name, h("label", { for: "service-issuer" }, "Its address (issuer)"), issuer);
+    const clientId = h("input", { type: "text", id: "service-client-id", maxlength: "300", autocomplete: "off", spellcheck: "false", autocapitalize: "off" });
+    const clientSecret = h("input", { type: "password", id: "service-client-secret", maxlength: "1000", autocomplete: "off" });
+    const redirect = h("div", {});
+    const slug = () => (kind.value === "google" ? "google" : name.value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "name");
+    const showRedirect = () => {
+      other.hidden = kind.value === "google";
+      replace(redirect, copyBox("Redirect address", callbackFor(slug())));
+    };
+    kind.addEventListener("change", showRedirect);
+    name.addEventListener("input", showRedirect);
+    showRedirect();
+    const form = h("form", { class: "stack", novalidate: true },
+      h("label", { for: "service-kind" }, "Service"), kind, other,
+      h("p", { class: "muted small" }, "At the service, create an OAuth client for a web application and register this redirect address exactly:"), redirect,
+      h("label", { for: "service-client-id" }, "Client ID"), clientId,
+      h("label", { for: "service-client-secret" }, "Client secret"), clientSecret,
+      h("div", {}, h("button", { type: "submit", class: "button primary" }, "Save")));
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (!clientId.value.trim() || !clientSecret.value.trim() || (kind.value === "other" && (!name.value.trim() || !issuer.value.trim()))) {
+        replace(status, notice("Fill in every field.", "error"));
+        return;
+      }
+      attempt(async () => {
+        draw(await api.addSignInService({ kind: kind.value, name: name.value.trim(), issuer: issuer.value.trim(), client_id: clientId.value.trim(), client_secret: clientSecret.value.trim(), address: location.origin }));
+        replace(status, notice("Saved. The sign-in page now offers it, and each person can connect it under Settings."));
+      });
+    });
+
+    replace(container, backLink(), status,
+      h("section", { class: "card section" },
+        h("h1", {}, "Sign-in services"),
+        told.services.length
+          ? h("ul", { class: "plain" }, told.services.map((service) => h("li", { class: "line tall" },
+              h("span", {}, h("strong", {}, service.name), h("span", { class: "muted-text" }, ` · ${service.issuer}`)),
+              twoStepButton("Remove", "Really remove?", () => attempt(async () => draw(await api.removeSignInService(service.id)))))))
+          : h("p", { class: "empty" }, "None yet. People sign in with a password."),
+        told.address && told.address !== location.origin
+          ? notice(`Sign-in services send people back to ${told.address}, which is not the address you are using now. Saving below changes it to this one.`, "warn") : null,
+        h("p", { class: "muted small" }, "Removing a service keeps people's connections, in case you add it again. Anyone who signs in only that way needs a setup link meanwhile.")),
+      h("section", { class: "card section" },
+        h("h1", {}, "Add or update a service"),
+        h("p", { class: "muted" }, "Kaal learns only who the person is. It asks the service for no access to their mail, files or contacts. The secret is stored encrypted and is not shown again."),
+        form));
+  }
+
+  attempt(async () => {
+    const told = await api.signInServices();
+    if (alive()) draw(told);
   });
   return leave;
 }

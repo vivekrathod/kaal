@@ -1,3 +1,3 @@
 """Kaal: a small encrypted notes vault with a local CLI and an HTTP API."""
 
-__version__ = "0.22.2"
+__version__ = "0.23.0"

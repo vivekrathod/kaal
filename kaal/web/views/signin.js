@@ -35,6 +35,42 @@ const link = (label, action) => {
   return button;
 };
 
+// What to say when a trip to a sign-in service did not end in a sign-in.
+export const SERVICE_PROBLEMS = {
+  cancelled: "Signing in was cancelled.",
+  expired: "That sign-in took too long, or was started in another browser. Try again.",
+  failed: "The sign-in service could not confirm who you are. Try again, or sign in another way.",
+  "no-account": "No account here is connected to that sign-in. Sign in with your password and connect it in Settings, or ask whoever runs this Kaal for a setup link.",
+  "in-use": "That sign-in is already connected to a different account here.",
+  off: "That account has been switched off.",
+  busy: "Too many new accounts just now. Try again later.",
+};
+
+// One button per sign-in service the installation offers, such as "Continue with Google".
+// Pressing one leaves this page for the service; it sends the browser back signed in.
+function serviceButtons(setupCode = "") {
+  const problem = h("div", {});
+  const row = h("div", { class: "stack", hidden: true }, h("p", { class: "muted small divider" }, "or"), problem);
+  api.signInOptions().then((options) => {
+    for (const service of options.services || []) {
+      const button = h("button", { type: "button", class: "button wide" }, `Continue with ${service.name}`);
+      button.addEventListener("click", async () => {
+        problem.replaceChildren();
+        button.disabled = true;
+        try {
+          location.assign(await api.signInWith(service.id, setupCode));
+        } catch (error) {
+          button.disabled = false;
+          problem.append(notice(error.message, "error"));
+        }
+      });
+      row.append(button);
+      row.hidden = false;
+    }
+  }).catch(() => {});
+  return row;
+}
+
 const tooMany = (error) => (error.status === 429 ? "Too many wrong tries. Wait a little and try again." : null);
 
 // The codes that get a person back in if they forget their password. Shown once.
@@ -46,8 +82,9 @@ export function recoveryCodesCard(codes, onDone) {
     h("button", { type: "button", class: "button primary", onClick: onDone }, "I've saved them"));
 }
 
-export function signInView({ onSignedIn }) {
+export function signInView({ onSignedIn, problem = "" }) {
   const page = h("main", { class: "page narrow" });
+  let said = problem ? notice(SERVICE_PROBLEMS[problem] || SERVICE_PROBLEMS.failed, "error") : null;
 
   function withPassword() {
     const [loginLabel, login] = field("login", "Sign-in name", { type: "text", autocomplete: "username" });
@@ -61,8 +98,10 @@ export function signInView({ onSignedIn }) {
       send: () => api.signInWithPassword(login.value.trim(), password.value),
       done: onSignedIn,
       wrong: (error) => tooMany(error) || (error.status === 401 ? "That sign-in name and password don't match." : error.message),
-      footer: h("p", { class: "muted small choices" }, link("Forgot your password?", recover), link("Use a device token instead", withToken), createLink),
+      footer: [serviceButtons(), h("p", { class: "muted small choices" }, link("Forgot your password?", recover), link("Use a device token instead", withToken), createLink)],
     }));
+    if (said) page.prepend(said);
+    said = null;
     login.focus();
   }
 
@@ -160,6 +199,7 @@ export function setupView(code, { onSignedIn }) {
       send: () => api.setup(code, password.value, name.value.trim()),
       done: (signedIn) => replace(page, recoveryCodesCard(signedIn.recovery_codes || [], () => onSignedIn(signedIn))),
       wrong: (error) => error.message,
+      footer: serviceButtons(code),
     }));
     password.focus();
   }).catch((error) => {

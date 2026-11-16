@@ -83,6 +83,13 @@ export const api = {
   chooseVault: (vault) => result(request("POST", "/v1/session/vault", { json: { vault } })),
 
   signInOptions: () => result(request("GET", "/v1/sign-in/options")),
+  // Both answer with the address at the sign-in service to send this browser to.
+  signInWith: (service, setupCode = "") => result(request("POST", `/v1/sign-in/with/${id(service)}`, { json: { setup_code: setupCode } })).then((data) => data.url),
+  connect: (service, password = "") => result(request("POST", `/v1/account/connections/${id(service)}`, { json: { password } })).then((data) => data.url),
+  disconnect: (service) => result(request("DELETE", `/v1/account/connections/${id(service)}`)),
+  signInServices: () => result(request("GET", "/v1/admin/sign-in-services")),
+  addSignInService: (service) => result(request("POST", "/v1/admin/sign-in-services", { json: service })),
+  removeSignInService: (service) => result(request("DELETE", `/v1/admin/sign-in-services/${id(service)}`)),
   signUp: (login, name, password, vaultName) => result(request("POST", "/v1/sign-up", { json: { login, name, password, vault_name: vaultName } })),
 
   account: () => result(request("GET", "/v1/account")),

@@ -216,3 +216,7 @@ select { min-height: 44px; padding: 8px 10px; border: 1px solid var(--line); bor
 .row { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .line.tall { align-items: flex-start; flex-wrap: wrap; }
 h2.sub { font-size: 1rem; margin: 18px 0 4px; }
+
+/* The buttons for signing in through another service. */
+.button.wide { width: 100%; justify-content: center; }
+.divider { text-align: center; margin: 4px 0 0; }

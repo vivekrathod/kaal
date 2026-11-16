@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import sys
 import tempfile
@@ -37,7 +38,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from kaal import __version__, accounts, core, passwords, tokens
+from kaal import __version__, accounts, core, oidc, passwords, tokens
 
 log = logging.getLogger("kaal.server")
 
@@ -107,6 +108,9 @@ class Settings:
     cookie_secure: bool = True
     # Browser extensions whose pages may call the API (see ExtensionCorsMiddleware).
     extension_origins: tuple[str, ...] = (f"chrome-extension://{OFFICIAL_EXTENSION_ID}",)
+    # The address people open Kaal at, such as https://kaal.example.org. Sign-in
+    # services send the browser back to it. An administrator can also set it in the web app.
+    public_url: str = ""
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "Settings":
@@ -128,6 +132,7 @@ class Settings:
             background_extraction=(env.get("KAAL_BACKGROUND_EXTRACTION") or "1").strip() != "0",
             cookie_secure=(env.get("KAAL_COOKIE_SECURE") or "1").strip() != "0",
             extension_origins=extension_origins(env),
+            public_url=(env.get("KAAL_PUBLIC_URL") or "").strip().rstrip("/"),
         )
 
 
@@ -330,6 +335,7 @@ class AppState:
     worker: Any = None
     guard: Any = None
     signups: Any = None
+    services: Any = None
 
 
 class Scoped:
@@ -495,6 +501,42 @@ def viewable_type(name: str, data: bytes) -> str | None:
 
 SESSION_COOKIE = "kaal_session"
 SESSION_SECONDS = 30 * 24 * 3600
+# Held by the browser for one trip to a sign-in service and back, so the trip
+# can only be finished by the browser that started it.
+FLOW_COOKIE = "kaal_signin"
+FLOW_PATH = "/v1/sign-in/with"
+_ADDRESS = re.compile(r"https://[A-Za-z0-9.-]+(?::\d{1,5})?|http://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?")
+
+
+def public_address(state: "AppState") -> str:
+    """The address people open this Kaal at, or "" when nobody has said."""
+    return state.accounts.get("public_address") or state.settings.public_url
+
+
+def clean_address(address: str) -> str:
+    cleaned = (address or "").strip().rstrip("/")
+    if not _ADDRESS.fullmatch(cleaned):
+        raise accounts.AccountError("Kaal's own address must look like https://kaal.example.org (http is allowed only for localhost).")
+    return cleaned
+
+
+def callback_address(address: str, service_id: str) -> str:
+    """Where a sign-in service sends the browser back to. This exact text is registered with the service."""
+    return f"{address}{FLOW_PATH}/{service_id}/callback"
+
+
+def add_signin_service(store: accounts.AccountStore, services: Any, *, service_id: str, name: str, issuer: str, client_id: str, client_secret: str) -> dict[str, Any]:
+    """Check that a sign-in service answers, then store it with its secret encrypted."""
+    issuer = (issuer or "").strip().rstrip("/")
+    if not issuer.startswith("https://"):
+        raise accounts.AccountError("A sign-in service's address must start with https://")
+    if not (client_secret or "").strip():
+        raise accounts.AccountError("A sign-in service needs a name, a client id and a client secret.")
+    try:
+        services.settings(issuer)
+    except oidc.SignInServiceError as error:
+        raise accounts.AccountError(f"Kaal could not read that service's settings at {issuer}/.well-known/openid-configuration ({error}).") from None
+    return store.put_service(service_id, name, issuer, client_id, oidc.seal_secret(core.installation_key(), client_secret.strip()))
 # A browser cannot add this header to a request made from another site without
 # the server's permission, which Kaal never gives.
 SAME_SITE_HEADER = "x-kaal-request"
@@ -850,6 +892,23 @@ class VaultChoice(BaseModel):
     vault: str = Field(min_length=1, max_length=64)
 
 
+class ServiceStart(BaseModel):
+    setup_code: str = Field(default="", max_length=200)
+
+
+class ConnectStart(BaseModel):
+    password: str = Field(default="", max_length=1024)
+
+
+class ServiceNew(BaseModel):
+    kind: Literal["google", "other"] = "google"
+    name: str = Field(default="", max_length=40)
+    issuer: str = Field(default="", max_length=300)
+    client_id: str = Field(min_length=1, max_length=300)
+    client_secret: str = Field(min_length=1, max_length=1000)
+    address: str = Field(min_length=1, max_length=300)
+
+
 class Reextract(BaseModel):
     ids: list[str] = Field(default_factory=list, max_length=100)
     unreviewed: bool = False
@@ -894,6 +953,7 @@ def create_app(settings: Settings) -> FastAPI:
     app.state.kaal = AppState(settings, tokens.TokenStore(settings.tokens_file), RateLimiter(settings.rate_per_minute), store, registry, guard=SignInGuard(),
                                signups=SignUpGuard(settings.signups_per_hour))
     app.state.kaal.worker = ExtractionWorker(registry.all)
+    app.state.kaal.services = oidc.Services()
     app.add_middleware(BodyLimitMiddleware, limit=settings.max_upload_bytes + MiB)
 
     @app.middleware("http")
@@ -1004,11 +1064,16 @@ def create_app(settings: Settings) -> FastAPI:
             told["vault"] = next((vault for vault in told["vaults"] if vault["id"] == record["vault"]), None)
         return told
 
-    def start_session(request: Request, state: Any, account: dict[str, Any], **also: Any) -> JSONResponse:
-        """Sign a person in on this browser, on their first vault. ``also`` is added to the answer."""
+    def open_session(request: Request, state: Any, account: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        """A new session for a person on this browser, on their first vault, and its cookie value."""
         theirs = state.accounts.vaults_of(account["id"])
         session_record, cookie = state.accounts.start_session(account["id"], theirs[0]["id"] if theirs else None, device_label(request.headers.get("user-agent", "")))
         request.state.token_name = f"account:{account['id']}"
+        return session_record, cookie
+
+    def start_session(request: Request, state: Any, account: dict[str, Any], **also: Any) -> JSONResponse:
+        """Sign a person in on this browser. ``also`` is added to the answer."""
+        session_record, cookie = open_session(request, state, account)
         return with_cookie(answer({**who(person_record(state, session_record)), **also}), state, cookie)
 
     def checked_password(state: Any, account: dict[str, Any] | None, password: str, login: str) -> bool:
@@ -1124,8 +1189,11 @@ def create_app(settings: Settings) -> FastAPI:
     @app.get("/v1/account", tags=["account"])
     def account_show(request: Request, person: dict[str, Any] = require_person()):
         state = S(request)
+        mine = {entry["service"]: entry for entry in state.accounts.identities_of(person["account"])}
         return answer({**who(person),
                        "has_password": state.accounts.password_hash(person["account"]) is not None,
+                       "connections": [{"service": service["id"], "name": service["name"], "connected": service["id"] in mine,
+                                        "email": mine[service["id"]]["email"] if service["id"] in mine else ""} for service in offered(state)],
                        "recovery_codes_left": state.accounts.recovery_codes_left(person["account"]),
                        "sessions": [{"id": entry["id"], "label": entry["label"], "created": entry["created"], "last_seen": entry["last_seen"],
                                      "current": entry["id"] == person["session"]} for entry in state.accounts.sessions_of(person["account"])]})
@@ -1320,7 +1388,172 @@ def create_app(settings: Settings) -> FastAPI:
     @app.get("/v1/sign-in/options", tags=["session"])
     def sign_in_options(request: Request):
         """What the sign-in page should offer. Needs no sign-in, and says nothing about who has an account."""
-        return answer({"signup": signup_setting(S(request))})
+        state = S(request)
+        return answer({"signup": signup_setting(state), "services": [{"id": service["id"], "name": service["name"]} for service in offered(state)]})
+
+    # --- signing in through another service (Google, or any OpenID Connect provider)
+
+    def offered(state: Any) -> list[dict[str, Any]]:
+        """The sign-in services people can use: none until Kaal knows its own address."""
+        return state.accounts.services() if public_address(state) else []
+
+    def begin(request: Request, state: Any, service_id: str, purpose: str, *, account_id: str | None = None, setup_code: str | None = None) -> JSONResponse:
+        """Start a trip to a sign-in service: the answer says where to send the browser."""
+        service = next((entry for entry in offered(state) if entry["id"] == service_id), None)
+        if service is None:
+            return _error(404, "That way of signing in is not set up here.", "not_found")
+        redirect = callback_address(public_address(state), service_id)
+        nonce, verifier = secrets.token_urlsafe(24), oidc.new_verifier()
+        try:
+            flow = state.accounts.start_flow(service_id, purpose, nonce=nonce, verifier=verifier, redirect=redirect, account_id=account_id, setup_code=setup_code)
+            url = state.services.address_to_visit(service, redirect=redirect, state=flow, nonce=nonce, verifier=verifier)
+        except oidc.SignInServiceError as error:
+            log.warning("sign-in with %s could not start: %s", service_id, error)
+            return _error(503, f"{service['name']} could not be reached just now. Try again, or sign in another way.", "unavailable")
+        response = answer({"url": url})
+        response.set_cookie(FLOW_COOKIE, flow, max_age=accounts.FLOW_MINUTES * 60, path=FLOW_PATH, httponly=True, secure=state.settings.cookie_secure, samesite="lax")
+        return response
+
+    @app.post("/v1/sign-in/with/{service_id}", tags=["session"])
+    def sign_in_with_service(request: Request, service_id: str, body: ServiceStart):
+        """Start signing in through a service. With a setup link's code, the service becomes how that account signs in."""
+        state = S(request)
+        _from_cookie_checked(request)
+        if not state.limiter.allow("signin-start"):
+            raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
+        if body.setup_code and state.accounts.setup_account(body.setup_code) is None:
+            return _error(404, "This setup link has been used or has run out. Ask for a new one.", "not_found")
+        return begin(request, state, service_id, "setup" if body.setup_code else "sign-in", setup_code=body.setup_code or None)
+
+    @app.post("/v1/account/connections/{service_id}", tags=["account"])
+    def account_connect(request: Request, service_id: str, body: ConnectStart, person: dict[str, Any] = require_person()):
+        """Start connecting a sign-in service to one's account. Someone with a password proves it first."""
+        state = S(request)
+        if state.accounts.password_hash(person["account"]) is not None and not checked_password(state, person["person"], body.password, person["name"]):
+            return _error(403, "Your password is not right.", "forbidden")
+        return begin(request, state, service_id, "connect", account_id=person["account"])
+
+    @app.delete("/v1/account/connections/{service_id}", tags=["account"])
+    def account_disconnect(request: Request, service_id: str, person: dict[str, Any] = require_person()):
+        try:
+            if not S(request).accounts.disconnect_identity(person["account"], service_id):
+                return _error(404, "Your account is not connected to that.", "not_found")
+        except accounts.AccountError as error:
+            return _error(409, str(error), "conflict")
+        return answer({"status": "disconnected", "service": service_id})
+
+    @app.get("/v1/sign-in/with/{service_id}/callback", tags=["session"], response_class=Response)
+    def sign_in_callback(request: Request, service_id: str, code: str = Query("", max_length=4096), state: str = Query("", max_length=200),
+                         error: str = Query("", max_length=200)):
+        """Where a sign-in service sends the browser back to. Answers by sending the browser on into the web app."""
+        kaal_state = S(request)
+
+        def onward(path: str, cookie: str | None = None) -> Response:
+            response = Response(status_code=303, headers={"Location": f"/#/{path}"})
+            response.delete_cookie(FLOW_COOKIE, path=FLOW_PATH, httponly=True, secure=kaal_state.settings.cookie_secure, samesite="lax")
+            return with_cookie(response, kaal_state, cookie) if cookie else response
+
+        presented = request.cookies.get(FLOW_COOKIE, "")
+        flow = kaal_state.accounts.finish_flow(state) if state and presented and secrets.compare_digest(presented.encode(), state.encode()) else None
+        if flow is None or flow["service"] != service_id:
+            if not kaal_state.limiter.allow("unauthenticated"):
+                raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
+            return onward("sign-in-problem/expired")
+        problem = "settings?problem=" if flow["purpose"] == "connect" else "sign-in-problem/"
+        if error or not code:
+            return onward(problem + "cancelled")
+        service = kaal_state.accounts.service(service_id)
+        if service is None:
+            return onward(problem + "failed")
+        try:
+            claims = kaal_state.services.who_signed_in(service, oidc.open_secret(core.installation_key(), service["secret"]),
+                                                       code=code, redirect=flow["redirect"], nonce=flow["nonce"], verifier=flow["verifier"])
+        except (oidc.SignInServiceError, core.KaalError) as failure:
+            log.warning("sign-in with %s failed: %s", service_id, failure)
+            return onward(problem + "failed")
+        subject = claims["sub"]
+        email = str(claims.get("email") or "")[:254] if claims.get("email_verified") in (True, "true") else ""
+        shown_name = str(claims.get("name") or "").strip()[:100]
+        known = kaal_state.accounts.identity_account(service_id, subject)
+
+        if flow["purpose"] == "connect":
+            account = kaal_state.accounts.account(flow["account"]) if flow["account"] else None
+            if account is None or account["disabled_at"]:
+                return onward(problem + "off")
+            try:
+                kaal_state.accounts.connect_identity(account["id"], service_id, subject, email)
+            except accounts.AccountError:
+                return onward(problem + "in-use")
+            request.state.token_name = f"account:{account['id']}"
+            return onward(f"settings?connected={service_id}")
+
+        if flow["purpose"] == "setup":
+            account = kaal_state.accounts.setup_account("", hashed=flow["setup"])
+            if account is None:
+                return onward(problem + "expired")
+            if known is not None and known["id"] != account["id"]:
+                return onward(problem + "in-use")
+            if kaal_state.accounts.setup_account("", hashed=flow["setup"], spend=True) is None:
+                return onward(problem + "expired")
+            kaal_state.accounts.connect_identity(account["id"], service_id, subject, email)
+            if account["name"] == account["login"] and shown_name:
+                kaal_state.accounts.rename(account["id"], shown_name)
+            kaal_state.accounts.end_sessions(account["id"])
+            return onward("receipts", open_session(request, kaal_state, account)[1])
+
+        if known is None:
+            if signup_setting(kaal_state) != "open":
+                return onward(problem + "no-account")
+            if not kaal_state.signups.allow():
+                return onward(problem + "busy")
+            try:
+                known = kaal_state.accounts.add_account(kaal_state.accounts.free_login(email.partition("@")[0] or shown_name.replace(" ", ".")), shown_name)
+                create_vault(kaal_state.accounts, "My notes", known["id"])
+                kaal_state.accounts.connect_identity(known["id"], service_id, subject, email)
+            except (accounts.AccountError, core.KaalError) as failure:
+                log.warning("sign-up with %s failed: %s", service_id, type(failure).__name__)
+                return onward(problem + "failed")
+        if known["disabled_at"]:
+            return onward(problem + "off")
+        return onward("receipts", open_session(request, kaal_state, known)[1])
+
+    # --- which sign-in services this installation offers (administrators)
+
+    def services_told(state: Any) -> dict[str, Any]:
+        address = public_address(state)
+        return {"address": address, "services": [{"id": service["id"], "name": service["name"], "issuer": service["issuer"], "client_id": service["client_id"],
+                                                  "callback": callback_address(address, service["id"]) if address else ""} for service in state.accounts.services()]}
+
+    @app.get("/v1/admin/sign-in-services", tags=["admin"])
+    def admin_services(request: Request, person: dict[str, Any] = require_admin()):
+        return answer(services_told(S(request)))
+
+    @app.post("/v1/admin/sign-in-services", tags=["admin"])
+    def admin_service_add(request: Request, body: ServiceNew, person: dict[str, Any] = require_admin()):
+        """Offer signing in through Google or another OpenID Connect service. The client secret is stored encrypted and never shown again."""
+        state = S(request)
+        chosen = oidc.GOOGLE if body.kind == "google" else {
+            "id": re.sub(r"[^a-z0-9]+", "-", body.name.strip().lower()).strip("-")[:32], "name": body.name.strip(), "issuer": body.issuer}
+        try:
+            if body.kind == "other" and (chosen["id"] == "google" or not chosen["id"][:1].isalpha()):
+                raise accounts.AccountError("Give the service a name that starts with a letter and is not Google.")
+            address = clean_address(body.address)
+            add_signin_service(state.accounts, state.services, service_id=chosen["id"], name=chosen["name"], issuer=chosen["issuer"],
+                               client_id=body.client_id, client_secret=body.client_secret)
+        except accounts.AccountError as error:
+            return _error(400, str(error), "invalid")
+        except core.KaalError as error:
+            return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind)
+        state.accounts.put("public_address", address)
+        return answer(services_told(state))
+
+    @app.delete("/v1/admin/sign-in-services/{service_id}", tags=["admin"])
+    def admin_service_remove(request: Request, service_id: str, person: dict[str, Any] = require_admin()):
+        """Stop offering a service. People connected to it keep their connection in case it is added again."""
+        state = S(request)
+        if not state.accounts.remove_service(service_id):
+            return _error(404, "No such sign-in service.", "not_found")
+        return answer(services_told(state))
 
     @app.post("/v1/sign-up", tags=["session"])
     def sign_up(request: Request, body: SignUp):
@@ -1773,6 +2006,37 @@ def _people(args: argparse.Namespace) -> None:
     print(json.dumps(out, indent=2))
 
 
+def _signin_services(args: argparse.Namespace) -> None:
+    """kaal-server sign-in …: which services people may sign in through."""
+    settings = Settings.from_env()
+    try:
+        store = open_store(settings)
+        if args.action == "add":
+            preset = oidc.GOOGLE if args.service == "google" else {}
+            issuer, name = args.issuer or preset.get("issuer", ""), args.name or preset.get("name", "") or args.service
+            if not issuer:
+                sys.exit("ERROR: --issuer is needed for a service other than google.")
+            # The secret comes from a file or standard input, so it is never part of a command line.
+            secret = (sys.stdin.read() if args.secret_file == "-" else Path(args.secret_file).expanduser().read_text()).strip()
+            address = clean_address(args.address or settings.public_url or store.get("public_address") or "")
+            add_signin_service(store, oidc.Services(), service_id=args.service, name=name, issuer=issuer, client_id=args.client_id, client_secret=secret)
+            store.put("public_address", address)
+        elif args.action == "remove":
+            if not store.remove_service(args.service):
+                raise accounts.AccountError(f"No sign-in service {args.service!r}.")
+        address = store.get("public_address") or settings.public_url
+        out = {"address": address, "services": [{"id": service["id"], "name": service["name"], "issuer": service["issuer"], "client_id": service["client_id"],
+                                                 "register_this_redirect_address": callback_address(address, service["id"]) if address else ""}
+                                                for service in store.services()]}
+    except accounts.AccountError as error:
+        sys.exit(f"ERROR: {error}")
+    except OSError as error:
+        sys.exit(f"ERROR: The secret file could not be read ({type(error).__name__}).")
+    except core.KaalError as error:
+        sys.exit(f"ERROR: {error.message}")
+    print(json.dumps(out, indent=2))
+
+
 def _openapi(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory() as td:
         vault = Path(td) / "vault"
@@ -1844,6 +2108,18 @@ def build_parser() -> argparse.ArgumentParser:
     ungrant.add_argument("login")
     for parser_ in (account, vault):
         parser_.set_defaults(func=_people)
+    signin = sub.add_parser("sign-in", help="Services people may sign in through, such as Google")
+    signin_sub = signin.add_subparsers(dest="action", required=True)
+    signin_sub.add_parser("list", help="The services offered and the redirect address to register with each")
+    signin_add = signin_sub.add_parser("add", help="Offer a service, or replace its client id and secret")
+    signin_add.add_argument("service", help="google, or a short id of your own for another OpenID Connect service")
+    signin_add.add_argument("--client-id", required=True)
+    signin_add.add_argument("--secret-file", required=True, help="A file holding the client secret, or - to read it from standard input")
+    signin_add.add_argument("--address", default="", help="The address people open Kaal at, such as https://kaal.example.org (default: KAAL_PUBLIC_URL)")
+    signin_add.add_argument("--issuer", default="", help="The service's address, for one other than google")
+    signin_add.add_argument("--name", default="", help="What the button calls it (default: the id)")
+    signin_sub.add_parser("remove", help="Stop offering a service").add_argument("service")
+    signin.set_defaults(func=_signin_services)
     spec = sub.add_parser("openapi", help="Print the OpenAPI spec")
     spec.add_argument("--output", default="")
     spec.set_defaults(func=_openapi)

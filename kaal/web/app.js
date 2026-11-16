@@ -6,7 +6,7 @@ import { reviewView } from "/web/views/review.js";
 import { totalsView } from "/web/views/totals.js";
 import { trashView } from "/web/views/trash.js";
 import { settingsView } from "/web/views/settings.js";
-import { tokensView, sharingView, peopleView } from "/web/views/access.js";
+import { tokensView, sharingView, peopleView, signInServicesView } from "/web/views/access.js";
 import { notesView, noteView, noteEditView } from "/web/views/notes.js";
 
 const root = document.querySelector("#app");
@@ -68,7 +68,9 @@ async function render() {
         replace(root, h("main", { class: "page narrow" }, notice(error.message, "error")));
         return;
       }
-      replace(root, signInView({ onSignedIn: (signedIn) => { session = signedIn; render(); } }));
+      // A sign-in service sends the browser back here when it could not sign the person in.
+      const problem = route().name === "sign-in-problem" ? route().rest[0] || "failed" : "";
+      replace(root, signInView({ problem, onSignedIn: (signedIn) => { session = signedIn; if (problem) go("receipts"); else render(); } }));
       return;
     }
   }
@@ -87,7 +89,7 @@ async function render() {
   } else if (name === "settings") {
     replace(root, shell("settings", content));
     // The pages under Settings are for people signed in as themselves; a token goes back to Settings.
-    const sub = session.account ? { tokens: tokensView, sharing: sharingView, people: session.account.admin ? peopleView : null }[rest[0]] : null;
+    const sub = session.account ? { tokens: tokensView, sharing: sharingView, people: session.account.admin ? peopleView : null, "sign-in": session.account.admin ? signInServicesView : null }[rest[0]] : null;
     leaveView = (sub || settingsView)(content, params, context);
   } else if (name === "notes" && rest[0] === "new") {
     replace(root, shell("notes", content));

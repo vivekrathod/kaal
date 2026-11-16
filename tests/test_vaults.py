@@ -13,7 +13,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import kaal.core as kaal
-from kaal import server, tokens
+from kaal import oidc, server, tokens
+from signin_service import FakeService
 
 MINIMAL_PDF = (b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
                b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n")
@@ -353,6 +354,25 @@ def test_every_route_works_on_the_servers_vault_and_never_on_the_default(tmp_pat
     call("POST", "/v1/admin/sign-up", json={"signup": "open"}, headers=person)
     call("GET", "/v1/sign-in/options", headers={})
     call("POST", "/v1/sign-up", json={"login": "made-up-newcomer", "password": "a made-up password"}, headers={})
+
+    # sign-in services: offered by an administrator, connected by a person, then used to sign in
+    google = FakeService()
+    app.state.kaal.services = oidc.Services(google.fetch)
+    call("GET", "/v1/admin/sign-in-services", headers=person)
+    call("POST", "/v1/admin/sign-in-services", headers=person,
+         json={"kind": "google", "client_id": google.client_id, "client_secret": google.client_secret, "address": "http://testserver"}, expect=(400,))
+    app.state.kaal.settings.cookie_secure = False   # this test's browser speaks plain http
+    call("POST", "/v1/admin/sign-in-services", headers=person,
+         json={"kind": "google", "client_id": google.client_id, "client_secret": google.client_secret, "address": "http://localhost"})
+    trip = call("POST", "/v1/account/connections/google", json={"password": "a third made-up password"}, headers=person)
+    flow = {"Cookie": trip.headers["set-cookie"].split(";", 1)[0]}
+    call("GET", google.sign_in(result(trip)["url"], "made-up-subject"), headers=flow, expect=(303,), follow_redirects=False)
+    trip = call("POST", "/v1/sign-in/with/google", json={}, headers={"X-Kaal-Request": "1"})
+    flow = {"Cookie": trip.headers["set-cookie"].split(";", 1)[0]}
+    back = call("GET", google.sign_in(result(trip)["url"], "made-up-subject"), headers=flow, expect=(303,), follow_redirects=False)
+    assert back.headers["location"] == "/#/receipts"
+    call("DELETE", "/v1/account/connections/google", headers=person)
+    call("DELETE", "/v1/admin/sign-in-services/google", headers=person)
 
     # A person's session opens the vault by the same route as a token does.
     assert call("GET", "/v1/library/notes", headers=person).status_code == 200
