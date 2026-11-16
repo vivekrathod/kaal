@@ -226,7 +226,7 @@ def test_search_follows_edits_the_trash_and_deletion(service):
     assert find(service, "contoso")["meta"]["total"] == 0 and find(service, "contoso", trash=True)["meta"]["total"] == 1
     service.client.delete(f"/v1/library/notes/{note}", headers=service.bearer(), params={"confirm": True})
     assert find(service, "contoso", trash=True)["meta"]["total"] == 0
-    assert note not in kaal._TEXT_CACHE
+    assert note not in kaal.current_vault().text_cache
 
 
 def test_searching_inside_notes_needs_the_reveal_scope_and_a_query(service):

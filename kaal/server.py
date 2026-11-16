@@ -130,8 +130,8 @@ class ExtractionWorker:
     found in the vault itself, so work left over from a restart is picked up.
     """
 
-    def __init__(self, vault_lock: threading.Lock, idle_seconds: float = 300.0) -> None:
-        self.vault_lock = vault_lock
+    def __init__(self, vaults: Callable[[], list[core.Vault]], idle_seconds: float = 300.0) -> None:
+        self.vaults = vaults
         self.idle_seconds = idle_seconds
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -143,16 +143,18 @@ class ExtractionWorker:
     def drain(self) -> int:
         """Read every pending receipt once; return how many were attempted."""
         attempted = 0
-        for note_id in core.pending_receipt_ids():
-            if self._stop.is_set():
-                break
-            attempted += 1
-            try:
-                outcome = core.reextract_receipt(note_id, outer_lock=self.vault_lock)
-                log.info("receipt read: %s", outcome)
-            except (Exception, core.KaalError) as error:
-                # Leave it pending for the next pass; never log a receipt's contents.
-                log.error("receipt read failed: %s", type(error).__name__)
+        for vault in self.vaults():
+            with core.use_vault(vault):
+                for note_id in core.pending_receipt_ids():
+                    if self._stop.is_set():
+                        return attempted
+                    attempted += 1
+                    try:
+                        outcome = core.reextract_receipt(note_id, outer_lock=vault.request_lock)
+                        log.info("receipt read: %s", outcome)
+                    except (Exception, core.KaalError) as error:
+                        # Leave it pending for the next pass; never log a receipt's contents.
+                        log.error("receipt read failed: %s", type(error).__name__)
         return attempted
 
     def _run(self) -> None:
@@ -287,8 +289,19 @@ class AppState:
     settings: Settings
     tokens: tokens.TokenStore
     limiter: RateLimiter
-    vault_lock: threading.Lock
+    vault: core.Vault
     worker: Any = None
+
+    @contextlib.contextmanager
+    def in_vault(self) -> Iterator[core.Vault]:
+        """Work on the vault, holding its request lock so requests take turns."""
+        with core.use_vault(self.vault), self.vault.request_lock:
+            yield self.vault
+
+    def beside_vault(self) -> Any:
+        """Work on the vault without its request lock: for slow reading of
+        something already looked up under the lock, which changes nothing."""
+        return core.use_vault(self.vault)
 
 
 def _error(status: int, message: str, kind: str | None = None, details: dict | None = None, headers: dict | None = None) -> JSONResponse:
@@ -369,7 +382,7 @@ def require(*scopes: str) -> Callable:
 
 def _run(state: AppState, handler: Callable[[Any], None], *, exact_note: str | None = None, **params: Any) -> JSONResponse:
     """Run a core handler under the server lock; ``exact_note`` must be an existing note id."""
-    with state.vault_lock:
+    with state.in_vault():
         try:
             if exact_note is not None:
                 core.note_by_id(exact_note)
@@ -411,7 +424,7 @@ def _saved_upload(state: AppState, upload: UploadFile) -> Iterator[Path]:
 
 
 def _content_response(state: AppState, note_id: str, attachment_id: str, *, receipt: bool = False) -> Response:
-    with state.vault_lock:
+    with state.in_vault():
         try:
             meta = core.medical_receipt_meta(core.load_index(), note_id) if receipt else core.note_by_id(note_id)
             matches = [att for att in meta.get("attachments", []) if att.get("id") == attachment_id]
@@ -549,16 +562,16 @@ class BulkPurge(BaseModel):
 
 
 def create_app(settings: Settings) -> FastAPI:
-    vault = core.configure_vault(settings.vault)
-    if not (vault / "index.json").is_file():
-        raise ServerConfigError(f"Vault not found at {vault}: refusing to start. Restore it, or run `kaal init` there first.")
+    vault = core.Vault(settings.vault)
+    if not vault.index_path.is_file():
+        raise ServerConfigError(f"Vault not found at {vault.root}: refusing to start. Restore it, or run `kaal init` there first.")
     settings.tmp_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(settings.tmp_dir, 0o700)
 
     app = FastAPI(title="Kaal", version=__version__, docs_url=None, redoc_url=None, openapi_url=None,
                   description="An encrypted notes vault. Every request needs `Authorization: Bearer <token>` except /v1/health.")
-    app.state.kaal = AppState(settings, tokens.TokenStore(settings.tokens_file), RateLimiter(settings.rate_per_minute), threading.Lock())
-    app.state.kaal.worker = ExtractionWorker(app.state.kaal.vault_lock)
+    app.state.kaal = AppState(settings, tokens.TokenStore(settings.tokens_file), RateLimiter(settings.rate_per_minute), vault)
+    app.state.kaal.worker = ExtractionWorker(lambda: [app.state.kaal.vault])
     app.add_middleware(BodyLimitMiddleware, limit=settings.max_upload_bytes + MiB)
 
     @app.middleware("http")
@@ -671,7 +684,7 @@ def create_app(settings: Settings) -> FastAPI:
         state = S(request)
         workdir = Path(tempfile.mkdtemp(prefix="export-", dir=state.settings.tmp_dir))
         out = workdir / "kaal-export.tar"
-        with state.vault_lock:
+        with state.in_vault():
             try:
                 result, _ = core.call_captured(core.export_vault, SimpleNamespace(output=str(out)))
             except core.KaalError as error:
@@ -732,7 +745,7 @@ def create_app(settings: Settings) -> FastAPI:
     # --- browser captures
 
     def note_attachment(state: AppState, note_id: str, attachment_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
-        with state.vault_lock:
+        with state.in_vault():
             meta = core.note_by_id(note_id)
             matches = [att for att in meta.get("attachments", []) if att.get("id") == attachment_id]
             if not matches:
@@ -744,7 +757,8 @@ def create_app(settings: Settings) -> FastAPI:
         """A picture, PDF or plain-text file, served so the browser shows it; other kinds are refused."""
         try:
             meta, attachment = note_attachment(S(request), note_id, attachment_id)
-            data = core.attachment_original_bytes(meta, attachment)
+            with S(request).beside_vault():
+                data = core.attachment_original_bytes(meta, attachment)
         except core.KaalError as error:
             return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind, error.details)
         media_type = viewable_type(attachment.get("name", ""), data)
@@ -765,7 +779,8 @@ def create_app(settings: Settings) -> FastAPI:
         """A picture of a note's file, shrunk for the page: an image itself, or a PDF's page."""
         try:
             meta, attachment = note_attachment(S(request), note_id, attachment_id)
-            media_type, data = core.attachment_preview(meta, attachment, page)
+            with S(request).beside_vault():
+                media_type, data = core.attachment_preview(meta, attachment, page)
         except core.KaalError as error:
             return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind, error.details)
         return Response(content=data, media_type=media_type, headers={"X-Content-Type-Options": "nosniff"})
@@ -898,13 +913,14 @@ def create_app(settings: Settings) -> FastAPI:
     def medical_preview(request: Request, note_id: str, attachment_id: str, page: int = Query(1, ge=1, le=20)):
         state = S(request)
         try:
-            with state.vault_lock:
+            with state.in_vault():
                 meta = core.medical_receipt_meta(core.load_index(), note_id)
                 matches = [att for att in meta.get("attachments", []) if att.get("id") == attachment_id]
                 if not matches:
                     core.die("Attachment not found.", kind="not_found")
             # Rendering is slow and needs no lock: it works on a private copy.
-            media_type, data = core.attachment_preview(meta, matches[0], page)
+            with state.beside_vault():
+                media_type, data = core.attachment_preview(meta, matches[0], page)
         except core.KaalError as error:
             return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind, error.details)
         return Response(content=data, media_type=media_type)
@@ -1018,11 +1034,7 @@ def _openapi(args: argparse.Namespace) -> None:
         vault = Path(td) / "vault"
         vault.mkdir()
         (vault / "index.json").write_text('{"version": 1, "notes": []}')
-        saved = core.VAULT
-        try:
-            spec = openapi_spec(create_app(Settings(home=Path(td), vault=vault, tokens_file=Path(td) / "t.json", tmp_dir=Path(td) / "tmp")))
-        finally:
-            core.configure_vault(saved)
+        spec = openapi_spec(create_app(Settings(home=Path(td), vault=vault, tokens_file=Path(td) / "t.json", tmp_dir=Path(td) / "tmp")))
     text = json.dumps(spec, indent=2, sort_keys=True) + "\n"
     if args.output:
         Path(args.output).write_text(text)

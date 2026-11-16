@@ -32,7 +32,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from typing import Any, Callable, NoReturn
+from typing import Any, Callable, Iterator, NoReturn
 from urllib.parse import urlsplit, urlunsplit
 
 from kaal import keys as key_providers
@@ -53,6 +53,95 @@ def configure_vault(path: str | os.PathLike[str]) -> Path:
     ATTACH_DIR = VAULT / "attachments"
     INDEX_PATH = VAULT / "index.json"
     return VAULT
+
+
+class Vault:
+    """One vault: a folder of encrypted notes and files, with its key and locks.
+
+    A process can hold several. Code reaches the one it is working on through
+    ``current_vault()``; ``use_vault()`` chooses it for a request or a command.
+    """
+
+    def __init__(self, root: str | os.PathLike[str], *, key: bytes | None = None) -> None:
+        self._root = Path(root).expanduser()
+        # This vault's own key. None means the installation's key (KAAL_KEY_FILE).
+        self.key = key
+        # In-process half of vault_capture_lock(); the other half is a file lock.
+        self.thread_lock = threading.RLock()
+        self.lock_state = threading.local()
+        # kaal-server holds this around each request that touches the vault.
+        self.request_lock = threading.Lock()
+        # Decrypted text kept for searching (see note_text_pieces). Memory only.
+        self.text_cache: dict[str, tuple[Any, list[tuple[str, str, str]]]] = {}
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    @property
+    def notes_dir(self) -> Path:
+        return self.root / "notes"
+
+    @property
+    def attach_dir(self) -> Path:
+        return self.root / "attachments"
+
+    @property
+    def index_path(self) -> Path:
+        return self.root / "index.json"
+
+    def __repr__(self) -> str:
+        return f"Vault({str(self.root)!r})"
+
+
+class _DefaultVault(Vault):
+    """The vault named by KAAL_VAULT, used when no other has been chosen.
+
+    Its location is read from this module's VAULT, NOTES_DIR, ATTACH_DIR and
+    INDEX_PATH each time, so configure_vault() moves it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(VAULT)
+
+    @property
+    def root(self) -> Path:
+        return VAULT
+
+    @property
+    def notes_dir(self) -> Path:
+        return NOTES_DIR
+
+    @property
+    def attach_dir(self) -> Path:
+        return ATTACH_DIR
+
+    @property
+    def index_path(self) -> Path:
+        return INDEX_PATH
+
+
+_DEFAULT_VAULT = _DefaultVault()
+_ACTIVE_VAULT: ContextVar[Vault | None] = ContextVar("kaal_vault", default=None)
+
+
+def default_vault() -> Vault:
+    return _DEFAULT_VAULT
+
+
+def current_vault() -> Vault:
+    """The vault this thread of work is using."""
+    return _ACTIVE_VAULT.get() or _DEFAULT_VAULT
+
+
+@contextmanager
+def use_vault(vault: Vault) -> Iterator[Vault]:
+    """Work on ``vault`` inside the block, then go back to the one before."""
+    token = _ACTIVE_VAULT.set(vault)
+    try:
+        yield vault
+    finally:
+        _ACTIVE_VAULT.reset(token)
 
 
 def note_by_id(note_id: str) -> dict[str, Any]:
@@ -151,6 +240,9 @@ def key_provider() -> key_providers.KeyProvider:
 
 
 def get_key(create: bool = False) -> bytes:
+    own = current_vault().key
+    if own is not None:
+        return own
     provider = key_provider()
     try:
         return provider.get_key(create=create)
@@ -216,12 +308,8 @@ def secure_write_json(path: Path, data: Any) -> None:
             pass
 
 
-_VAULT_THREAD_LOCK = threading.RLock()
-_VAULT_LOCK_STATE = threading.local()
-
-
 def vault_lock_held() -> bool:
-    return getattr(_VAULT_LOCK_STATE, "depth", 0) > 0
+    return getattr(current_vault().lock_state, "depth", 0) > 0
 
 
 @contextmanager
@@ -232,24 +320,26 @@ def vault_capture_lock():
     CLI, kaal-server and the nightly backup exclude each other. Within one process it is also guarded
     by a thread lock, and nested use in the same thread is allowed.
     """
-    if vault_lock_held():
-        _VAULT_LOCK_STATE.depth += 1
+    vault = current_vault()
+    held = vault.lock_state
+    if getattr(held, "depth", 0) > 0:
+        held.depth += 1
         try:
             yield
         finally:
-            _VAULT_LOCK_STATE.depth -= 1
+            held.depth -= 1
         return
-    with _VAULT_THREAD_LOCK:
-        lock_path = VAULT / VAULT_LOCK_NAME
+    with vault.thread_lock:
+        lock_path = vault.root / VAULT_LOCK_NAME
         lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with lock_path.open("a+") as lock_file:
             os.chmod(lock_path, 0o600)
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            _VAULT_LOCK_STATE.depth = 1
+            held.depth = 1
             try:
                 yield
             finally:
-                _VAULT_LOCK_STATE.depth = 0
+                held.depth = 0
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
@@ -278,24 +368,24 @@ def _is_encrypted_envelope(stored: Any) -> bool:
 
 def index_is_encrypted() -> bool:
     """Whether the index on disk is encrypted. A vault with no index yet counts as encrypted."""
-    if not INDEX_PATH.exists():
+    if not current_vault().index_path.exists():
         return True
     try:
-        return _is_encrypted_envelope(json.loads(INDEX_PATH.read_text()))
+        return _is_encrypted_envelope(json.loads(current_vault().index_path.read_text()))
     except (OSError, json.JSONDecodeError):
         return False
 
 
 def read_index_file() -> dict[str, Any]:
     """The index exactly as stored, decrypted when it is encrypted. Nothing is upgraded."""
-    stored = json.loads(INDEX_PATH.read_text())
+    stored = json.loads(current_vault().index_path.read_text())
     if _is_encrypted_envelope(stored):
         return json.loads(decrypt_payload(stored["encrypted"], aad=INDEX_AAD).decode())
     return stored
 
 
 def load_index() -> dict[str, Any]:
-    if not INDEX_PATH.exists():
+    if not current_vault().index_path.exists():
         return {"version": 1, "created": now_iso(), "notes": []}
     try:
         index = read_index_file()
@@ -321,9 +411,9 @@ def save_index(index: dict[str, Any], *, encrypted: bool | None = None) -> None:
     index["updated"] = now_iso()
     if index_is_encrypted() if encrypted is None else encrypted:
         payload = encrypt_bytes(json.dumps(index, ensure_ascii=False).encode(), aad=INDEX_AAD)
-        secure_write_json(INDEX_PATH, {"format": INDEX_FORMAT, "encrypted": payload})
+        secure_write_json(current_vault().index_path, {"format": INDEX_FORMAT, "encrypted": payload})
     else:
-        secure_write_json(INDEX_PATH, index)
+        secure_write_json(current_vault().index_path, index)
 
 
 def write_attachment_metadata(note_id: str, attachment_meta: dict[str, Any]) -> None:
@@ -396,18 +486,18 @@ def upgrade_receipts(index: dict[str, Any]) -> bool:
 
 
 def init_vault(args: argparse.Namespace) -> None:
-    VAULT.mkdir(mode=0o700, parents=True, exist_ok=True)
-    NOTES_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    ATTACH_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(VAULT, 0o700)
-    os.chmod(NOTES_DIR, 0o700)
-    os.chmod(ATTACH_DIR, 0o700)
+    current_vault().root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    current_vault().notes_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    current_vault().attach_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(current_vault().root, 0o700)
+    os.chmod(current_vault().notes_dir, 0o700)
+    os.chmod(current_vault().attach_dir, 0o700)
     provider = key_provider()
     key = get_key(create=True)
-    if not INDEX_PATH.exists():
+    if not current_vault().index_path.exists():
         save_index({"version": 1, "created": now_iso(), "notes": []})
     described = provider.describe()
-    result = {"status": "initialized", "vault": str(VAULT), "key_provider": described["provider"], "key_file": described["path"]}
+    result = {"status": "initialized", "vault": str(current_vault().root), "key_provider": described["provider"], "key_file": described["path"]}
     result["key_sha256_prefix"] = hashlib.sha256(key).hexdigest()[:12]
     emit(result, indent=2)
 
@@ -602,22 +692,22 @@ def read_stdin_or_arg(value: str | None, body_file: str | None = None) -> str:
 
 
 def note_path(note_id: str) -> Path:
-    md = NOTES_DIR / f"{note_id}.md"
+    md = current_vault().notes_dir / f"{note_id}.md"
     if md.exists():
         return md
-    return NOTES_DIR / f"{note_id}.json"
+    return current_vault().notes_dir / f"{note_id}.json"
 
 
 def encrypted_note_path(note_id: str) -> Path:
-    return NOTES_DIR / f"{note_id}.json"
+    return current_vault().notes_dir / f"{note_id}.json"
 
 
 def plaintext_note_path(note_id: str) -> Path:
-    return NOTES_DIR / f"{note_id}.md"
+    return current_vault().notes_dir / f"{note_id}.md"
 
 
 def attachment_note_dir(note_id: str) -> Path:
-    return ATTACH_DIR / note_id
+    return current_vault().attach_dir / note_id
 
 
 def find_notes(query: str) -> list[dict[str, Any]]:
@@ -730,7 +820,7 @@ def add_note(args: argparse.Namespace) -> None:
 
 
 def init_if_needed() -> None:
-    if not VAULT.exists() or not INDEX_PATH.exists():
+    if not current_vault().root.exists() or not current_vault().index_path.exists():
         die("Vault not initialized. Run: kaal init", kind="unavailable")
 
 
@@ -826,10 +916,9 @@ def library_list(args: argparse.Namespace) -> None:
 # --- searching inside notes
 #
 # Every note and every text read from a file is encrypted on disk, so finding a
-# word means decrypting them. That is done once per note and kept in this
-# process's memory, keyed by what would change if the note or its files did.
+# word means decrypting them. That is done once per note and kept in the
+# vault object's memory (Vault.text_cache), keyed by what would change if the note or its files did.
 # Nothing here is written to disk.
-_TEXT_CACHE: dict[str, tuple[Any, list[tuple[str, str, str]]]] = {}
 SEARCH_PIECE_LIMIT = 400_000   # characters of one note or one file's text that are searched
 SNIPPET_BEFORE, SNIPPET_AFTER = 60, 110
 
@@ -856,7 +945,7 @@ def _note_text_stamp(meta: dict[str, Any]) -> tuple[Any, ...]:
 def note_text_pieces(meta: dict[str, Any]) -> list[tuple[str, str, str]]:
     """The searchable text of one note as (where, file name, text): its body, then the text read from each file."""
     stamp = _note_text_stamp(meta)
-    cached = _TEXT_CACHE.get(meta["id"])
+    cached = current_vault().text_cache.get(meta["id"])
     if cached and cached[0] == stamp:
         return cached[1]
     pieces: list[tuple[str, str, str]] = []
@@ -873,7 +962,7 @@ def note_text_pieces(meta: dict[str, Any]) -> list[tuple[str, str, str]]:
             text = ""
         if text:
             pieces.append(("file", att.get("name") or "file", text[:SEARCH_PIECE_LIMIT]))
-    _TEXT_CACHE[meta["id"]] = (stamp, pieces)
+    current_vault().text_cache[meta["id"]] = (stamp, pieces)
     return pieces
 
 
@@ -908,8 +997,9 @@ def library_search(args: argparse.Namespace) -> None:
     limit = max(1, min(int(getattr(args, "limit", 50) or 50), 100))
     index = load_index()
     notes = index.get("notes", [])
-    for gone in set(_TEXT_CACHE) - {note["id"] for note in notes}:
-        del _TEXT_CACHE[gone]
+    cache = current_vault().text_cache
+    for gone in set(cache) - {note["id"] for note in notes}:
+        del cache[gone]
     patterns = [re.compile(re.escape(term), re.IGNORECASE) for term in terms]
     hits: list[tuple[int, str, dict[str, Any]]] = []
     for note in notes:
@@ -1026,7 +1116,7 @@ def library_purge(args: argparse.Namespace) -> None:
         if not meta.get("trashed_at"):
             die("Move the Library note to trash before permanently deleting it.")
         note_id = meta["id"]
-        purge_dir = VAULT / ".library-purge" / note_id
+        purge_dir = current_vault().root / ".library-purge" / note_id
         moves = [(plaintext_note_path(note_id), purge_dir / "note.md"), (encrypted_note_path(note_id), purge_dir / "note.enc.json"), (attachment_note_dir(note_id), purge_dir / "attachments")]
         moved: list[tuple[Path, Path]] = []
         try:
@@ -1232,7 +1322,7 @@ def attach_file_to_note(meta: dict[str, Any], src: Path, *, sensitivity: str = "
     label = "sensitive" if meta.get("sensitivity") == "sensitive" else sensitivity_label(sensitivity)
     # Create the per-note directory explicitly: mkdir(parents=True) gives
     # intermediate directories the default mode (755), not 700.
-    ATTACH_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    current_vault().attach_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     attachment_note_dir(nid).mkdir(mode=0o700, exist_ok=True)
     out_dir = attachment_note_dir(nid) / att_id
     out_dir.mkdir(mode=0o700, exist_ok=True)
@@ -2458,7 +2548,7 @@ def medical_purge(args: argparse.Namespace) -> None:
         note_id = meta["id"]
         # Only Kaal-managed copies and sidecars are removed. The original browser
         # download/source file is never stored under these vault paths.
-        purge_dir = VAULT / ".receipt-purge" / note_id
+        purge_dir = current_vault().root / ".receipt-purge" / note_id
         moves = [
             (plaintext_note_path(note_id), purge_dir / "note.md"),
             (encrypted_note_path(note_id), purge_dir / "note.enc.json"),
@@ -2514,7 +2604,7 @@ def medical_purge_bulk(args: argparse.Namespace) -> None:
         metas = [medical_receipt_meta(index, note_id) for note_id in note_ids]
         if any(not meta.get("trashed_at") for meta in metas):
             die("Move every selected medical receipt to trash before permanently deleting it.")
-        batch_dir = VAULT / ".receipt-purge" / f"bulk-{secrets.token_hex(8)}"
+        batch_dir = current_vault().root / ".receipt-purge" / f"bulk-{secrets.token_hex(8)}"
         moved: list[tuple[Path, Path]] = []
         try:
             for meta in metas:
@@ -2783,12 +2873,12 @@ def verify_vault(args: argparse.Namespace) -> None:
                             if hashlib.sha256(plain).hexdigest() != att["sha256"]:
                                 problems.append({"kind": "attachment_hash_mismatch", **where})
         orphan_note_files = sorted(
-            {entry.name.split(".", 1)[0] for entry in NOTES_DIR.iterdir() if entry.is_file() and entry.suffix in {".md", ".json"}} - seen
-        ) if NOTES_DIR.is_dir() else []
+            {entry.name.split(".", 1)[0] for entry in current_vault().notes_dir.iterdir() if entry.is_file() and entry.suffix in {".md", ".json"}} - seen
+        ) if current_vault().notes_dir.is_dir() else []
         orphan_note_dirs: list[str] = []
         orphan_attachment_dirs: list[str] = []
-        if ATTACH_DIR.is_dir():
-            for note_dir in sorted(entry for entry in ATTACH_DIR.iterdir() if entry.is_dir()):
+        if current_vault().attach_dir.is_dir():
+            for note_dir in sorted(entry for entry in current_vault().attach_dir.iterdir() if entry.is_dir()):
                 if note_dir.name not in known_attachments:
                     orphan_note_dirs.append(note_dir.name)
                     continue
@@ -2796,14 +2886,14 @@ def verify_vault(args: argparse.Namespace) -> None:
                     if att_dir.name not in known_attachments[note_dir.name]:
                         orphan_attachment_dirs.append(f"{note_dir.name}/{att_dir.name}")
         loose_dirs = loose_files = 0
-        for root, dirs, files in os.walk(VAULT):
+        for root, dirs, files in os.walk(current_vault().root):
             for name in dirs:
                 if stat.S_IMODE(os.lstat(os.path.join(root, name)).st_mode) != 0o700:
                     loose_dirs += 1
             for name in files:
                 if stat.S_IMODE(os.lstat(os.path.join(root, name)).st_mode) != 0o600:
                     loose_files += 1
-        pending_purges = sorted(name for name in (".library-purge", ".receipt-purge") if (VAULT / name).exists())
+        pending_purges = sorted(name for name in (".library-purge", ".receipt-purge") if (current_vault().root / name).exists())
     result = {
         "status": "problems" if problems else "ok",
         "deep": deep,
@@ -2838,8 +2928,8 @@ def _anonymous(info: tarfile.TarInfo) -> tarfile.TarInfo:
 def _write_vault_tar(handle: Any) -> int:
     files = 0
     with tarfile.open(fileobj=handle, mode="w") as tar:
-        for root, dirs, names in os.walk(VAULT):
-            rel_root = Path(root).relative_to(VAULT)
+        for root, dirs, names in os.walk(current_vault().root):
+            rel_root = Path(root).relative_to(current_vault().root)
             top = rel_root == Path(".")
             dirs[:] = sorted(d for d in dirs if not (top and d in EXPORT_EXCLUDED) and not os.path.islink(os.path.join(root, d)))
             for name in dirs:
@@ -2862,7 +2952,7 @@ def export_vault(args: argparse.Namespace) -> None:
     out = Path(args.output).expanduser().resolve()
     if out.exists() or out.is_symlink():
         die(f"Output exists: {out}")
-    if out.is_relative_to(VAULT.resolve()):
+    if out.is_relative_to(current_vault().root.resolve()):
         die("Write the export outside the vault.")
     with vault_capture_lock():
         fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -2890,8 +2980,8 @@ def import_vault(args: argparse.Namespace) -> None:
     archive = Path(args.archive).expanduser().resolve()
     if not archive.is_file():
         die(f"Archive not found: {archive}", kind="not_found")
-    if VAULT.exists() and any(VAULT.iterdir()):
-        die(f"The vault at {VAULT} is not empty; import only restores into an empty vault.", kind="conflict")
+    if current_vault().root.exists() and any(current_vault().root.iterdir()):
+        die(f"The vault at {current_vault().root} is not empty; import only restores into an empty vault.", kind="conflict")
     try:
         tar = tarfile.open(archive)
     except tarfile.TarError:
@@ -2905,11 +2995,11 @@ def import_vault(args: argparse.Namespace) -> None:
                 die(f"Refusing unsafe archive member: {member.name}")
         if "index.json" not in {PurePosixPath(m.name).as_posix() for m in members if m.isfile()}:
             die("The archive has no index.json, so it is not a Kaal export.")
-        _mkdirs_700(VAULT)
-        os.chmod(VAULT, 0o700)
+        _mkdirs_700(current_vault().root)
+        os.chmod(current_vault().root, 0o700)
         with vault_capture_lock():
             for member in members:
-                dest = VAULT.joinpath(*PurePosixPath(member.name).parts)
+                dest = current_vault().root.joinpath(*PurePosixPath(member.name).parts)
                 if member.isdir():
                     _mkdirs_700(dest)
                     continue
@@ -2920,7 +3010,7 @@ def import_vault(args: argparse.Namespace) -> None:
                     shutil.copyfileobj(source, out)
                 files += 1
     verify, _ = call_captured(verify_vault, SimpleNamespace(deep=False))
-    emit({"status": "imported", "vault": str(VAULT), "files": files, "notes": verify["notes"], "verify": verify}, indent=2)
+    emit({"status": "imported", "vault": str(current_vault().root), "files": files, "notes": verify["notes"], "verify": verify}, indent=2)
 
 
 BACKUP_NAME_RE = re.compile(r"^\d{8}T\d{6}Z$")
@@ -2945,7 +3035,7 @@ def backup_vault(args: argparse.Namespace) -> None:
     if not raw_dest:
         die("Pass --dest or set KAAL_BACKUP_DIR.")
     dest = Path(raw_dest).expanduser().resolve()
-    if dest.is_relative_to(VAULT.resolve()):
+    if dest.is_relative_to(current_vault().root.resolve()):
         die("Backups must live outside the vault.")
     keep = int(getattr(args, "keep", 14))
     if keep < 1:
@@ -2966,8 +3056,8 @@ def backup_vault(args: argparse.Namespace) -> None:
         complete = sorted(p for p in dest.iterdir() if p.is_dir() and BACKUP_NAME_RE.match(p.name))
         previous = complete[-1] if complete else None
         _mkdir_700(work)
-        for root, dirs, names in os.walk(VAULT):
-            rel_root = Path(root).relative_to(VAULT)
+        for root, dirs, names in os.walk(current_vault().root):
+            rel_root = Path(root).relative_to(current_vault().root)
             top = rel_root == Path(".")
             dirs[:] = sorted(d for d in dirs if not (top and d in EXPORT_EXCLUDED) and not os.path.islink(os.path.join(root, d)))
             for name in dirs:
@@ -3027,7 +3117,7 @@ def receipt_ai_status() -> dict[str, Any]:
 
 def _note_count() -> int | None:
     """How many notes the vault holds; None when the index cannot be read, for example without the key."""
-    if not INDEX_PATH.exists():
+    if not current_vault().index_path.exists():
         return 0
     try:
         return len(load_index().get("notes", []))
@@ -3043,13 +3133,13 @@ def status(args: argparse.Namespace) -> None:
     except key_providers.KeyProviderError:
         provider_name, has_key = "unconfigured", False
     emit({
-        "vault": str(VAULT),
-        "vault_exists": VAULT.exists(),
-        "index_exists": INDEX_PATH.exists(),
+        "vault": str(current_vault().root),
+        "vault_exists": current_vault().root.exists(),
+        "index_exists": current_vault().index_path.exists(),
         "key_provider": provider_name,
         "key_exists": has_key,
         "notes": _note_count(),
-        "index_encrypted": index_is_encrypted() if INDEX_PATH.exists() else None,
+        "index_encrypted": index_is_encrypted() if current_vault().index_path.exists() else None,
         "receipt_ai": receipt_ai_status(),
     }, indent=2)
 
