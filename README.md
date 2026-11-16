@@ -97,6 +97,33 @@ first start that vault becomes the vault of an administrator account named
 `owner`, nothing in it is moved or re-encrypted, and existing tokens act as
 that account. A token that names no account or vault always means those two.
 
+**Signing in.** People sign in to the web app with a sign-in name and a
+password. Nobody is given a password: whoever runs the installation makes a
+single-use link, and the person chooses their own.
+
+```bash
+kaal-server account setup-link sam        # prints a link that works once, for 24 hours
+kaal-server account password sam          # or type a password at the server's terminal
+kaal-server account rename sam sam@example.com
+```
+
+Set `KAAL_PUBLIC_URL` to the address people open and the link is printed
+complete. Choosing a password also gives the person eight recovery codes;
+each one lets them choose a new password once if they forget theirs. A new
+setup link does the same job when the codes are gone.
+
+Passwords are stored as Argon2id hashes. A browser that signs in gets a random
+session cookie, of which the server keeps only a hash; signing out, changing
+the password or using a recovery code ends sessions on the server. Five wrong
+passwords for one sign-in name are free, after which each further try has to
+wait, from one minute up to fifteen. Settings shows a person their signed-in
+browsers and lets them sign any of them out.
+
+A token can never change the password, codes or sessions of the account it
+acts for, so a script's token cannot be turned into its owner's sign-in.
+Tokens remain the way for scripts, the command-line client and the browser
+extension to connect.
+
 Whoever runs the installation holds the key file and can read every vault on
 it. Accounts keep the people who use an installation apart from each other,
 not from its operator.

@@ -168,3 +168,62 @@ def test_install_rejects_unexpected_arguments(server):
     assert server.run("install", str(wheel), "not-a-commit; rm -rf /", "0").returncode != 0
     assert server.version() == "1"
     assert server.systemctl_calls() == []
+
+
+def _accounts_file(server, version, rows):
+    import sqlite3
+    path = server.prefix / "accounts.db"
+    server.env["KAAL_ACCOUNTS_FILE"] = str(path)
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS people (name TEXT)")
+        db.execute("DELETE FROM people")
+        db.executemany("INSERT INTO people VALUES (?)", [(row,) for row in rows])
+        db.execute(f"PRAGMA user_version = {version}")
+    return path
+
+
+def _people(path):
+    import sqlite3
+    with sqlite3.connect(path) as db:
+        return [row[0] for row in db.execute("SELECT name FROM people ORDER BY rowid")], db.execute("PRAGMA user_version").fetchone()[0]
+
+
+def test_rollback_puts_the_accounts_file_back_when_the_newer_version_changed_its_layout(server):
+    """An older Kaal refuses an accounts file with a newer layout, so it must get its own back."""
+    path = _accounts_file(server, 1, ["jane"])
+    assert server.run("install", str(server.stage("2")), "aaa111", "0").returncode == 0
+    # Version 2 starts, upgrades the layout and someone is added.
+    _accounts_file(server, 2, ["jane", "sam"])
+    result = server.run("rollback")
+    assert result.returncode == 0, result.stderr
+    assert "accounts file put back" in result.stdout
+    assert _people(path) == (["jane"], 1)
+    assert _people(server.prefix / "accounts.db.newer-layout") == (["jane", "sam"], 2), "the newer file is kept, not thrown away"
+    assert "stop kaal-server.service" in server.systemctl_calls()
+
+
+def test_rollback_leaves_the_accounts_file_alone_when_its_layout_did_not_change(server):
+    path = _accounts_file(server, 1, ["jane"])
+    assert server.run("install", str(server.stage("2")), "aaa111", "0").returncode == 0
+    _accounts_file(server, 1, ["jane", "sam"])
+    assert server.run("rollback").returncode == 0
+    assert _people(path) == (["jane", "sam"], 1), "people added since the install are kept"
+    assert not (server.prefix / "accounts.db.newer-layout").exists()
+
+
+def test_an_unhealthy_release_that_upgraded_the_accounts_file_is_rolled_back_whole(server):
+    import sqlite3
+    path = _accounts_file(server, 1, ["jane"])
+    assert server.run("install", str(server.stage("2")), "aaa111", "0").returncode == 0
+    (server.prefix / "unhealthy-version").write_text("3")
+    # Stand-in for version 3 upgrading the file as it starts: the first health check does it.
+    stub = server.prefix / "stubs" / "curl"
+    upgrade = ('if [ -e "$KAAL_PREFIX/upgrade-once" ]; then rm "$KAAL_PREFIX/upgrade-once"; '
+               '"$KAAL_PREFIX/venv/bin/python" -c "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute(\'PRAGMA user_version = 2\'); d.commit()" "$KAAL_ACCOUNTS_FILE"; fi\n')
+    stub.write_text(stub.read_text().replace("#!/bin/sh\n", "#!/bin/sh\n" + upgrade, 1))
+    (server.prefix / "upgrade-once").write_text("")
+    result = server.run("install", str(server.stage("3")), "bbb222", "0")
+    assert result.returncode != 0 and "rolled back" in result.stderr, result.stderr
+    assert server.version() == "2" and _people(path) == (["jane"], 1)
+    with sqlite3.connect(server.prefix / "accounts.db.newer-layout") as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 2

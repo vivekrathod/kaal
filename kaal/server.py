@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from kaal import __version__, accounts, core, tokens
+from kaal import __version__, accounts, core, passwords, tokens
 
 log = logging.getLogger("kaal.server")
 
@@ -322,6 +322,7 @@ class AppState:
     accounts: accounts.AccountStore
     vaults: Vaults
     worker: Any = None
+    guard: Any = None
 
 
 class Scoped:
@@ -371,6 +372,60 @@ def create_vault(store: accounts.AccountStore, name: str, owner: str) -> dict[st
         store.remove_vault_record(record["id"])
         raise
     return record
+
+
+class SignInGuard:
+    """Slows password guessing. After five wrong tries for one sign-in name the
+    next try must wait: a minute at first, doubling to fifteen. A correct
+    sign-in clears it. Kept in memory; a restart clears everything."""
+
+    FREE_TRIES, FIRST_WAIT, LONGEST_WAIT, REMEMBERED = 5, 60.0, 900.0, 5000
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._seen: dict[str, tuple[int, float]] = {}   # failures so far, time the next try is allowed
+
+    def wait(self, login: str) -> int:
+        """Seconds until this sign-in name may be tried again; 0 means now."""
+        with self._lock:
+            _count, allowed_at = self._seen.get(login.lower(), (0, 0.0))
+        return max(0, int(allowed_at - time.monotonic() + 0.999))
+
+    def failed(self, login: str) -> None:
+        key = login.lower()
+        with self._lock:
+            count = self._seen.get(key, (0, 0.0))[0] + 1
+            over = count - self.FREE_TRIES
+            pause = min(self.LONGEST_WAIT, self.FIRST_WAIT * 2 ** (over - 1)) if over > 0 else 0.0
+            if len(self._seen) >= self.REMEMBERED and key not in self._seen:
+                self._seen.pop(next(iter(self._seen)))
+            self._seen[key] = (count, time.monotonic() + pause)
+
+    def succeeded(self, login: str) -> None:
+        with self._lock:
+            self._seen.pop(login.lower(), None)
+
+
+def device_label(user_agent: str) -> str:
+    """A short name for the browser a session was started from, such as "Chrome on macOS"."""
+    agent = user_agent or ""
+    browser = next((name for mark, name in (("Edg/", "Edge"), ("Firefox/", "Firefox"), ("Chrome/", "Chrome"), ("Safari/", "Safari")) if mark in agent), "")
+    system = next((name for mark, name in (("iPhone", "iPhone"), ("iPad", "iPad"), ("Android", "Android"), ("Mac OS X", "macOS"), ("Windows", "Windows"), ("Linux", "Linux"))
+                   if mark in agent), "")
+    return " on ".join(part for part in (browser, system) if part) or "A browser"
+
+
+def person_record(state: AppState, session: dict[str, Any]) -> dict[str, Any] | None:
+    """What a signed-in person may do right now: their account, the vault their
+    session is on (their first if that one is gone) and what their role allows there."""
+    account = state.accounts.account(session["account"])
+    if account is None or account["disabled_at"]:
+        return None
+    theirs = state.accounts.vaults_of(account["id"])
+    current = next((vault for vault in theirs if vault["id"] == session["vault"]), None) or (theirs[0] if theirs else None)
+    return {"id": f"session:{session['id']}", "name": account["login"], "session": session["id"], "person": account, "vaults": theirs,
+            "account": account["id"], "vault": current["id"] if current else None, "role": current["role"] if current else None,
+            "scopes": list(accounts.ROLE_SCOPES[current["role"]]) if current else []}
 
 
 def who_may(state: AppState, record: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
@@ -439,21 +494,55 @@ SAME_SITE_HEADER = "x-kaal-request"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
+def _from_cookie_checked(request: Request) -> None:
+    if request.method not in SAFE_METHODS and request.headers.get(SAME_SITE_HEADER) != "1":
+        raise HTTPException(403, "This request did not come from the Kaal web app.")
+
+
+def _refuse_unknown(state: AppState) -> None:
+    if not state.limiter.allow("unauthenticated"):
+        raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
+    raise HTTPException(401, "A valid bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
+
+
+def _signed_in_person(request: Request, state: AppState) -> dict[str, Any] | None:
+    """The person a session cookie belongs to; None when the cookie is not a live session."""
+    presented = request.cookies.get(SESSION_COOKIE, "").strip()
+    if not presented.startswith(accounts.SESSION_PREFIX + "_"):
+        return None
+    session = state.accounts.session(presented)
+    record = person_record(state, session) if session else None
+    if record is None:
+        return None
+    _from_cookie_checked(request)
+    request.state.token_name = f"account:{record['account']}"
+    if not state.limiter.allow(f"account:{record['account']}"):
+        raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
+    return record
+
+
 def require(*scopes: str) -> Callable:
     def dependency(request: Request) -> dict[str, Any]:
         state: AppState = request.app.state.kaal
         scheme, _, presented = request.headers.get("authorization", "").partition(" ")
         from_cookie = False
         if scheme.lower() != "bearer":
-            # A signed-in browser: the token travels in a cookie page scripts cannot read.
+            # A signed-in browser: a session, or (older sign-ins) a token, in a cookie page scripts cannot read.
+            person = _signed_in_person(request, state)
+            if person is not None:
+                missing = [scope for scope in scopes if scope not in person["scopes"]]
+                if scopes and person["vault"] is None:
+                    raise HTTPException(403, "You do not belong to a vault yet.")
+                if missing:
+                    raise HTTPException(403, f"Your role in this vault does not allow that (it needs {', '.join(missing)}).")
+                request.state.vault = state.vaults.get(person["vault"]) if person["vault"] else None
+                return person
             presented, from_cookie = request.cookies.get(SESSION_COOKIE, ""), True
         record = state.tokens.authenticate(presented.strip()) if presented.strip() else None
-        if record is not None and from_cookie and request.method not in SAFE_METHODS and request.headers.get(SAME_SITE_HEADER) != "1":
-            raise HTTPException(403, "This request did not come from the Kaal web app.")
+        if record is not None and from_cookie:
+            _from_cookie_checked(request)
         if record is None:
-            if not state.limiter.allow("unauthenticated"):
-                raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
-            raise HTTPException(401, "A valid bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
+            _refuse_unknown(state)
         request.state.token_name = record["name"]
         if not state.limiter.allow(record["id"]):
             raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
@@ -470,6 +559,21 @@ def require(*scopes: str) -> Callable:
             raise HTTPException(403, f"This token lacks the {', '.join(missing)} scope.")
         request.state.vault = vault
         return {**record, "scopes": allowed, "account": account["id"], "vault": vault_id, "role": role}
+
+    return Depends(dependency)
+
+
+def require_person() -> Callable:
+    """For managing one's own account: only a person signed in with their own
+    password will do. A token never may, whatever it is allowed in a vault."""
+    def dependency(request: Request) -> dict[str, Any]:
+        state: AppState = request.app.state.kaal
+        person = _signed_in_person(request, state)
+        if person is None:
+            if state.tokens.authenticate(request.cookies.get(SESSION_COOKIE, "").strip()) or request.headers.get("authorization"):
+                raise HTTPException(403, "Sign in with your own password to manage your account; a token cannot.")
+            _refuse_unknown(state)
+        return person
 
     return Depends(dependency)
 
@@ -629,6 +733,40 @@ class SignIn(BaseModel):
     token: str = Field(min_length=1, max_length=400)
 
 
+class PasswordSignIn(BaseModel):
+    login: str = Field(min_length=1, max_length=200)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class Recover(BaseModel):
+    login: str = Field(min_length=1, max_length=200)
+    code: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class SetupCode(BaseModel):
+    code: str = Field(min_length=1, max_length=200)
+
+
+class SetupFinish(BaseModel):
+    code: str = Field(min_length=1, max_length=200)
+    password: str = Field(min_length=1, max_length=1024)
+    name: str = Field(default="", max_length=100)
+
+
+class PasswordChange(BaseModel):
+    current: str = Field(min_length=1, max_length=1024)
+    new: str = Field(min_length=1, max_length=1024)
+
+
+class PasswordProof(BaseModel):
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class VaultChoice(BaseModel):
+    vault: str = Field(min_length=1, max_length=64)
+
+
 class Reextract(BaseModel):
     ids: list[str] = Field(default_factory=list, max_length=100)
     unreviewed: bool = False
@@ -670,7 +808,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     app = FastAPI(title="Kaal", version=__version__, docs_url=None, redoc_url=None, openapi_url=None,
                   description="An encrypted notes vault. Every request needs `Authorization: Bearer <token>` except /v1/health.")
-    app.state.kaal = AppState(settings, tokens.TokenStore(settings.tokens_file), RateLimiter(settings.rate_per_minute), store, registry)
+    app.state.kaal = AppState(settings, tokens.TokenStore(settings.tokens_file), RateLimiter(settings.rate_per_minute), store, registry, guard=SignInGuard())
     app.state.kaal.worker = ExtractionWorker(registry.all)
     app.add_middleware(BodyLimitMiddleware, limit=settings.max_upload_bytes + MiB)
 
@@ -765,15 +903,180 @@ def create_app(settings: Settings) -> FastAPI:
         response.set_cookie(SESSION_COOKIE, body.token.strip(), max_age=SESSION_SECONDS, path="/", httponly=True, secure=state.settings.cookie_secure, samesite="strict")
         return response
 
+    def answer(result: Any) -> JSONResponse:
+        return JSONResponse({"result": result, "format": {}})
+
+    def with_cookie(response: JSONResponse, state: Any, value: str) -> JSONResponse:
+        response.set_cookie(SESSION_COOKIE, value, max_age=SESSION_SECONDS, path="/", httponly=True, secure=state.settings.cookie_secure, samesite="strict")
+        return response
+
+    def who(record: dict[str, Any]) -> dict[str, Any]:
+        """What a browser is told about its own sign-in."""
+        told: dict[str, Any] = {"name": record["name"], "scopes": record.get("scopes", [])}
+        if record.get("person"):
+            person = record["person"]
+            told["account"] = {"login": person["login"], "name": person["name"], "admin": person["admin"]}
+            told["vaults"] = [{"id": vault["id"], "name": vault["name"], "role": vault["role"]} for vault in record["vaults"]]
+            told["vault"] = next((vault for vault in told["vaults"] if vault["id"] == record["vault"]), None)
+        return told
+
+    def start_session(request: Request, state: Any, account: dict[str, Any], **also: Any) -> JSONResponse:
+        """Sign a person in on this browser, on their first vault. ``also`` is added to the answer."""
+        theirs = state.accounts.vaults_of(account["id"])
+        session_record, cookie = state.accounts.start_session(account["id"], theirs[0]["id"] if theirs else None, device_label(request.headers.get("user-agent", "")))
+        request.state.token_name = f"account:{account['id']}"
+        return with_cookie(answer({**who(person_record(state, session_record)), **also}), state, cookie)
+
+    def checked_password(state: Any, account: dict[str, Any] | None, password: str, login: str) -> bool:
+        """One password attempt for a sign-in name, counted by the guard either way."""
+        waiting = state.guard.wait(login)
+        if waiting:
+            raise HTTPException(429, "Too many wrong tries. Wait a little and try again.", headers={"Retry-After": str(waiting)})
+        usable = account is not None and not account["disabled_at"]
+        correct = passwords.verify_password(state.accounts.password_hash(account["id"]) if usable else None, password)
+        if correct:
+            state.guard.succeeded(login)
+        else:
+            state.guard.failed(login)
+        return correct
+
     @app.get("/v1/session", tags=["session"])
     def session(record: dict[str, Any] = require()):
-        return JSONResponse({"result": {"name": record["name"], "scopes": record.get("scopes", [])}, "format": {}})
+        return answer(who(record))
 
     @app.delete("/v1/session", tags=["session"])
     def sign_out(request: Request):
+        state = S(request)
+        live = state.accounts.session(request.cookies.get(SESSION_COOKIE, "").strip())
+        if live:
+            state.accounts.end_session(live["id"])
         response = JSONResponse({"result": {"status": "signed_out"}, "format": {}})
-        response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=S(request).settings.cookie_secure, samesite="strict")
+        response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=state.settings.cookie_secure, samesite="strict")
         return response
+
+    @app.post("/v1/session/vault", tags=["session"])
+    def choose_vault(request: Request, body: VaultChoice, person: dict[str, Any] = require_person()):
+        """Move this browser to another of the person's vaults."""
+        state = S(request)
+        if not any(vault["id"] == body.vault for vault in person["vaults"]):
+            return _error(404, "You do not belong to that vault.", "not_found")
+        state.accounts.set_session_vault(person["session"], body.vault)
+        return answer(who(person_record(state, {"id": person["session"], "account": person["account"], "vault": body.vault})))
+
+    # --- signing in as a person
+
+    @app.post("/v1/sign-in", tags=["session"])
+    def sign_in_with_password(request: Request, body: PasswordSignIn):
+        state = S(request)
+        try:
+            login = accounts.clean_login(body.login)
+        except accounts.AccountError:
+            login = body.login.strip().lower()[:64]
+        account = state.accounts.account(login)
+        if not checked_password(state, account, body.password, login):
+            if not state.limiter.allow("unauthenticated"):
+                raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
+            raise HTTPException(401, "That sign-in name and password do not match.")
+        stored = state.accounts.password_hash(account["id"])
+        if stored and passwords.needs_rehash(stored):
+            state.accounts.set_password(account["id"], passwords.hash_password(body.password))
+        return start_session(request, state, account)
+
+    @app.post("/v1/sign-in/recover", tags=["session"])
+    def recover(request: Request, body: Recover):
+        """Use a recovery code to choose a new password. Signs every other browser out."""
+        state = S(request)
+        login = body.login.strip().lower()[:64]
+        account = state.accounts.account(login)
+        waiting = state.guard.wait(login)
+        if waiting:
+            raise HTTPException(429, "Too many wrong tries. Wait a little and try again.", headers={"Retry-After": str(waiting)})
+        try:
+            passwords.check_new(body.password, login=login)
+        except passwords.PasswordError as error:
+            return _error(400, str(error), "invalid")
+        if account is None or account["disabled_at"] or not state.accounts.use_recovery_code(account["id"], body.code):
+            state.guard.failed(login)
+            raise HTTPException(401, "That sign-in name and recovery code do not match.")
+        state.guard.succeeded(login)
+        state.accounts.set_password(account["id"], passwords.hash_password(body.password))
+        state.accounts.end_sessions(account["id"])
+        return start_session(request, state, account)
+
+    @app.post("/v1/setup/check", tags=["session"])
+    def setup_check(request: Request, body: SetupCode):
+        """Whose setup link this is, so the page can greet them. Uses nothing up."""
+        state = S(request)
+        account = state.accounts.setup_account(body.code)
+        if account is None:
+            if not state.limiter.allow("unauthenticated"):
+                raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
+            return _error(404, "This setup link has been used or has run out. Ask for a new one.", "not_found")
+        return answer({"login": account["login"], "name": account["name"]})
+
+    @app.post("/v1/setup", tags=["session"])
+    def setup_finish(request: Request, body: SetupFinish):
+        """Choose a password with a setup link, then sign in. The link works once."""
+        state = S(request)
+        account = state.accounts.setup_account(body.code)
+        if account is None:
+            if not state.limiter.allow("unauthenticated"):
+                raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
+            return _error(404, "This setup link has been used or has run out. Ask for a new one.", "not_found")
+        try:
+            passwords.check_new(body.password, login=account["login"])
+        except passwords.PasswordError as error:
+            return _error(400, str(error), "invalid")
+        if state.accounts.setup_account(body.code, spend=True) is None:
+            return _error(404, "This setup link has been used or has run out. Ask for a new one.", "not_found")
+        state.accounts.set_password(account["id"], passwords.hash_password(body.password))
+        state.accounts.rename(account["id"], body.name)
+        state.accounts.end_sessions(account["id"])
+        codes = state.accounts.new_recovery_codes(account["id"])
+        return start_session(request, state, state.accounts.account(account["id"]), recovery_codes=codes)
+
+    # --- one's own account
+
+    @app.get("/v1/account", tags=["account"])
+    def account_show(request: Request, person: dict[str, Any] = require_person()):
+        state = S(request)
+        return answer({**who(person),
+                       "has_password": state.accounts.password_hash(person["account"]) is not None,
+                       "recovery_codes_left": state.accounts.recovery_codes_left(person["account"]),
+                       "sessions": [{"id": entry["id"], "label": entry["label"], "created": entry["created"], "last_seen": entry["last_seen"],
+                                     "current": entry["id"] == person["session"]} for entry in state.accounts.sessions_of(person["account"])]})
+
+    @app.post("/v1/account/password", tags=["account"])
+    def account_password(request: Request, body: PasswordChange, person: dict[str, Any] = require_person()):
+        """Change one's password. Every other browser is signed out."""
+        state = S(request)
+        if not checked_password(state, person["person"], body.current, person["name"]):
+            return _error(403, "Your current password is not right.", "forbidden")
+        try:
+            passwords.check_new(body.new, login=person["name"])
+        except passwords.PasswordError as error:
+            return _error(400, str(error), "invalid")
+        state.accounts.set_password(person["account"], passwords.hash_password(body.new))
+        return answer({"status": "changed", "signed_out_elsewhere": state.accounts.end_sessions(person["account"], keep=person["session"])})
+
+    @app.post("/v1/account/recovery-codes", tags=["account"])
+    def account_recovery_codes(request: Request, body: PasswordProof, person: dict[str, Any] = require_person()):
+        """Replace one's recovery codes. The new ones are shown this once."""
+        state = S(request)
+        if not checked_password(state, person["person"], body.password, person["name"]):
+            return _error(403, "Your password is not right.", "forbidden")
+        return answer({"recovery_codes": state.accounts.new_recovery_codes(person["account"])})
+
+    @app.delete("/v1/account/sessions/{session_id}", tags=["account"])
+    def account_end_session(request: Request, session_id: str, person: dict[str, Any] = require_person()):
+        """Sign one of one's browsers out."""
+        if not S(request).accounts.end_session(session_id, person["account"]):
+            return _error(404, "That browser is not signed in.", "not_found")
+        return answer({"status": "signed_out", "id": session_id})
+
+    @app.post("/v1/account/sessions/sign-out-others", tags=["account"])
+    def account_end_other_sessions(request: Request, person: dict[str, Any] = require_person()):
+        return answer({"status": "signed_out", "count": S(request).accounts.end_sessions(person["account"], keep=person["session"])})
 
     @app.get("/v1/status", tags=["service"], dependencies=[require("read")])
     def status(request: Request):
@@ -1164,6 +1467,29 @@ def _people(args: argparse.Namespace) -> None:
             person = store.add_account(args.login, args.name, admin=args.admin)
             vault = None if args.no_vault else create_vault(store, args.vault_name or "My notes", person["id"])
             out = {"status": "created", "account": person, "vault": vault}
+        elif action == ("account", "setup-link"):
+            code = store.new_setup_code(args.login, hours=args.hours)
+            base = (os.environ.get("KAAL_PUBLIC_URL") or "").rstrip("/") or "https://YOUR-KAAL-ADDRESS"
+            print(f"Open this within {args.hours:g} hours to choose a password. It works once:", file=sys.stderr)
+            print(f"{base}/#/setup/{code}")
+            return
+        elif action == ("account", "password"):
+            person = store.account(args.login)
+            if person is None:
+                raise accounts.AccountError(f"No account {args.login!r}.")
+            import getpass
+
+            first, second = getpass.getpass("New password: "), getpass.getpass("Again: ")
+            if first != second:
+                sys.exit("ERROR: The two did not match.")
+            try:
+                passwords.check_new(first, login=person["login"])
+            except passwords.PasswordError as error:
+                sys.exit(f"ERROR: {error}")
+            store.set_password(person["id"], passwords.hash_password(first))
+            out = {"status": "password set", "account": person["login"], "signed_out": store.end_sessions(person["id"])}
+        elif action == ("account", "rename"):
+            out = {"status": "updated", "account": store.set_login(args.login, args.new_login)}
         elif action in {("account", "disable"), ("account", "enable")}:
             out = {"status": "updated", "account": store.set_disabled(args.login, args.action == "disable")}
         elif action == ("vault", "list"):
@@ -1229,8 +1555,15 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--admin", action="store_true", help="May manage accounts and vaults")
     add.add_argument("--vault-name", default="", help="What to call their vault (default: My notes)")
     add.add_argument("--no-vault", action="store_true", help="Do not create a vault; grant them one with `vault grant`")
-    for word, text in (("disable", "Stop an account from being used, keeping its data"), ("enable", "Let a disabled account be used again")):
+    for word, text in (("disable", "Stop an account from being used, keeping its data"), ("enable", "Let a disabled account be used again"),
+                       ("password", "Set an account's password here, typed twice without being shown")):
         account_sub.add_parser(word, help=text).add_argument("login")
+    rename = account_sub.add_parser("rename", help="Change the name an account signs in with")
+    rename.add_argument("login")
+    rename.add_argument("new_login")
+    link = account_sub.add_parser("setup-link", help="Print a single-use link for choosing an account's password in the web app")
+    link.add_argument("login")
+    link.add_argument("--hours", type=float, default=accounts.SETUP_HOURS, help="How long the link works (default: 24)")
     vault = sub.add_parser("vault", help="Vaults and who belongs to each")
     vault_sub = vault.add_subparsers(dest="action", required=True)
     vault_sub.add_parser("list", help="Vaults and their members")

@@ -18,6 +18,19 @@ SERVICE="${KAAL_SERVICE:-kaal-server.service}"
 BACKUP_UNIT="${KAAL_BACKUP_UNIT:-kaal-backup.service}"
 HEALTH_URL="http://127.0.0.1:${KAAL_PORT:-8765}/v1/health"
 KEEP_SNAPSHOTS=5
+# Who has an account and who belongs to which vault. A newer Kaal may upgrade
+# this file's layout, which an older Kaal then refuses to open, so a rollback
+# has to put back the copy taken before the install.
+ACCOUNTS_FILE="${KAAL_ACCOUNTS_FILE:-${KAAL_HOME:-/srv/kaal}/accounts.db}"
+
+# The layout version of an accounts file (0 when it cannot be read).
+accounts_version() {
+  "$PY" - "$1" <<'PYEOF' 2>/dev/null || echo 0
+import sqlite3, sys
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+print(db.execute("PRAGMA user_version").fetchone()[0])
+PYEOF
+}
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'deploy: %s\n' "$*" >&2; exit 1; }
@@ -62,6 +75,17 @@ snapshot() {
   tar -C "$VENV" -cf "$ROLLBACK_DIR/$name.tar" $(package_paths)
   [ -f "$RELEASE_FILE" ] && cp "$RELEASE_FILE" "$ROLLBACK_DIR/$name.release"
   [ -f "$LOCK_FILE" ] && cp "$LOCK_FILE" "$ROLLBACK_DIR/$name.lock"
+  if [ -f "$ACCOUNTS_FILE" ]; then
+    # SQLite's own backup, so the copy is whole even while the server is writing.
+    ( umask 077; "$PY" - "$ACCOUNTS_FILE" "$ROLLBACK_DIR/$name.accounts.db" <<'PYEOF'
+import sqlite3, sys
+source, target = sqlite3.connect(sys.argv[1], timeout=15), sqlite3.connect(sys.argv[2])
+source.backup(target)
+target.close()
+source.close()
+PYEOF
+    ) || fail "could not copy the accounts file; nothing was changed"
+  fi
   say "$ROLLBACK_DIR/$name"
 }
 
@@ -74,6 +98,15 @@ restore() {
   tar -C "$VENV" -xf "$base.tar"
   if [ -f "$base.release" ]; then cp "$base.release" "$RELEASE_FILE"; else rm -f "$RELEASE_FILE"; fi
   if [ -f "$base.lock" ]; then cp "$base.lock" "$LOCK_FILE"; fi
+  # Put the accounts file back only if the version being left upgraded its
+  # layout: otherwise the current one is fine and holds anything added since.
+  if [ -f "$base.accounts.db" ] && [ -f "$ACCOUNTS_FILE" ] && [ "$(accounts_version "$ACCOUNTS_FILE")" -gt "$(accounts_version "$base.accounts.db")" ]; then
+    systemctl stop "$SERVICE" || true
+    cp -p "$ACCOUNTS_FILE" "$ACCOUNTS_FILE.newer-layout"
+    cat "$base.accounts.db" > "$ACCOUNTS_FILE"
+    rm -f "$ACCOUNTS_FILE-wal" "$ACCOUNTS_FILE-shm"
+    say "    accounts file put back as it was before the install (the newer one is kept beside it)"
+  fi
 }
 
 newest_snapshot() {
@@ -84,7 +117,7 @@ newest_snapshot() {
 }
 
 drop_snapshot() {
-  rm -f "$1.tar" "$1.release" "$1.lock"
+  rm -f "$1.tar" "$1.release" "$1.lock" "$1.accounts.db"
 }
 
 prune_snapshots() {

@@ -13,12 +13,14 @@ Roles cap what any credential of that person may do in that vault:
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -56,8 +58,47 @@ _MIGRATIONS: tuple[str, ...] = (
         PRIMARY KEY (account_id, vault_id)
     );
     """,
+    # 2: signing in as a person.
+    """
+    CREATE TABLE passwords (
+        account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+        hash TEXT NOT NULL,
+        changed TEXT NOT NULL
+    );
+    CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        secret_sha256 TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        vault_id TEXT REFERENCES vaults(id) ON DELETE SET NULL,
+        label TEXT NOT NULL DEFAULT '',
+        created TEXT NOT NULL,
+        last_seen TEXT NOT NULL,
+        expires TEXT NOT NULL,
+        ended_at TEXT
+    );
+    CREATE INDEX sessions_by_account ON sessions (account_id);
+    CREATE TABLE recovery_codes (
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        code_sha256 TEXT NOT NULL,
+        created TEXT NOT NULL,
+        used_at TEXT,
+        PRIMARY KEY (account_id, code_sha256)
+    );
+    CREATE TABLE setup_codes (
+        code_sha256 TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        created TEXT NOT NULL,
+        expires TEXT NOT NULL,
+        used_at TEXT
+    );
+    """,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
+SESSION_PREFIX = "ks"
+SESSION_DAYS = 30
+SESSION_TOUCH_SECONDS = 300   # how stale "last seen" may get before it is written again
+SETUP_HOURS = 24
+RECOVERY_CODE_COUNT = 8
 
 
 class AccountError(Exception):
@@ -66,6 +107,19 @@ class AccountError(Exception):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _later(**delta: float) -> str:
+    return (datetime.now(timezone.utc) + timedelta(**delta)).isoformat(timespec="seconds")
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def tidy_recovery_code(code: str) -> str:
+    """Recovery codes are typed by hand: ignore case, spaces and dashes."""
+    return re.sub(r"[^a-z0-9]", "", (code or "").lower())
 
 
 def _new_id() -> str:
@@ -319,3 +373,131 @@ class AccountStore:
         with self._db() as db:
             found = {row["key"]: row["value"] for row in db.execute("SELECT key, value FROM meta WHERE key IN ('default_account', 'default_vault')")}
         return found.get("default_account"), found.get("default_vault")
+
+    # --- passwords
+
+    def set_password(self, account_id: str, password_hash: str) -> None:
+        with self._db(write=True) as db:
+            db.execute("INSERT INTO passwords (account_id, hash, changed) VALUES (?, ?, ?) "
+                       "ON CONFLICT(account_id) DO UPDATE SET hash = excluded.hash, changed = excluded.changed", (account_id, password_hash, _now()))
+
+    def password_hash(self, account_id: str) -> str | None:
+        with self._db() as db:
+            row = db.execute("SELECT hash FROM passwords WHERE account_id = ?", (account_id,)).fetchone()
+        return row["hash"] if row else None
+
+    # --- sessions: a browser signed in as a person
+
+    @staticmethod
+    def _session(row: sqlite3.Row) -> dict[str, Any]:
+        return {"id": row["id"], "account": row["account_id"], "vault": row["vault_id"], "label": row["label"],
+                "created": row["created"], "last_seen": row["last_seen"], "expires": row["expires"]}
+
+    def start_session(self, account_id: str, vault_id: str | None, label: str = "") -> tuple[dict[str, Any], str]:
+        """A new session and the cookie value for it, which is never stored."""
+        session_id, secret = secrets.token_hex(8), secrets.token_urlsafe(32)
+        now = _now()
+        with self._db(write=True) as db:
+            db.execute("INSERT INTO sessions (id, secret_sha256, account_id, vault_id, label, created, last_seen, expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (session_id, _sha(secret), account_id, vault_id, (label or "")[:80], now, now, _later(days=SESSION_DAYS)))
+            row = db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        return self._session(row), f"{SESSION_PREFIX}_{session_id}_{secret}"
+
+    def session(self, presented: str) -> dict[str, Any] | None:
+        """The live session a cookie value belongs to, or None."""
+        parts = (presented or "").split("_", 2)
+        if len(parts) != 3 or parts[0] != SESSION_PREFIX or not parts[1] or not parts[2]:
+            return None
+        with self._db() as db:
+            row = db.execute("SELECT * FROM sessions WHERE id = ? AND ended_at IS NULL", (parts[1],)).fetchone()
+        expected = row["secret_sha256"] if row else _sha("no such session")
+        if not hmac.compare_digest(expected, _sha(parts[2])) or row is None or row["expires"] <= _now():
+            return None
+        if row["last_seen"] <= _later(seconds=-SESSION_TOUCH_SECONDS):
+            with self._db(write=True) as db:
+                db.execute("UPDATE sessions SET last_seen = ? WHERE id = ?", (_now(), row["id"]))
+        return self._session(row)
+
+    def sessions_of(self, account_id: str) -> list[dict[str, Any]]:
+        with self._db() as db:
+            rows = db.execute("SELECT * FROM sessions WHERE account_id = ? AND ended_at IS NULL AND expires > ? ORDER BY rowid", (account_id, _now()))
+            return [self._session(row) for row in rows]
+
+    def end_session(self, session_id: str, account_id: str | None = None) -> bool:
+        """End one session; with ``account_id``, only if it is that person's."""
+        with self._db(write=True) as db:
+            done = db.execute("UPDATE sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL AND (? IS NULL OR account_id = ?)",
+                              (_now(), session_id, account_id, account_id))
+            return done.rowcount > 0
+
+    def end_sessions(self, account_id: str, *, keep: str | None = None) -> int:
+        with self._db(write=True) as db:
+            done = db.execute("UPDATE sessions SET ended_at = ? WHERE account_id = ? AND ended_at IS NULL AND id IS NOT ?", (_now(), account_id, keep))
+            return done.rowcount
+
+    def set_session_vault(self, session_id: str, vault_id: str) -> None:
+        with self._db(write=True) as db:
+            db.execute("UPDATE sessions SET vault_id = ? WHERE id = ?", (vault_id, session_id))
+
+    # --- recovery codes: a way back in when the password is forgotten
+
+    def new_recovery_codes(self, account_id: str) -> list[str]:
+        """Replace the person's recovery codes and return the new ones, shown once."""
+        raw = [secrets.token_hex(6) for _ in range(RECOVERY_CODE_COUNT)]
+        now = _now()
+        with self._db(write=True) as db:
+            db.execute("DELETE FROM recovery_codes WHERE account_id = ?", (account_id,))
+            db.executemany("INSERT INTO recovery_codes (account_id, code_sha256, created) VALUES (?, ?, ?)", [(account_id, _sha(code), now) for code in raw])
+        return [f"{code[:4]}-{code[4:8]}-{code[8:]}" for code in raw]
+
+    def use_recovery_code(self, account_id: str, code: str) -> bool:
+        """Spend a recovery code; each works once."""
+        with self._db(write=True) as db:
+            done = db.execute("UPDATE recovery_codes SET used_at = ? WHERE account_id = ? AND code_sha256 = ? AND used_at IS NULL",
+                              (_now(), account_id, _sha(tidy_recovery_code(code))))
+            return done.rowcount > 0
+
+    def recovery_codes_left(self, account_id: str) -> int:
+        with self._db() as db:
+            return db.execute("SELECT COUNT(*) FROM recovery_codes WHERE account_id = ? AND used_at IS NULL", (account_id,)).fetchone()[0]
+
+    # --- setup codes: a single-use link for choosing a password
+
+    def new_setup_code(self, id_or_login: str, *, hours: float = SETUP_HOURS) -> str:
+        """A code that lets whoever holds it choose this account's password, once."""
+        code = secrets.token_urlsafe(24)
+        with self._db(write=True) as db:
+            row = db.execute("SELECT id FROM accounts WHERE id = ? OR login = ?", (id_or_login, id_or_login)).fetchone()
+            if row is None:
+                raise AccountError(f"No account {id_or_login!r}.")
+            # Asking for a new link cancels any earlier one for the same account.
+            db.execute("DELETE FROM setup_codes WHERE account_id = ?", (row["id"],))
+            db.execute("INSERT INTO setup_codes (code_sha256, account_id, created, expires) VALUES (?, ?, ?, ?)", (_sha(code), row["id"], _now(), _later(hours=hours)))
+        return code
+
+    def setup_account(self, code: str, *, spend: bool = False) -> dict[str, Any] | None:
+        """The account a setup code is for, while it is unused and in date. ``spend`` uses it up."""
+        with self._db(write=spend) as db:
+            row = db.execute("SELECT a.* FROM setup_codes c JOIN accounts a ON a.id = c.account_id "
+                             "WHERE c.code_sha256 = ? AND c.used_at IS NULL AND c.expires > ? AND a.disabled_at IS NULL", (_sha(code or ""), _now())).fetchone()
+            if row is not None and spend:
+                db.execute("UPDATE setup_codes SET used_at = ? WHERE code_sha256 = ?", (_now(), _sha(code)))
+            return self._account(row)
+
+    def set_login(self, id_or_login: str, new_login: str) -> dict[str, Any]:
+        """Change the name a person signs in with."""
+        new_login = clean_login(new_login)
+        with self._db(write=True) as db:
+            row = db.execute("SELECT id FROM accounts WHERE id = ? OR login = ?", (id_or_login, id_or_login)).fetchone()
+            if row is None:
+                raise AccountError(f"No account {id_or_login!r}.")
+            if db.execute("SELECT 1 FROM accounts WHERE login = ? AND id != ?", (new_login, row["id"])).fetchone():
+                raise AccountError(f"There is already an account with the sign-in name {new_login!r}.")
+            db.execute("UPDATE accounts SET login = ? WHERE id = ?", (new_login, row["id"]))
+            return self._account(db.execute("SELECT * FROM accounts WHERE id = ?", (row["id"],)).fetchone())
+
+    def rename(self, account_id: str, name: str) -> None:
+        cleaned = (name or "").strip()[:100]
+        if cleaned:
+            with self._db(write=True) as db:
+                db.execute("UPDATE accounts SET name = ? WHERE id = ?", (cleaned, account_id))

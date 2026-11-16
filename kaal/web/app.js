@@ -1,6 +1,6 @@
 import { api, ApiError, updateWaiting } from "/web/api.js";
 import { h, replace, notice } from "/web/ui.js";
-import { signInView } from "/web/views/signin.js";
+import { signInView, setupView } from "/web/views/signin.js";
 import { inboxView } from "/web/views/inbox.js";
 import { reviewView } from "/web/views/review.js";
 import { totalsView } from "/web/views/totals.js";
@@ -52,6 +52,11 @@ async function render() {
   // nothing is half-typed, and the address says where to come back to.
   if (updateWaiting()) {
     location.reload();
+    return;
+  }
+  // A setup link works whether or not this browser is signed in as someone.
+  if (route().name === "setup" && route().rest[0]) {
+    replace(root, setupView(route().rest[0], { onSignedIn: (signedIn) => { session = signedIn; go("receipts"); } }));
     return;
   }
   if (!session) {

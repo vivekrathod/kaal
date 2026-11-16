@@ -199,3 +199,10 @@ label.button { cursor: pointer; }
 .row-snippet { color: var(--muted); font-size: 0.88rem; white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .snippet-file { color: var(--text); }
 mark { background: var(--warn-bg); color: var(--warn-text); border-radius: 3px; padding: 0 2px; }
+
+/* Signing in */
+.linklike { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); text-decoration: underline; cursor: pointer; min-height: 32px; }
+.choices { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0; }
+.codes { list-style: none; margin: 0; padding: 12px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; background: var(--info-bg); border-radius: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.95rem; }
+.quiet-field { border: 0; background: none; padding: 0; min-height: 0; height: 0; opacity: 0; pointer-events: none; position: absolute; }
+.stack { display: grid; gap: 10px; margin-top: 10px; }

@@ -344,6 +344,65 @@
         "title": "NoteCreate",
         "type": "object"
       },
+      "PasswordChange": {
+        "properties": {
+          "current": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Current",
+            "type": "string"
+          },
+          "new": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "New",
+            "type": "string"
+          }
+        },
+        "required": [
+          "current",
+          "new"
+        ],
+        "title": "PasswordChange",
+        "type": "object"
+      },
+      "PasswordProof": {
+        "properties": {
+          "password": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "title": "PasswordProof",
+        "type": "object"
+      },
+      "PasswordSignIn": {
+        "properties": {
+          "login": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Login",
+            "type": "string"
+          },
+          "password": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "login",
+          "password"
+        ],
+        "title": "PasswordSignIn",
+        "type": "object"
+      },
       "PeopleChange": {
         "properties": {
           "add": {
@@ -413,6 +472,35 @@
           "fields"
         ],
         "title": "ReceiptFields",
+        "type": "object"
+      },
+      "Recover": {
+        "properties": {
+          "code": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          },
+          "login": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Login",
+            "type": "string"
+          },
+          "password": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "login",
+          "code",
+          "password"
+        ],
+        "title": "Recover",
         "type": "object"
       },
       "Reextract": {
@@ -503,6 +591,49 @@
           }
         },
         "title": "ReportFilter",
+        "type": "object"
+      },
+      "SetupCode": {
+        "properties": {
+          "code": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "SetupCode",
+        "type": "object"
+      },
+      "SetupFinish": {
+        "properties": {
+          "code": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          },
+          "name": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Name",
+            "type": "string"
+          },
+          "password": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "password"
+        ],
+        "title": "SetupFinish",
         "type": "object"
       },
       "SignIn": {
@@ -613,6 +744,21 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "VaultChoice": {
+        "properties": {
+          "vault": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Vault",
+            "type": "string"
+          }
+        },
+        "required": [
+          "vault"
+        ],
+        "title": "VaultChoice",
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -625,10 +771,169 @@
   "info": {
     "description": "An encrypted notes vault. Every request needs `Authorization: Bearer <token>` except /v1/health.",
     "title": "Kaal",
-    "version": "0.21.1"
+    "version": "0.22.0"
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/account": {
+      "get": {
+        "operationId": "account_show_v1_account_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Account Show",
+        "tags": [
+          "account"
+        ]
+      }
+    },
+    "/v1/account/password": {
+      "post": {
+        "description": "Change one's password. Every other browser is signed out.",
+        "operationId": "account_password_v1_account_password_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Account Password",
+        "tags": [
+          "account"
+        ]
+      }
+    },
+    "/v1/account/recovery-codes": {
+      "post": {
+        "description": "Replace one's recovery codes. The new ones are shown this once.",
+        "operationId": "account_recovery_codes_v1_account_recovery_codes_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordProof"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Account Recovery Codes",
+        "tags": [
+          "account"
+        ]
+      }
+    },
+    "/v1/account/sessions/sign-out-others": {
+      "post": {
+        "operationId": "account_end_other_sessions_v1_account_sessions_sign_out_others_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Account End Other Sessions",
+        "tags": [
+          "account"
+        ]
+      }
+    },
+    "/v1/account/sessions/{session_id}": {
+      "delete": {
+        "description": "Sign one of one's browsers out.",
+        "operationId": "account_end_session_v1_account_sessions__session_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Account End Session",
+        "tags": [
+          "account"
+        ]
+      }
+    },
     "/v1/captures": {
       "post": {
         "operationId": "capture_v1_captures_post",
@@ -2789,6 +3094,205 @@
           }
         },
         "summary": "Sign In",
+        "tags": [
+          "session"
+        ]
+      }
+    },
+    "/v1/session/vault": {
+      "post": {
+        "description": "Move this browser to another of the person's vaults.",
+        "operationId": "choose_vault_v1_session_vault_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VaultChoice"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Choose Vault",
+        "tags": [
+          "session"
+        ]
+      }
+    },
+    "/v1/setup": {
+      "post": {
+        "description": "Choose a password with a setup link, then sign in. The link works once.",
+        "operationId": "setup_finish_v1_setup_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupFinish"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Setup Finish",
+        "tags": [
+          "session"
+        ]
+      }
+    },
+    "/v1/setup/check": {
+      "post": {
+        "description": "Whose setup link this is, so the page can greet them. Uses nothing up.",
+        "operationId": "setup_check_v1_setup_check_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupCode"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Setup Check",
+        "tags": [
+          "session"
+        ]
+      }
+    },
+    "/v1/sign-in": {
+      "post": {
+        "operationId": "sign_in_with_password_v1_sign_in_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordSignIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sign In With Password",
+        "tags": [
+          "session"
+        ]
+      }
+    },
+    "/v1/sign-in/recover": {
+      "post": {
+        "description": "Use a recovery code to choose a new password. Signs every other browser out.",
+        "operationId": "recover_v1_sign_in_recover_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Recover"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recover",
         "tags": [
           "session"
         ]

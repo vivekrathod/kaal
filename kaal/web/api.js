@@ -76,6 +76,17 @@ export const api = {
   session: () => result(request("GET", "/v1/session")),
   signIn: (token) => result(request("POST", "/v1/session", { json: { token } })),
   signOut: () => result(request("DELETE", "/v1/session")),
+  signInWithPassword: (login, password) => result(request("POST", "/v1/sign-in", { json: { login, password } })),
+  recover: (login, code, password) => result(request("POST", "/v1/sign-in/recover", { json: { login, code, password } })),
+  setupCheck: (code) => result(request("POST", "/v1/setup/check", { json: { code } })),
+  setup: (code, password, name) => result(request("POST", "/v1/setup", { json: { code, password, name } })),
+  chooseVault: (vault) => result(request("POST", "/v1/session/vault", { json: { vault } })),
+
+  account: () => result(request("GET", "/v1/account")),
+  changePassword: (current, next) => result(request("POST", "/v1/account/password", { json: { current, new: next } })),
+  newRecoveryCodes: (password) => result(request("POST", "/v1/account/recovery-codes", { json: { password } })).then((data) => data.recovery_codes),
+  endSession: (sessionId) => result(request("DELETE", `/v1/account/sessions/${id(sessionId)}`)),
+  endOtherSessions: () => result(request("POST", "/v1/account/sessions/sign-out-others")),
 
   receipts: (params) => request("GET", "/v1/medical/receipts", { params }),
   receipt: (noteId) => result(request("GET", `/v1/medical/receipts/${id(noteId)}`)),

@@ -319,6 +319,25 @@ def test_every_route_works_on_the_servers_vault_and_never_on_the_default(tmp_pat
     call("POST", f"/v1/medical/receipts/{second_id}/trash")
     call("POST", "/v1/medical/receipts/purge", json={"ids": [second_id], "confirm": True})
 
+    # signing in as a person, and one's own account
+    people = app.state.kaal.accounts
+    code = people.new_setup_code("owner")
+    call("POST", "/v1/setup/check", json={"code": code}, headers={})
+    set_up = call("POST", "/v1/setup", json={"code": code, "password": "a made-up password"}, headers={})
+    recovered = call("POST", "/v1/sign-in/recover", headers={},
+                     json={"login": "owner", "code": result(set_up)["recovery_codes"][0], "password": "another made-up password"})
+    person = {"Cookie": recovered.headers["set-cookie"].split(";", 1)[0], "X-Kaal-Request": "1"}
+    call("POST", "/v1/sign-in", json={"login": "owner", "password": "another made-up password"}, headers={})
+    shown = result(call("GET", "/v1/account", headers=person))
+    call("DELETE", f"/v1/account/sessions/{next(entry['id'] for entry in shown['sessions'] if not entry['current'])}", headers=person)
+    call("POST", "/v1/account/sessions/sign-out-others", headers=person)
+    call("POST", "/v1/account/password", json={"current": "another made-up password", "new": "a third made-up password"}, headers=person)
+    call("POST", "/v1/account/recovery-codes", json={"password": "a third made-up password"}, headers=person)
+    call("POST", "/v1/session/vault", json={"vault": shown["vault"]["id"]}, headers=person)
+    # A person's session opens the vault by the same route as a token does.
+    assert call("GET", "/v1/library/notes", headers=person).status_code == 200
+    call("POST", "/v1/library/notes", json={"title": "Made-up, as a person", "body": "x"}, headers=person)
+
     # the rest
     call("GET", "/v1/export")
     call("DELETE", f"/v1/notes/{note}", params={"confirm": "true"})
