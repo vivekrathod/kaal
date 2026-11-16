@@ -19,3 +19,5 @@ body.panel .review-image { max-height: 32vh; }
 body.options .page { max-width: 560px; padding-top: 6vh; }
 body.options .card { display: grid; gap: 14px; }
 body.options ul { margin: 0; padding-left: 20px; color: var(--muted); font-size: 0.92rem; }
+#update { margin-bottom: 12px; }
+#update .notice { margin: 0 0 8px; }

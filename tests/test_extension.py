@@ -84,8 +84,11 @@ def test_every_request_the_worker_makes_is_in_the_published_api():
         assert method.lower() in spec[path], (method, path)
     # Only the worker and the shared request layer talk to the server.
     for script in OWN_SCRIPTS:
-        if script.name != "background.js":
+        if script.name not in ("background.js", "fresh.js"):
             assert "fetch(" not in script.read_text(), f"{script.name} makes requests itself"
+    # fresh.js only reads the extension's own manifest from its folder.
+    fresh = (EXT / "fresh.js").read_text()
+    assert fresh.count("fetch(") == 1 and 'fetch(chrome.runtime.getURL("manifest.json")' in fresh
     assert "Authorization: `Bearer ${token}`" in worker and 'credentials: "omit"' in worker
     # The worker's only requests are to Kaal; a site's file is read through the tab, not fetched with the person's sign-in.
     assert "Network.loadNetworkResource" in worker and "sender.id !== chrome.runtime.id" in worker
@@ -101,6 +104,18 @@ def test_every_request_the_worker_makes_is_in_the_published_api():
     # A grant covering every site, left over from an older version, is given up when the worker starts.
     assert "origins.filter(isBlanketAccess)" in worker and "chrome.permissions.remove({ origins: blanket })" in worker
     assert re.search(r"^dropBlanketAccess\(\);$", worker, flags=re.M)
+
+
+def test_an_update_waiting_in_the_folder_is_offered_and_never_applied_by_itself():
+    # Reloading is something the person does, by pressing the button the popup or settings page shows.
+    fresh = (EXT / "fresh.js").read_text()
+    assert fresh.count("chrome.runtime.reload()") == 1 and "export const finishUpdate = () => chrome.runtime.reload();" in fresh
+    for name in ("popup.js", "options.js"):
+        page = (EXT / name).read_text()
+        assert "Finish updating" in page and "finishUpdate" in page and "runtime.reload" not in page, name
+        assert not re.search(r"^\s*finishUpdate\(\)", page, flags=re.M), name
+    for name in ("background.js", "panel.js"):
+        assert "reload" not in (EXT / name).read_text(), name
 
 
 def test_right_click_has_two_entries_and_the_panel_opens_with_the_click():

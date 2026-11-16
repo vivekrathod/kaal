@@ -2,6 +2,7 @@
 // choice as a link beneath it, and what happened to the last save.
 
 import { MODES, chooseMode, isProtectedPage, stateKey } from "./lib.js";
+import { updateWaiting, finishUpdate } from "./fresh.js";
 
 const primary = document.getElementById("primary");
 const secondary = document.getElementById("secondary");
@@ -59,7 +60,19 @@ function show(state, tab, server) {
   return say(element("p", "notice", "Saved to Kaal."), open);
 }
 
+// The folder holds a newer copy than the one Chrome is running: offer to switch to it.
+async function offerUpdate() {
+  const waiting = await updateWaiting();
+  if (!waiting) return;
+  const finish = element("button", "button small", "Finish updating");
+  finish.addEventListener("click", finishUpdate);
+  const box = document.getElementById("update");
+  box.replaceChildren(element("p", "notice warn", `Kaal was updated on this computer (${waiting.running} to ${waiting.onDisk}), and Chrome is still running the older copy.`), finish);
+  box.hidden = false;
+}
+
 async function start() {
+  offerUpdate();
   document.getElementById("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
   const [{ server = "", token = "", receiptSites = [] }, tab] = await Promise.all([chrome.storage.local.get(["server", "token", "receiptSites"]), currentTab()]);
 

@@ -3,6 +3,7 @@
 import { api, connect } from "/web/api.js";
 import { h, replace, notice } from "/web/ui.js";
 import { normaliseServer } from "/lib.js";
+import { updateWaiting, finishUpdate } from "/fresh.js";
 
 const form = document.getElementById("form");
 const server = document.getElementById("server");
@@ -12,6 +13,13 @@ const save = document.getElementById("save");
 const NEEDED = ["read", "reveal", "write"];
 
 async function start() {
+  updateWaiting().then((waiting) => {
+    if (!waiting) return;
+    const box = document.getElementById("update");
+    replace(box, notice(`Kaal was updated on this computer (${waiting.running} to ${waiting.onDisk}), and Chrome is still running the older copy.`, "warn"),
+      h("button", { type: "button", class: "button", onClick: finishUpdate }, "Finish updating"));
+    box.hidden = false;
+  });
   const stored = await chrome.storage.local.get(["server", "token"]);
   server.value = stored.server || "";
   token.placeholder = stored.token ? "A token is saved" : "kaal_…";

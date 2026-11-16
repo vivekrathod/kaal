@@ -29,8 +29,10 @@ Notes, totals, the Trash and settings are in Kaal's web app.
 ## Setting it up
 
 1. Open `chrome://extensions`, turn on **Developer mode**, choose **Load
-   unpacked** and pick this `chrome-extension` folder. After an update, press
-   the reload arrow on the extension's card.
+   unpacked** and pick this `chrome-extension` folder. After an update, open
+   the Kaal popup and press **Finish updating** (or press the reload arrow on
+   the extension's card). Restarting Chrome is not enough: it reads the new
+   manifest but keeps running the old background worker.
 2. On the server, create a token for this browser (skip this if you already
    have one for it):
 

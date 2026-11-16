@@ -142,11 +142,12 @@ def stage(tmp_path, request):
     threading.Thread(target=site.serve_forever, daemon=True).start()
 
     extension = EXT
-    if granted:
+    if variant in ("granted", "updated"):
         extension = tmp_path / "extension"
         shutil.copytree(EXT, extension)
         manifest = json.loads((extension / "manifest.json").read_text())
-        manifest["host_permissions"] = [f"http://127.0.0.1:{site_port}/*"]
+        if granted:
+            manifest["host_permissions"] = [f"http://127.0.0.1:{site_port}/*"]
         (extension / "manifest.json").write_text(json.dumps(manifest))
 
     # --use-mock-keychain: without it every web request waits on a hidden macOS Keychain prompt.
@@ -166,7 +167,7 @@ def stage(tmp_path, request):
             time.sleep(0.1)
         else:
             pytest.fail("the browser or the server did not start")
-        yield SimpleNamespace(kaal=f"http://localhost:{kaal_port}", site=f"http://127.0.0.1:{site_port}", token=token, debug_port=debug_port, asked=Site.asked, seen=Site.seen, pdf_bytes=len(made_up_pdf()))
+        yield SimpleNamespace(kaal=f"http://localhost:{kaal_port}", site=f"http://127.0.0.1:{site_port}", token=token, debug_port=debug_port, asked=Site.asked, seen=Site.seen, pdf_bytes=len(made_up_pdf()), extension=extension)
     finally:
         browser.terminate()
         try:
@@ -184,6 +185,20 @@ def drive(stage, script):
     done = subprocess.run(["node", str(DRIVER.with_name(script))], env=env, capture_output=True, text=True, timeout=300)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-2000:]
     return json.loads(done.stdout)
+
+
+@pytest.mark.parametrize("stage", ["updated"], indirect=True)
+def test_an_update_waiting_in_the_folder_is_offered_in_the_popup_and_settings(stage):
+    manifest = json.loads((stage.extension / "manifest.json").read_text())
+    loaded = manifest["version"]
+    out = drive(stage, "updated.mjs")
+    assert out["sameVersion"] == {"popup": None, "settings": None}  # nothing to offer while the folder matches
+    manifest["version"] = "9.9.9"
+    (stage.extension / "manifest.json").write_text(json.dumps(manifest))
+    out = drive(stage, "updated.mjs")
+    said = f"Kaal was updated on this computer ({loaded} to 9.9.9), and Chrome is still running the older copy."
+    assert out["sameVersion"] == {"popup": f"{said}Finish updating", "settings": f"{said}Finish updating"}
+    assert out["stillRunning"] == loaded  # offered, not applied
 
 
 @pytest.mark.skipif(os.environ.get("KAAL_E2E_ASK") != "1", reason="set KAAL_E2E_ASK=1 and be ready to press Allow in the test browser")
