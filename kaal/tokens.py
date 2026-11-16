@@ -12,6 +12,10 @@ Scopes:
   write   create, edit, attach, capture, extract, trash and restore
   delete  permanent deletion and purges
   admin   whole-vault export
+
+A token may name the account and the vault it acts for. One that names
+neither belongs to the installation's first account and its vault, which is
+what every token issued before accounts existed is.
 """
 from __future__ import annotations
 
@@ -101,7 +105,7 @@ class TokenStore:
             raise TokenError("A token needs at least one scope.")
         return wanted
 
-    def create(self, name: str, scopes: Iterable[str]) -> tuple[dict[str, Any], str]:
+    def create(self, name: str, scopes: Iterable[str], *, account: str | None = None, vault: str | None = None) -> tuple[dict[str, Any], str]:
         name = name.strip()
         if not name:
             raise TokenError("A token needs a name.")
@@ -115,6 +119,10 @@ class TokenStore:
                 token_id = secrets.token_hex(4)
             secret = secrets.token_urlsafe(32)
             record = {"id": token_id, "name": name, "scopes": wanted, "created": _now(), "revoked_at": None, "sha256": _digest(secret)}
+            if account:
+                record["account"] = account
+            if vault:
+                record["vault"] = vault
             records.append(record)
             self._save(records)
         return self._public(record), f"{PREFIX}_{token_id}_{secret}"

@@ -1,8 +1,12 @@
-"""Vault key retrieval.
+"""Key retrieval.
 
-Kaal encrypts everything with one 32-byte AES-256 key, stored as base64 text in
-a file that only its owner can read, named by ``KAAL_KEY_FILE``. The key is
-never kept in the vault and never included in a backup.
+An installation has one 32-byte AES-256 key, stored as base64 text in a file
+that only its owner can read, named by ``KAAL_KEY_FILE``. It is never kept in a
+vault and never included in a backup.
+
+A vault either uses that key directly, or has a key of its own which sits in
+the vault folder wrapped (encrypted) by the installation's key, so the folder
+alone gives nothing away and a backup of it is complete.
 
 Nothing in this module prints, logs or embeds key material in an error message.
 """
@@ -19,6 +23,8 @@ from typing import Protocol
 
 KEY_BYTES = 32
 MAX_KEY_FILE_BYTES = 4096
+WRAP_FORMAT = "kaal-vault-key-v1"
+_WRAP_AAD = b"kaal:vault-key-v1"
 
 
 class KeyProviderError(Exception):
@@ -50,6 +56,33 @@ def decode_key(text: str, *, source: str) -> bytes:
         raise KeyProviderError(f"{source} exists but is not a valid key (expected base64 text).") from None
     if len(key) != KEY_BYTES:
         raise KeyProviderError(f"{source} has the wrong size ({len(key)} bytes); expected {KEY_BYTES}.")
+    return key
+
+
+def wrap_key(installation_key: bytes, vault_key: bytes) -> dict[str, str]:
+    """A vault's key, encrypted with the installation's key, as JSON-ready text."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    nonce = secrets.token_bytes(12)
+    sealed = AESGCM(installation_key).encrypt(nonce, vault_key, _WRAP_AAD)
+    return {"format": WRAP_FORMAT, "nonce": base64.b64encode(nonce).decode("ascii"), "ciphertext": base64.b64encode(sealed).decode("ascii")}
+
+
+def unwrap_key(installation_key: bytes, wrapped: object) -> bytes:
+    """The vault key inside ``wrapped``. Fails without saying anything about either key."""
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    try:
+        if not isinstance(wrapped, dict) or wrapped.get("format") != WRAP_FORMAT:
+            raise ValueError
+        nonce = base64.b64decode(wrapped["nonce"], validate=True)
+        sealed = base64.b64decode(wrapped["ciphertext"], validate=True)
+        key = AESGCM(installation_key).decrypt(nonce, sealed, _WRAP_AAD)
+    except (InvalidTag, KeyError, TypeError, ValueError, binascii.Error):
+        raise KeyProviderError("This vault's own key could not be opened with the installation's key.") from None
+    if len(key) != KEY_BYTES:
+        raise KeyProviderError("This vault's own key has the wrong size.")
     return key
 
 

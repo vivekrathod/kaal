@@ -24,9 +24,9 @@ at rest.
 
 ## Running Kaal as a server
 
-`kaal-server` puts one vault behind an authenticated HTTP API, so the CLI, the
-Chrome extension and agents on other machines share it. The server is the only
-process that opens the vault or reads the key. Every endpoint runs the same code
+`kaal-server` puts vaults behind an authenticated HTTP API, so the CLI, the
+Chrome extension and agents on other machines share them. The server is the only
+process that opens a vault or reads the key. Every endpoint runs the same code
 as the local CLI, and the API is described in [`docs/openapi.json`](docs/openapi.json).
 
 ```bash
@@ -63,6 +63,41 @@ stay signed in. Each token has scopes:
 | `write` | Create, edit, append, attach, capture, extract, trash, restore |
 | `delete` | Permanent deletion and purges |
 | `admin` | Whole-vault export |
+
+**People and vaults.** An installation can hold several people, each with a
+vault of their own, and a vault can be shared. Someone who belongs to a vault
+has a role there, and no token of theirs can do more than the role allows:
+
+| Role | May |
+|---|---|
+| `owner` | Everything, including whole-vault export |
+| `editor` | Read, reveal, write and delete |
+| `viewer` | Read and reveal |
+
+```bash
+kaal-server account add sam --name "Sam"          # an account and a vault of its own
+kaal-server account list
+kaal-server vault add Household --owner owner     # another vault
+kaal-server vault grant VAULT_ID sam editor       # let sam in, or change the role
+kaal-server vault ungrant VAULT_ID sam
+kaal-server account disable sam                   # shut out, data kept
+kaal-server token create sam-laptop --scopes read,reveal,write --account sam --vault VAULT_ID
+```
+
+Accounts and memberships are kept in `accounts.db` in `KAAL_HOME`; new vaults
+are folders under `KAAL_HOME/vaults/`. Each new vault is encrypted with a key
+of its own, which sits in the vault folder wrapped by the installation's key
+file, so one person's files cannot be read as another's even by mixing up
+folders. Back up the whole of `KAAL_HOME`, not only the first vault.
+
+An installation that began with a single vault keeps working untouched: on
+first start that vault becomes the vault of an administrator account named
+`owner`, nothing in it is moved or re-encrypted, and existing tokens act as
+that account. A token that names no account or vault always means those two.
+
+Whoever runs the installation holds the key file and can read every vault on
+it. Accounts keep the people who use an installation apart from each other,
+not from its operator.
 
 **Web app.** `kaal-server` serves a small web app at `/`: open the server's
 address in a browser on a laptop or phone and sign in with a device token. It

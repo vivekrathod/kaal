@@ -43,6 +43,8 @@ NOTES_DIR = VAULT / "notes"
 ATTACH_DIR = VAULT / "attachments"
 INDEX_PATH = VAULT / "index.json"
 VAULT_LOCK_NAME = ".vault.lock"
+# A vault with a key of its own keeps it here, wrapped by the installation's key.
+VAULT_KEY_NAME = "vault.key.json"
 
 
 def configure_vault(path: str | os.PathLike[str]) -> Path:
@@ -239,15 +241,51 @@ def key_provider() -> key_providers.KeyProvider:
         die(str(error), kind="unavailable")
 
 
-def get_key(create: bool = False) -> bytes:
-    own = current_vault().key
-    if own is not None:
-        return own
+def installation_key(create: bool = False) -> bytes:
+    """The key in KAAL_KEY_FILE."""
     provider = key_provider()
     try:
         return provider.get_key(create=create)
     except key_providers.KeyProviderError as error:
         die(str(error), kind="unavailable")
+
+
+def get_key(create: bool = False) -> bytes:
+    """The key the current vault's contents are encrypted with."""
+    vault = current_vault()
+    if vault.key is not None:
+        return vault.key
+    key = installation_key(create=create)
+    wrapped_path = vault.root / VAULT_KEY_NAME
+    if not wrapped_path.is_file():
+        return key
+    try:
+        return key_providers.unwrap_key(key, json.loads(wrapped_path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        die("This vault's own key file could not be read.", kind="unavailable")
+    except key_providers.KeyProviderError as error:
+        die(str(error), kind="unavailable")
+
+
+def create_vault_folder(root: str | os.PathLike[str], *, own_key: bool = True) -> Vault:
+    """Make a new, empty vault at ``root`` and return it.
+
+    With ``own_key`` it gets a fresh key, saved in the folder wrapped by the
+    installation's key (which must already exist).
+    """
+    vault = Vault(root)
+    if vault.index_path.exists() or (vault.root.exists() and any(vault.root.iterdir())):
+        die(f"There is already something at {vault.root}.", kind="conflict")
+    _mkdirs_700(vault.root)
+    for folder in (vault.root, vault.notes_dir, vault.attach_dir):
+        folder.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(folder, 0o700)
+    if own_key:
+        wrapped = key_providers.wrap_key(installation_key(), key_providers.new_key())
+        secure_write_json(vault.root / VAULT_KEY_NAME, wrapped)
+    with use_vault(vault):
+        save_index({"version": 1, "created": now_iso(), "notes": []})
+    return vault
 
 
 def import_crypto():

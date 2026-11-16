@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from kaal import __version__, core, tokens
+from kaal import __version__, accounts, core, tokens
 
 log = logging.getLogger("kaal.server")
 
@@ -85,9 +85,12 @@ def extension_origins(environ: dict[str, str] | None = None) -> tuple[str, ...]:
 @dataclass
 class Settings:
     home: Path
+    # The vault a single-vault installation had; adopted as the first account's on first start.
     vault: Path
     tokens_file: Path
     tmp_dir: Path
+    # Who has an account and who belongs to which vault. Empty means home/accounts.db.
+    accounts_file: Path | None = None
     max_upload_bytes: int = 100 * MiB
     rate_per_minute: int = 600
     host: str = "127.0.0.1"
@@ -111,6 +114,7 @@ class Settings:
             vault=Path(vault).expanduser(),
             tokens_file=Path(env.get("KAAL_TOKENS_FILE") or home / "tokens.json").expanduser(),
             tmp_dir=Path(env.get("KAAL_TMP_DIR") or home / "tmp").expanduser(),
+            accounts_file=Path(env.get("KAAL_ACCOUNTS_FILE") or home / "accounts.db").expanduser(),
             max_upload_bytes=int(env.get("KAAL_MAX_UPLOAD_BYTES") or 100 * MiB),
             rate_per_minute=int(env.get("KAAL_RATE_PER_MINUTE") or 600),
             host=env.get("KAAL_BIND") or "127.0.0.1",
@@ -284,24 +288,105 @@ async def _send_json(send: Callable, status: int, payload: dict) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
+class Vaults:
+    """The installation's vaults as objects, one per vault for the life of the process.
+
+    Keeping one object per vault matters: it holds the vault's locks and its
+    search memory.
+    """
+
+    def __init__(self, store: accounts.AccountStore) -> None:
+        self.store = store
+        self._open: dict[str, core.Vault] = {}
+        self._lock = threading.Lock()
+
+    def get(self, vault_id: str) -> core.Vault | None:
+        with self._lock:
+            found = self._open.get(vault_id)
+            if found is None:
+                record = self.store.vault(vault_id)
+                if record is None:
+                    return None
+                found = self._open[vault_id] = core.Vault(self.store.folder_of(record))
+            return found
+
+    def all(self) -> list[core.Vault]:
+        return [vault for vault in (self.get(record["id"]) for record in self.store.vaults()) if vault is not None]
+
+
 @dataclass
 class AppState:
     settings: Settings
     tokens: tokens.TokenStore
     limiter: RateLimiter
-    vault: core.Vault
+    accounts: accounts.AccountStore
+    vaults: Vaults
     worker: Any = None
+
+
+class Scoped:
+    """The server's state as one request sees it: everything shared, plus the
+    one vault this request was allowed into (None before it has been checked)."""
+
+    def __init__(self, state: AppState, vault: core.Vault | None) -> None:
+        self._state = state
+        self.vault = vault
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._state, name)
+
+    def _chosen(self) -> core.Vault:
+        if self.vault is None:
+            raise RuntimeError("This request reached the vault without being checked for access to one.")
+        return self.vault
 
     @contextlib.contextmanager
     def in_vault(self) -> Iterator[core.Vault]:
-        """Work on the vault, holding its request lock so requests take turns."""
-        with core.use_vault(self.vault), self.vault.request_lock:
-            yield self.vault
+        """Work on the request's vault, holding its request lock so requests take turns."""
+        vault = self._chosen()
+        with core.use_vault(vault), vault.request_lock:
+            yield vault
 
     def beside_vault(self) -> Any:
-        """Work on the vault without its request lock: for slow reading of
-        something already looked up under the lock, which changes nothing."""
-        return core.use_vault(self.vault)
+        """Work on the request's vault without its request lock: for slow reading
+        of something already looked up under the lock, which changes nothing."""
+        return core.use_vault(self._chosen())
+
+
+def open_store(settings: Settings) -> accounts.AccountStore:
+    """The accounts store, after adopting a single-vault installation's vault if that has not happened yet."""
+    store = accounts.AccountStore(settings.accounts_file or settings.home / "accounts.db", settings.home)
+    vault = core.Vault(settings.vault)
+    if vault.index_path.is_file() and store.adopt(vault.root):
+        log.info("accounts: adopted the existing vault as the first account's")
+    return store
+
+
+def create_vault(store: accounts.AccountStore, name: str, owner: str) -> dict[str, Any]:
+    """Record a new vault for ``owner`` and make its folder, with a key of its own."""
+    record = store.add_vault(name, owner=owner)
+    try:
+        core.create_vault_folder(store.folder_of(record))
+    except BaseException:
+        store.remove_vault_record(record["id"])
+        raise
+    return record
+
+
+def who_may(state: AppState, record: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """The account a token acts for, the vault it acts in, and that account's role there.
+
+    The account is None when it is missing or switched off; the role is None
+    when the account does not belong to the vault.
+    """
+    default_account, default_vault = state.accounts.defaults()
+    account_id, vault_id = record.get("account") or default_account, record.get("vault") or default_vault
+    if not account_id or not vault_id:
+        return None, None, None
+    account, role = state.accounts.standing(account_id, vault_id)
+    if account is None or account["disabled_at"]:
+        return None, vault_id, None
+    return account, vault_id, role
 
 
 def _error(status: int, message: str, kind: str | None = None, details: dict | None = None, headers: dict | None = None) -> JSONResponse:
@@ -372,10 +457,19 @@ def require(*scopes: str) -> Callable:
         request.state.token_name = record["name"]
         if not state.limiter.allow(record["id"]):
             raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
-        missing = [scope for scope in scopes if scope not in record.get("scopes", [])]
+        account, vault_id, role = who_may(state, record)
+        if account is None:
+            raise HTTPException(401, "A valid bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
+        vault = state.vaults.get(vault_id) if role else None
+        if vault is None:
+            raise HTTPException(403, "This token's account does not belong to its vault.")
+        # A role caps what any token of that person may do in that vault.
+        allowed = [scope for scope in record.get("scopes", []) if scope in accounts.ROLE_SCOPES[role]]
+        missing = [scope for scope in scopes if scope not in allowed]
         if missing:
             raise HTTPException(403, f"This token lacks the {', '.join(missing)} scope.")
-        return record
+        request.state.vault = vault
+        return {**record, "scopes": allowed, "account": account["id"], "vault": vault_id, "role": role}
 
     return Depends(dependency)
 
@@ -565,13 +659,19 @@ def create_app(settings: Settings) -> FastAPI:
     vault = core.Vault(settings.vault)
     if not vault.index_path.is_file():
         raise ServerConfigError(f"Vault not found at {vault.root}: refusing to start. Restore it, or run `kaal init` there first.")
+    # An installation from before accounts: its one vault becomes the first account's.
+    store = open_store(settings)
+    registry = Vaults(store)
+    missing = [record["name"] for record in store.vaults() if not (store.folder_of(record) / "index.json").is_file()]
+    if missing:
+        raise ServerConfigError(f"Vault folder not found for: {', '.join(missing)}. Refusing to start; restore it first.")
     settings.tmp_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(settings.tmp_dir, 0o700)
 
     app = FastAPI(title="Kaal", version=__version__, docs_url=None, redoc_url=None, openapi_url=None,
                   description="An encrypted notes vault. Every request needs `Authorization: Bearer <token>` except /v1/health.")
-    app.state.kaal = AppState(settings, tokens.TokenStore(settings.tokens_file), RateLimiter(settings.rate_per_minute), vault)
-    app.state.kaal.worker = ExtractionWorker(lambda: [app.state.kaal.vault])
+    app.state.kaal = AppState(settings, tokens.TokenStore(settings.tokens_file), RateLimiter(settings.rate_per_minute), store, registry)
+    app.state.kaal.worker = ExtractionWorker(registry.all)
     app.add_middleware(BodyLimitMiddleware, limit=settings.max_upload_bytes + MiB)
 
     @app.middleware("http")
@@ -607,7 +707,7 @@ def create_app(settings: Settings) -> FastAPI:
         log.error("unhandled %s", type(exc).__name__)
         return _error(500, "Internal error.", "internal")
 
-    S = lambda request: request.app.state.kaal  # noqa: E731
+    S = lambda request: Scoped(request.app.state.kaal, getattr(request.state, "vault", None))  # noqa: E731
 
     # --- the web app: static files only; everything it shows comes from the API above
 
@@ -656,8 +756,12 @@ def create_app(settings: Settings) -> FastAPI:
             if not state.limiter.allow("unauthenticated"):
                 raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
             raise HTTPException(401, "That token is not valid.")
+        account, _vault_id, role = who_may(state._state, record)
+        if account is None or role is None:
+            raise HTTPException(401, "That token is not valid.")
         request.state.token_name = record["name"]
-        response = JSONResponse({"result": {"name": record["name"], "scopes": record.get("scopes", [])}, "format": {}})
+        allowed = [scope for scope in record.get("scopes", []) if scope in accounts.ROLE_SCOPES[role]]
+        response = JSONResponse({"result": {"name": record["name"], "scopes": allowed}, "format": {}})
         response.set_cookie(SESSION_COOKIE, body.token.strip(), max_age=SESSION_SECONDS, path="/", httponly=True, secure=state.settings.cookie_secure, samesite="strict")
         return response
 
@@ -990,10 +1094,28 @@ def _serve(args: argparse.Namespace) -> None:
     uvicorn.run(app, host=host, port=port, access_log=False, server_header=False, proxy_headers=False, log_level="warning")
 
 
+def _token_owner(settings: Settings, account: str, vault: str) -> tuple[str | None, str | None]:
+    """Check the account and vault a new token is for; (None, None) means the installation's first ones."""
+    if not account and not vault:
+        return None, None
+    people = open_store(settings)
+    default_account, _default_vault = people.defaults()
+    person = people.account(account or default_account or "")
+    if person is None:
+        sys.exit(f"ERROR: No account {account!r}.")
+    theirs = people.vaults_of(person["id"])
+    chosen = next((v for v in theirs if v["id"] == vault), None) if vault else (theirs[0] if theirs else None)
+    if chosen is None:
+        sys.exit(f"ERROR: {person['login']} does not belong to {'vault ' + repr(vault) if vault else 'any vault'}.")
+    return person["id"], chosen["id"]
+
+
 def _token_create(args: argparse.Namespace) -> None:
-    store = tokens.TokenStore(Settings.from_env().tokens_file)
+    settings = Settings.from_env()
+    store = tokens.TokenStore(settings.tokens_file)
+    account, vault = _token_owner(settings, getattr(args, "account", ""), getattr(args, "vault", ""))
     try:
-        record, secret = store.create(args.name, args.scopes.split(","))
+        record, secret = store.create(args.name, args.scopes.split(","), account=account, vault=vault)
     except tokens.TokenError as error:
         sys.exit(f"ERROR: {error}")
     if args.output:
@@ -1029,6 +1151,37 @@ def _token_scopes(args: argparse.Namespace) -> None:
     print(json.dumps({"status": "updated", "token": record}, indent=2))
 
 
+def _people(args: argparse.Namespace) -> None:
+    """kaal-server account … and kaal-server vault …"""
+    settings = Settings.from_env()
+    try:
+        store = open_store(settings)
+        action = (args.cmd, args.action)
+        if action == ("account", "list"):
+            out: Any = [{**person, "vaults": [{"id": v["id"], "name": v["name"], "role": v["role"]} for v in store.vaults_of(person["id"])]}
+                        for person in store.accounts()]
+        elif action == ("account", "add"):
+            person = store.add_account(args.login, args.name, admin=args.admin)
+            vault = None if args.no_vault else create_vault(store, args.vault_name or "My notes", person["id"])
+            out = {"status": "created", "account": person, "vault": vault}
+        elif action in {("account", "disable"), ("account", "enable")}:
+            out = {"status": "updated", "account": store.set_disabled(args.login, args.action == "disable")}
+        elif action == ("vault", "list"):
+            out = [{**vault, "members": store.members(vault["id"])} for vault in store.vaults()]
+        elif action == ("vault", "add"):
+            out = {"status": "created", "vault": create_vault(store, args.name, args.owner)}
+        elif action == ("vault", "grant"):
+            out = {"status": "updated", "membership": store.grant(args.login, args.vault, args.role)}
+        else:
+            store.ungrant(args.login, args.vault)
+            out = {"status": "removed", "account": args.login, "vault": args.vault}
+    except accounts.AccountError as error:
+        sys.exit(f"ERROR: {error}")
+    except core.KaalError as error:
+        sys.exit(f"ERROR: {error.message}")
+    print(json.dumps(out, indent=2))
+
+
 def _openapi(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory() as td:
         vault = Path(td) / "vault"
@@ -1056,6 +1209,8 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("name")
     create.add_argument("--scopes", required=True, help=f"Comma-separated: {', '.join(tokens.SCOPES)}")
     create.add_argument("--output", default="", help="Write the token to this new file (mode 600) instead of printing it")
+    create.add_argument("--account", default="", help="The sign-in name the token acts for (default: the installation's first account)")
+    create.add_argument("--vault", default="", help="The id of the vault it acts in (default: that account's first vault)")
     create.set_defaults(func=_token_create)
     token_sub.add_parser("list", help="List tokens (never their secrets)").set_defaults(func=_token_list)
     revoke = token_sub.add_parser("revoke", help="Revoke a token by name or id")
@@ -1065,6 +1220,32 @@ def build_parser() -> argparse.ArgumentParser:
     scopes.add_argument("name")
     scopes.add_argument("--scopes", required=True, help=f"The full new list, comma-separated: {', '.join(tokens.SCOPES)}")
     scopes.set_defaults(func=_token_scopes)
+    account = sub.add_parser("account", help="People who may use this installation")
+    account_sub = account.add_subparsers(dest="action", required=True)
+    account_sub.add_parser("list", help="Accounts and the vaults each belongs to")
+    add = account_sub.add_parser("add", help="Create an account, with a vault of its own")
+    add.add_argument("login", help="Sign-in name, such as a first name or an email address")
+    add.add_argument("--name", default="", help="Name to show (default: the sign-in name)")
+    add.add_argument("--admin", action="store_true", help="May manage accounts and vaults")
+    add.add_argument("--vault-name", default="", help="What to call their vault (default: My notes)")
+    add.add_argument("--no-vault", action="store_true", help="Do not create a vault; grant them one with `vault grant`")
+    for word, text in (("disable", "Stop an account from being used, keeping its data"), ("enable", "Let a disabled account be used again")):
+        account_sub.add_parser(word, help=text).add_argument("login")
+    vault = sub.add_parser("vault", help="Vaults and who belongs to each")
+    vault_sub = vault.add_subparsers(dest="action", required=True)
+    vault_sub.add_parser("list", help="Vaults and their members")
+    vault_add = vault_sub.add_parser("add", help="Create a vault with a key of its own")
+    vault_add.add_argument("name")
+    vault_add.add_argument("--owner", required=True, help="Sign-in name of its first owner")
+    grant = vault_sub.add_parser("grant", help="Let an account into a vault, or change its role there")
+    grant.add_argument("vault", help="Vault id")
+    grant.add_argument("login")
+    grant.add_argument("role", choices=accounts.ROLES)
+    ungrant = vault_sub.add_parser("ungrant", help="Take an account out of a vault")
+    ungrant.add_argument("vault", help="Vault id")
+    ungrant.add_argument("login")
+    for parser_ in (account, vault):
+        parser_.set_defaults(func=_people)
     spec = sub.add_parser("openapi", help="Print the OpenAPI spec")
     spec.add_argument("--output", default="")
     spec.set_defaults(func=_openapi)
