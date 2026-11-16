@@ -41,7 +41,7 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         backup = Path(result["backup"])
         self.assertTrue(STAMP.match(backup.name))
-        expected = [f for f in self.vault_files(kaal.VAULT) if f != ".medical-capture.lock"]
+        expected = [f for f in self.vault_files(kaal.VAULT) if f != kaal.VAULT_LOCK_NAME]
         self.assertEqual(self.vault_files(backup), expected)
         for rel in expected:
             self.assertEqual((backup / rel).read_bytes(), (kaal.VAULT / rel).read_bytes())

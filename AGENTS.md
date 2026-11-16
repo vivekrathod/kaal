@@ -4,9 +4,7 @@ Kaal is a personal notes vault. Every note, attachment, extracted text and the i
 
 ## Commands and setup
 
-- Preferred CLI: `kaal` (compatibility name: `secure-notes`).
-- Durable wrapper locations: `$HOME/.local/bin/kaal` and `$HOME/.local/bin/secure-notes`.
-- From this checkout, use `.venv/bin/python bin/secure-notes.py …` when the wrapper is unavailable.
+- The command is `kaal`. From this checkout, use `bin/kaal …` (or `.venv/bin/python bin/kaal.py …`) when it is not on `PATH`.
 - Do not print note bodies, OCR text, medical receipt fields, tax information, or attachment paths into chat/logs by default.
 - Verify a command with `kaal --help` or `kaal status`; do not read the vault directory directly.
 - `kaal` may be a client of `kaal-server`: when `~/.config/kaal/config.toml` (or `KAAL_CONFIG`/`KAAL_URL`) names a server, every command runs there with that machine's token and prints the same output. `kaal status` shows `"server"` in that case. `KAAL_LOCAL=1` forces local mode; only use it when told to.
@@ -17,11 +15,11 @@ Kaal is a personal notes vault. Every note, attachment, extracted text and the i
 
 1. Search/list metadata first. `kaal list` and `kaal search` are metadata-only. `kaal library search "words"` also looks inside note text and the text read from files, and its results quote a line around each match, so treat its output as private content.
 2. Retrieve plaintext only for an explicit user request. `kaal show` is redacted by default; `--full` is sensitive.
-3. Use `--sensitivity sensitive` when the user identifies private data. Automatic classification is best effort, not a guarantee.
+3. Everything is stored encrypted and labelled sensitive unless you pass `--sensitivity public`. The label is information only; nothing is inferred from the text.
 4. Preserve external source files. Kaal manages its own attachment copy and must not remove browser downloads or user-selected originals.
 5. Use Trash before permanent deletion. Permanent removal requires the exact record ID and explicit confirmation.
 6. Keep medical receipts in `kaal medical …`; do not use generic Library operations on them.
-7. Do not commit vault data, `.hermes/` attachments, credentials, or Keychain material. They are local-only.
+7. Do not commit vault data, credentials, tokens or key material. They are local-only.
 
 ## Common agent workflows
 
@@ -30,11 +28,11 @@ Kaal is a personal notes vault. Every note, attachment, extracted text and the i
 kaal list
 kaal search "tax"
 
-# Save a sensitive note
-kaal add --title "Tax reference" --tags taxes --sensitivity sensitive --body-file /absolute/path/note.md
+# Save a note
+kaal add --title "Tax reference" --tags taxes --body-file /absolute/path/note.md
 
 # Preserve and extract an attachment
-kaal attach "Tax reference" /absolute/path/return.pdf --extract --sensitivity sensitive
+kaal attach "Tax reference" /absolute/path/return.pdf --extract
 
 # Export a managed attachment only when explicitly requested
 kaal export-attachment NOTE_ID ATTACHMENT_ID --output /absolute/path/output.pdf
@@ -59,15 +57,15 @@ The side panel shows the web app's own review screen. `chrome-extension/web/` ho
 
 ## Development
 
-Code lives in the `kaal` package: `core.py` (vault, encryption, command handlers), `receipts.py` (receipt value normalisation, family-member matching, and checking model values against receipt text), `receipt_ai.py` (the optional model call for receipt fields; off unless `KAAL_RECEIPT_AI` is set), `keys.py` (Keychain and key-file providers), `cli.py` (argument parsing, local or remote), `client.py` (remote mode), `server.py` (kaal-server) and `tokens.py`. `bin/secure-notes.py` is a launcher. Install dev dependencies with `pip install -e '.[dev]'`.
+Code lives in the `kaal` package: `core.py` (vault, encryption, command handlers), `receipts.py` (receipt value normalisation, family-member matching, and checking model values against receipt text), `receipt_ai.py` (the optional model call for receipt fields; off unless `KAAL_RECEIPT_AI` is set), `keys.py` (the key file), `cli.py` (argument parsing, local or remote), `client.py` (remote mode), `server.py` (kaal-server) and `tokens.py`. `bin/kaal.py` is a launcher. Install dev dependencies with `pip install -e '.[dev]'`.
 
 The web app is static files in `kaal/web/` (plain ES modules, no build step, no dependencies). It must stay free of inline script and style, must never write vault text as HTML, and may only call the API through `kaal/web/api.js`; `tests/test_web_app.py` enforces all three. Notes are rendered by `kaal/web/markdown.js`, which returns a tree of plain objects and never HTML text (`tests/test_markdown.py` runs it under Node). A note refers to its own files as `attachment:<attachment id>` (files added in Kaal) or `:/<resource id>` (imported from Joplin); the renderer hands both to the caller and never builds an address from note text.
 
-Tests use a throwaway key file and never the Keychain, and never a real `~/.config/kaal/config.toml` (see `tests/conftest.py`); keep it that way. Run the full verification suite before reporting a code change complete:
+Tests use a throwaway key file, and never a real `~/.config/kaal/config.toml` (see `tests/conftest.py`); keep it that way. Run the full verification suite before reporting a code change complete:
 
 ```bash
 env -u PYTHONPATH .venv/bin/python -m pytest -q
-.venv/bin/python -m py_compile bin/secure-notes.py bin/sync-extension-web.py kaal/*.py
+.venv/bin/python -m py_compile bin/kaal.py bin/sync-extension-web.py bin/make-icons.py kaal/*.py
 ```
 
 After changing the Chrome extension or a web file it shares, also run its browser test, which is off by default (it needs Chrome for Testing or Chromium, and Node 22 or later):

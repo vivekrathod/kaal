@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch the Kaal CLI from a source checkout (compatibility name: secure-notes)."""
+"""Launch the Kaal CLI from a source checkout."""
 import sys
 from pathlib import Path
 

@@ -1,28 +1,26 @@
 # Kaal
 
-Kaal is your notes vault for personal data. Notes are Markdown, and every note, attachment and piece of extracted text is encrypted at rest.
+Kaal is a private vault for notes, documents and medical receipts. It runs as a
+small server on a machine you control; you reach it from a web app, a Chrome
+extension and a command line. Notes are Markdown, and everything is encrypted
+at rest.
 
-Vault: `$HOME/.secure-notes`
-Primary CLI: `$HOME/.local/bin/kaal`
-Compatibility CLI: `$HOME/.local/bin/secure-notes`
-Key: macOS Keychain item `Hermes Secure Notes` / `vault-key-v1`, or an owner-only key file (see below)
-Encryption: AES-256-GCM using Python `cryptography`
-Server: optional `kaal-server`, so several machines share one vault (see [Running Kaal as a server](#running-kaal-as-a-server))
+- **Server:** `kaal-server`, which is the only process that opens the vault or reads the key.
+- **Web app:** served by the server at `/`, for a laptop or a phone.
+- **Command line:** `kaal`, on the server itself or pointed at it from another machine.
+- **Chrome extension:** saves the page in front of you ([`chrome-extension/`](chrome-extension/README.md)).
+- **Encryption:** AES-256-GCM, with one key kept in a file outside the vault.
 
 ## Security model
 
-- Notes are Markdown by default.
-- Every note body, attachment and extracted/OCR text is encrypted at rest, medical receipts included.
-- Kaal still labels content `public` or `sensitive` with a best-effort local classifier, or as you say with `--sensitivity`. The label is information only: it no longer decides how anything is stored.
-- Attachments always preserve the original bytes; optional extracted/OCR Markdown sidecars are created separately.
-- The index is encrypted too. It holds the metadata: titles, tags, timestamps, attachment names, sizes and hashes, and medical receipt fields. A copy of each attachment's metadata is kept beside it, also encrypted.
-- A vault from an older version may hold non-sensitive notes, attachments, extracted text and the index readable. `kaal encrypt-all` (run on the server) encrypts them in place; `--dry-run` counts them first. It reads each item back before removing the readable copy and can be re-run after an interruption. Until it has been run, such a vault keeps its index readable so that the older version can still open it.
-- The encryption key is never stored in vault files: it lives in the macOS Keychain or, with `KAAL_KEY_PROVIDER=file`, in the file named by `KAAL_KEY_FILE`, which Kaal refuses to read unless only its owner can read it.
+- Every note, attachment, piece of extracted or OCR text and the index is encrypted at rest, medical receipts included.
+- The index holds the metadata: titles, tags, timestamps, attachment names, sizes and hashes, and medical receipt fields. A copy of each attachment's metadata is kept beside it, also encrypted.
+- The key is never stored in the vault or in a backup. It lives in the file named by `KAAL_KEY_FILE`, which Kaal refuses to read unless only its owner can read it. Losing it loses the vault, so keep a copy somewhere off the server.
+- Attachments keep their original bytes; the text read from them is stored separately.
+- A note or file carries a label, `sensitive` or `public`. It only records what whoever saved it said (`--sensitivity`); nothing is inferred from the text, and it does not change how anything is stored. Without a statement, content is labelled sensitive.
 - File permissions are restrictive: vault directories `700`, stored files `600`.
-- Default note display is redacted.
-- Full plaintext should usually be copied to clipboard rather than printed in chat.
-
-The classifier is a best guess, and since everything is encrypted a wrong label no longer exposes anything.
+- `kaal show` prints a note with identity numbers and similar values hidden; `--full` shows everything.
+- A vault from an older version may hold notes, attachments, extracted text and the index readable. Kaal still reads them, and `kaal encrypt-all` (run on the server) encrypts them in place; `--dry-run` counts them first. It reads each item back before removing the readable copy and can be re-run after an interruption. Until it has been run, such a vault keeps its index readable so that the older version can still open it.
 
 ## Running Kaal as a server
 
@@ -34,7 +32,7 @@ as the local CLI, and the API is described in [`docs/openapi.json`](docs/openapi
 ```bash
 pip install '.[server]'
 export KAAL_HOME=/srv/kaal KAAL_VAULT=/srv/kaal/data
-export KAAL_KEY_PROVIDER=file KAAL_KEY_FILE=/etc/kaal/master.key
+export KAAL_KEY_FILE=/etc/kaal/master.key
 kaal init                             # new vault and key, or `kaal import` an export
 kaal-server token create mac-cli --scopes read,reveal,write,delete --output mac-cli.token
 kaal-server serve                     # 127.0.0.1:8765; publish with `tailscale serve`
@@ -187,9 +185,9 @@ until you revoke it, and a token with `admin` can export everything. A
 compromised server host exposes everything. Rate limits are basic and are not
 denial-of-service protection.
 
-## Local receipt extraction and confirmation
+## How receipts and files are read
 
-- Text/Markdown-like files can be extracted into an `extracted.md` sidecar with `--extract`.
+- The text of a text or Markdown file is kept beside it as it is.
 - A PDF, whether a receipt or a file on an ordinary note, is read from its own text layer (`pdftotext -layout`, which keeps printed columns). A scan with no usable text layer is read by OCR (Tesseract), as is a photo. Nothing else is tried.
 - Kaal never guesses the paid amount or date from an unlabelled total, balance, or date-like value. Ambiguous fields stay blank for review.
 - The narrow exception is an explicitly **SALE/PAYMENT - APPROVED** card receipt with a labelled **Total Amount**: that is recorded as the completed card payment. A bare `Total` or `Total Amount` is still rejected.
@@ -251,8 +249,8 @@ threat model.
 
 ## Commands
 
-For safe, repeatable use by Claude Code, Cursor, Hermes, and other local coding
-agents, see [`AGENTS.md`](AGENTS.md).
+These work on the server itself and, with a client configured, from any other
+machine. For use by coding agents, see [`AGENTS.md`](AGENTS.md).
 
 Initialize/status:
 
@@ -261,48 +259,42 @@ kaal init
 kaal status
 ```
 
-Classify text without saving:
-
-```bash
-kaal classify /path/to/note.md
-pbpaste | kaal classify
-```
-
-Add a Markdown note with automatic classification:
+Add a Markdown note:
 
 ```bash
 kaal add --title "Groceries" --tags home --body $'# Groceries\n\n- milk\n- eggs'
 kaal add --title "My ID Info" --tags pii,ids --body $'SSN: <your-ssn>\nDriver License: <your-license>'
 ```
 
-Override classification:
+Label a note (the label is information only; everything is encrypted):
 
 ```bash
-kaal add --title "Tax note" --sensitivity sensitive --body-file /path/to/tax-note.md
-kaal add --title "Public note" --sensitivity public --body "No sensitive content"
+kaal add --title "Tax note" --body-file /path/to/tax-note.md
+kaal add --title "Opening hours" --sensitivity public --body "Mon to Fri, 9 to 5"
 ```
 
 Or pipe content:
 
 ```bash
-pbpaste | kaal add --title "Tax note" --tags taxes,pii --sensitivity auto
+pbpaste | kaal add --title "Tax note" --tags taxes,pii
 ```
 
-List/search metadata only:
+List or search by title and tag, or search inside notes and their files:
 
 ```bash
 kaal list
 kaal list --tag pii
 kaal search passport
+kaal library search "boiler pressure"
 ```
 
-Show redacted by default:
+Show a note with identity numbers hidden:
 
 ```bash
 kaal show "My ID Info"
 ```
 
-Show full plaintext only when explicitly needed:
+Show everything, only when needed:
 
 ```bash
 kaal show "My ID Info" --full
@@ -324,7 +316,7 @@ Passport: <your-passport-number>
 DOB: <your-date-of-birth>
 ```
 
-Append to a note. A note labelled public whose text becomes sensitive after an append is relabelled sensitive:
+Append to a note:
 
 ```bash
 kaal append "My note" --body "New detail here"
@@ -335,8 +327,6 @@ Attach a file and preserve the original:
 ```bash
 kaal attach "Tax 2025" /path/to/tax-document.pdf --extract
 kaal attach "IDs" /path/to/license.jpg --ocr
-kaal attach "Public note" /path/to/public.txt --extract --sensitivity public
-kaal attach "Private note" /path/to/statement.pdf --extract --sensitivity sensitive
 ```
 
 Export an attachment when needed:
@@ -345,7 +335,7 @@ Export an attachment when needed:
 kaal export-attachment "Tax 2025" ATTACHMENT_ID --output /tmp/tax-document.pdf
 ```
 
-## One-click browser capture from Chrome
+## Saving from Chrome
 
 The Chrome extension sends what you save straight to your Kaal server:
 
@@ -369,14 +359,11 @@ The command line can save a file the same way:
 kaal capture /path/to/file --title "Useful reference"
 ```
 
-Notes listing is metadata-first; note bodies and extracted text are sent to
-the browser only after an explicit reveal action. A note must be moved
-to Trash before permanent deletion, then its record ID must be typed exactly.
-Permanent deletion removes only Kaal-managed note, attachment, and extraction
-sidecar copies—never the original browser/local source.
+Ordinary notes can also be managed by id. A note must be in the Trash before
+it can be deleted for good, and deleting removes only Kaal's own copies, never
+the file a capture was made from.
 
 ```bash
-# The CLI namespace remains `library` for compatibility.
 kaal library list
 kaal library search "boiler pressure"     # titles, tags, note text and the text read from files
 kaal library show NOTE_ID
@@ -385,7 +372,7 @@ kaal library restore NOTE_ID
 kaal library purge NOTE_ID --yes
 ```
 
-## One-click medical receipt capture from Chrome
+## Medical receipts
 
 Medical receipts are encrypted like everything else: the original and its
 extracted/OCR text are stored encrypted, and the fields read from a receipt
@@ -461,17 +448,3 @@ Delete a note and its attachments:
 ```bash
 kaal delete NOTE_ID --yes
 ```
-
-## Recommended Hermes usage
-
-Good prompts:
-
-- "Save this in Kaal as 'Driver license' with tags pii,ids: ..."
-- "Classify this note before saving it in Kaal: ..."
-- "List my Kaal notes."
-- "Show my passport note redacted."
-- "Copy the SSN field from my ID note to clipboard."
-- "Attach this PDF to my Tax 2025 Kaal note and extract Markdown: /path/to/file.pdf"
-- "Attach this JPG to my IDs note and OCR it: /path/to/file.jpg"
-
-Avoid asking Hermes to print full SSNs or documents unless you really need that plaintext in the terminal/chat.

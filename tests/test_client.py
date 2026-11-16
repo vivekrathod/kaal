@@ -18,7 +18,7 @@ import kaal.core as core
 from kaal import client, server, tokens
 
 ROOT = Path(__file__).resolve().parents[1]
-LAUNCHER = ROOT / "bin" / "secure-notes.py"
+LAUNCHER = ROOT / "bin" / "kaal.py"
 
 
 def free_port() -> int:
@@ -60,15 +60,15 @@ class RemoteCliTests(unittest.TestCase):
         cls.tmp.cleanup()
 
     def env(self, token="full", **extra):
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("KAAL_", "SECURE_NOTES_"))}
+        env = {k: v for k, v in os.environ.items() if not k.startswith("KAAL_")}
         env.update({"KAAL_URL": self.url, "KAAL_TOKEN_FILE": str(self.token_files[token]), "KAAL_CLI_NAME": "kaal", "KAAL_CONFIG": str(Path(self.tmp.name) / "no-config.toml")})
         env.pop("PYTHONPATH", None)
         env.update(extra)
         return env
 
     def local_env(self):
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("KAAL_", "SECURE_NOTES_"))}
-        env.update({"SECURE_NOTES_VAULT": str(self.settings.vault), "KAAL_KEY_PROVIDER": "file", "KAAL_KEY_FILE": os.environ["KAAL_KEY_FILE"], "KAAL_CLI_NAME": "kaal", "KAAL_LOCAL": "1"})
+        env = {k: v for k, v in os.environ.items() if not k.startswith("KAAL_")}
+        env.update({"KAAL_VAULT": str(self.settings.vault), "KAAL_KEY_PROVIDER": "file", "KAAL_KEY_FILE": os.environ["KAAL_KEY_FILE"], "KAAL_CLI_NAME": "kaal", "KAAL_LOCAL": "1"})
         env.pop("PYTHONPATH", None)
         return env
 

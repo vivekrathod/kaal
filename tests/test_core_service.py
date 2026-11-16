@@ -184,17 +184,17 @@ class VaultLocationTests(unittest.TestCase):
         import os
         import subprocess
         import sys
-        env = {k: v for k, v in os.environ.items() if k not in {"KAAL_VAULT", "SECURE_NOTES_VAULT", "PYTHONPATH"}}
+        env = {k: v for k, v in os.environ.items() if k not in {"KAAL_VAULT", "PYTHONPATH"}}
         env.update(env_vars, KAAL_LOCAL="1")
-        launcher = Path(__file__).resolve().parents[1] / "bin" / "secure-notes.py"
+        launcher = Path(__file__).resolve().parents[1] / "bin" / "kaal.py"
         proc = subprocess.run([sys.executable, str(launcher), "status"], env=env, capture_output=True, text=True, check=True)
         return json.loads(proc.stdout)["vault"]
 
-    def test_kaal_vault_sets_the_vault_and_wins_over_the_old_name(self):
+    def test_kaal_vault_names_the_vault_and_the_old_name_is_ignored(self):
         with tempfile.TemporaryDirectory() as td:
             self.assertEqual(self.run_status(KAAL_VAULT=f"{td}/a"), f"{td}/a")
-            self.assertEqual(self.run_status(SECURE_NOTES_VAULT=f"{td}/b"), f"{td}/b")
             self.assertEqual(self.run_status(KAAL_VAULT=f"{td}/a", SECURE_NOTES_VAULT=f"{td}/b"), f"{td}/a")
+            self.assertEqual(self.run_status(SECURE_NOTES_VAULT=f"{td}/b", HOME=td), f"{td}/.kaal")
 
 
 class BrokenPipeTests(unittest.TestCase):
@@ -210,7 +210,7 @@ class BrokenPipeTests(unittest.TestCase):
             (vault / "index.json").write_text(json.dumps({"version": 1, "notes": notes}))
             env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
             env.update(KAAL_LOCAL="1", KAAL_VAULT=str(vault))
-            launcher = Path(__file__).resolve().parents[1] / "bin" / "secure-notes.py"
+            launcher = Path(__file__).resolve().parents[1] / "bin" / "kaal.py"
             proc = subprocess.Popen([sys.executable, str(launcher), "list"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             proc.stdout.readline()
             proc.stdout.close()

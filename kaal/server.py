@@ -78,7 +78,7 @@ class Settings:
     def from_env(cls, environ: dict[str, str] | None = None) -> "Settings":
         env = os.environ if environ is None else environ
         home = Path(env.get("KAAL_HOME") or "~/.kaal").expanduser()
-        vault = env.get("KAAL_VAULT") or env.get("SECURE_NOTES_VAULT") or str(home / "data")
+        vault = env.get("KAAL_VAULT") or str(home / "data")
         return cls(
             home=home,
             vault=Path(vault).expanduser(),

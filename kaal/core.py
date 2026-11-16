@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Kaal core: the encrypted notes vault and its command handlers.
 
-Vault default: ~/.secure-notes (override with KAAL_VAULT; SECURE_NOTES_VAULT still works)
+Vault: the folder named by KAAL_VAULT (default ~/.kaal)
 Key storage: kaal.keys (an owner-only key file named by KAAL_KEY_FILE)
 Encryption: AES-256-GCM via Python cryptography.
 
@@ -13,9 +13,7 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
-import dataclasses
 import functools
-import getpass
 import hashlib
 import json
 import os
@@ -27,9 +25,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import textwrap
 import threading
-import uuid
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from datetime import date, datetime, timezone
@@ -42,10 +38,11 @@ from urllib.parse import urlsplit, urlunsplit
 from kaal import keys as key_providers
 from kaal import receipt_ai, receipts
 
-VAULT = Path(os.environ.get("KAAL_VAULT") or os.environ.get("SECURE_NOTES_VAULT") or str(Path.home() / ".secure-notes")).expanduser()
+VAULT = Path(os.environ.get("KAAL_VAULT") or str(Path.home() / ".kaal")).expanduser()
 NOTES_DIR = VAULT / "notes"
 ATTACH_DIR = VAULT / "attachments"
 INDEX_PATH = VAULT / "index.json"
+VAULT_LOCK_NAME = ".vault.lock"
 
 
 def configure_vault(path: str | os.PathLike[str]) -> Path:
@@ -231,9 +228,8 @@ def vault_lock_held() -> bool:
 def vault_capture_lock():
     """Serialize every change to the vault.
 
-    The lock is an flock on ``.medical-capture.lock`` (the name predates its
-    wider use), so separate processes such as the CLI, kaal-server and the
-    nightly backup exclude each other. Within one process it is also guarded
+    The lock is an flock on ``.vault.lock``, so separate processes such as the
+    CLI, kaal-server and the nightly backup exclude each other. Within one process it is also guarded
     by a thread lock, and nested use in the same thread is allowed.
     """
     if vault_lock_held():
@@ -244,7 +240,7 @@ def vault_capture_lock():
             _VAULT_LOCK_STATE.depth -= 1
         return
     with _VAULT_THREAD_LOCK:
-        lock_path = VAULT / ".medical-capture.lock"
+        lock_path = VAULT / VAULT_LOCK_NAME
         lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with lock_path.open("a+") as lock_file:
             os.chmod(lock_path, 0o600)
@@ -498,13 +494,6 @@ def pdf_text(path: Path, *, ocr: bool) -> tuple[str, str]:
     return ("pdftotext-layout", text) if text.strip() else ("", "")
 
 
-def receipt_ai_enabled() -> bool:
-    try:
-        return receipt_ai.settings_from_env().enabled
-    except receipt_ai.ReceiptAIError:
-        return False
-
-
 def extracted_plain_text(extracted_md: str) -> str:
     """The text inside an ``extracted.md`` sidecar, without its heading and code fence."""
     return re.sub(r"```(?:text)?|# Extracted text:.*|Method:.*", "", extracted_md or "", flags=re.IGNORECASE).strip()
@@ -742,7 +731,7 @@ def add_note(args: argparse.Namespace) -> None:
 
 def init_if_needed() -> None:
     if not VAULT.exists() or not INDEX_PATH.exists():
-        die("Vault not initialized. Run: secure-notes init", kind="unavailable")
+        die("Vault not initialized. Run: kaal init", kind="unavailable")
 
 
 def load_note(note_meta: dict[str, Any]) -> dict[str, Any]:
@@ -2815,7 +2804,8 @@ def verify_vault(args: argparse.Namespace) -> None:
         raise SystemExit(2)
 
 
-EXPORT_EXCLUDED = {".medical-capture.lock", ".library-purge", ".receipt-purge"}
+# The second name is the lock file's name before 0.18; one may still lie in an older vault.
+EXPORT_EXCLUDED = {VAULT_LOCK_NAME, ".medical-capture.lock", ".library-purge", ".receipt-purge"}
 
 
 def _anonymous(info: tarfile.TarInfo) -> tarfile.TarInfo:

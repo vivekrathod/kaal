@@ -73,7 +73,7 @@ def test_encrypt_all_converts_an_older_vault_and_keeps_every_byte(vault):
     legacy.make_plaintext(receipt_id)
     assert len(files_holding_the_marker()) == 5  # one note body, two originals, two extracted texts
 
-    before = {path: path.read_bytes() for path in kaal.VAULT.rglob("*") if path.is_file() and path.name != ".medical-capture.lock"}
+    before = {path: path.read_bytes() for path in kaal.VAULT.rglob("*") if path.is_file() and path.name != kaal.VAULT_LOCK_NAME}
     plan = call(kaal.encrypt_vault, dry_run=True)
     assert plan == {"status": "dry-run", "would_encrypt": {"notes": 2, "attachments": 2, "extracted_text": 2, "docling": 0, "metadata": 2, "attachment_names": 0, "index": 1}, "problems": []}
     assert "index.json" in files_holding(NAME_MARKER)
