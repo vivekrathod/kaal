@@ -90,7 +90,10 @@ pytestmark = [
 
 
 @pytest.fixture()
-def stage(tmp_path):
+def stage(tmp_path, request):
+    # With `granted`, the extension is loaded already holding access to the made-up site,
+    # which is what it holds after the person agrees to Chrome's question for that site.
+    granted = bool(getattr(request, "param", False))
     saved = core.VAULT
     settings = server.Settings(home=tmp_path, vault=tmp_path / "data", tokens_file=tmp_path / "tokens.json", tmp_dir=tmp_path / "tmp", rate_per_minute=10_000)
     core.configure_vault(settings.vault)
@@ -105,11 +108,17 @@ def stage(tmp_path):
     (site_dir / "receipt.html").write_text(RECEIPT_PAGE)
     (site_dir / "statement.pdf").write_bytes(made_up_pdf())
     class Site(http.server.SimpleHTTPRequestHandler):
-        """A made-up portal. One of its files refuses to be read."""
+        """A made-up portal. One file always refuses; another refuses the tab and then gives in."""
+
+        asked = []
 
         def do_GET(self):
-            if self.path.startswith("/locked.pdf"):
+            Site.asked.append(self.path)
+            if self.path.startswith("/locked.pdf") or (self.path.startswith("/stubborn.pdf") and Site.asked.count(self.path) <= 2):
                 self.send_error(403)
+            elif self.path.startswith("/stubborn.pdf"):
+                self.path = "/statement.pdf"
+                super().do_GET()
             else:
                 super().do_GET()
 
@@ -120,11 +129,19 @@ def stage(tmp_path):
     site = http.server.ThreadingHTTPServer(("127.0.0.1", site_port), handler)
     threading.Thread(target=site.serve_forever, daemon=True).start()
 
+    extension = EXT
+    if granted:
+        extension = tmp_path / "extension"
+        shutil.copytree(EXT, extension)
+        manifest = json.loads((extension / "manifest.json").read_text())
+        manifest["host_permissions"] = [f"http://127.0.0.1:{site_port}/*"]
+        (extension / "manifest.json").write_text(json.dumps(manifest))
+
     # --use-mock-keychain: without it every web request waits on a hidden macOS Keychain prompt.
     profile = tempfile.mkdtemp(prefix="kaal-e2e-profile-")
     browser = subprocess.Popen(
         [BROWSER, f"--user-data-dir={profile}", f"--remote-debugging-port={debug_port}", "--headless=new", "--use-mock-keychain", "--password-store=basic",
-         f"--load-extension={EXT}", "--no-first-run", "--no-default-browser-check", "--window-size=1200,900", "about:blank"],
+         f"--load-extension={extension}", "--no-first-run", "--no-default-browser-check", "--window-size=1200,900", "about:blank"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(100):
@@ -137,7 +154,7 @@ def stage(tmp_path):
             time.sleep(0.1)
         else:
             pytest.fail("the browser or the server did not start")
-        yield SimpleNamespace(kaal=f"http://localhost:{kaal_port}", site=f"http://127.0.0.1:{site_port}", token=token, debug_port=debug_port)
+        yield SimpleNamespace(kaal=f"http://localhost:{kaal_port}", site=f"http://127.0.0.1:{site_port}", token=token, debug_port=debug_port, asked=Site.asked, pdf_bytes=len(made_up_pdf()))
     finally:
         browser.terminate()
         try:
@@ -150,11 +167,26 @@ def stage(tmp_path):
         core.configure_vault(saved)
 
 
-def test_connect_save_review_and_close_in_a_real_browser(stage):
+def drive(stage, script):
     env = {**os.environ, "E2E_KAAL": stage.kaal, "E2E_SITE": stage.site, "E2E_TOKEN": stage.token, "E2E_DEBUG_PORT": str(stage.debug_port), "E2E_EXTENSION_ID": extension_id()}
-    done = subprocess.run(["node", str(DRIVER)], env=env, capture_output=True, text=True, timeout=300)
+    done = subprocess.run(["node", str(DRIVER.with_name(script))], env=env, capture_output=True, text=True, timeout=300)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-2000:]
-    out = json.loads(done.stdout)
+    return json.loads(done.stdout)
+
+
+@pytest.mark.parametrize("stage", [True], indirect=True)
+def test_a_site_the_person_allowed_is_fetched_directly_when_the_tab_cannot_read_it(stage):
+    out = drive(stage, "granted.mjs")
+    assert out["accessHeld"] is True and out["connected"] == "Connected as “e2e-extension”."
+    # The tab's own load was refused, then the read through the tab, and only then the direct fetch succeeded.
+    assert [path for path in stage.asked if path.startswith("/stubborn.pdf")] == ["/stubborn.pdf"] * 3
+    assert out["state"] == {"stage": "saved", "mode": "general", "site": None, "message": None}
+    assert out["file"]["size"] == stage.pdf_bytes and out["file"]["name"].endswith(".pdf")
+    assert out["source"] == f"{stage.site}/stubborn.pdf"
+
+
+def test_connect_save_review_and_close_in_a_real_browser(stage):
+    out = drive(stage, "run.mjs")
 
     # The extension holds no access to any website; the server lets its pages call the API.
     assert out["hostAccess"] == []
