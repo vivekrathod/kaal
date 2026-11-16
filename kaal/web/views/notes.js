@@ -97,16 +97,29 @@ export function notesView(container, params, { expired }) {
   let total = 0;
   let timer = null;
   let alive = true;
+  let latest = 0;
 
   const list = h("div", { class: "list" });
   const status = h("div", {});
   const more = h("div", { class: "footnote" });
-  const search = h("input", { type: "search", placeholder: "Search titles and tags", "aria-label": "Search notes", value: query });
+  const search = h("input", { type: "search", placeholder: "Search notes and their files", "aria-label": "Search notes", value: query });
+
+  // Where a note was found, with the words around it. Found by title or tag, the title says enough.
+  const found = (match) => (!match || match.where === "title" ? null : h("span", { class: "row-snippet" },
+    match.where === "file" ? h("span", { class: "snippet-file" }, `In ${match.file}: `) : null,
+    match.before, h("mark", {}, match.found), match.after));
 
   async function load(reset) {
+    const turn = ++latest;
+    // The first search after the server starts reads every note, which takes a few seconds.
+    const slow = query ? setTimeout(() => { if (turn === latest && alive) replace(status, notice("Searching…")); }, 600) : null;
     try {
-      const page = await api.notes({ trash, q: query, limit: PAGE, offset: reset ? 0 : shown.length });
-      if (!alive) return;
+      const offset = reset ? 0 : shown.length;
+      const page = query
+        ? await api.searchNotes({ query, trash, limit: PAGE, offset })
+        : await api.notes({ trash, limit: PAGE, offset });
+      // A slower, older search must not replace the results of a newer one.
+      if (!alive || turn !== latest) return;
       shown = reset ? page.result : shown.concat(page.result);
       total = page.meta ? page.meta.total : shown.length;
       status.replaceChildren();
@@ -116,16 +129,19 @@ export function notesView(container, params, { expired }) {
         replace(list, shown.map((note) => h("a", { class: "row", href: `#/note/${encodeURIComponent(note.id)}` },
           h("span", { class: "row-main" },
             h("span", { class: "row-title" }, note.title || "Untitled"),
-            h("span", { class: "row-sub" }, [when(note.updated), ...(note.tags || []).slice(0, 4).map((tag) => `#${tag}`)].filter(Boolean).join("  ")))
+            h("span", { class: "row-sub" }, [when(note.updated), ...(note.tags || []).slice(0, 4).map((tag) => `#${tag}`)].filter(Boolean).join("  ")),
+            found(note.match))
           , (note.attachments || []).length ? h("span", { class: "chip busy" }, `${note.attachments.length} file${note.attachments.length === 1 ? "" : "s"}`) : null)));
       }
       replace(more, shown.length < total
         ? h("button", { type: "button", class: "button", onClick: () => load(false) }, `Show more (${total - shown.length} left)`)
         : h("span", { class: "muted-text" }, total ? `${total} note${total === 1 ? "" : "s"}` : ""));
     } catch (error) {
-      if (!alive) return;
+      if (!alive || turn !== latest) return;
       if (error.status === 401) return expired();
-      replace(status, notice(error.message, "error"));
+      replace(status, notice(error.status === 403 ? "This device isn't allowed to search inside notes." : error.message, "error"));
+    } finally {
+      clearTimeout(slow);
     }
   }
 

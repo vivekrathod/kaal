@@ -174,6 +174,84 @@ def test_note_lists_can_be_searched_and_paged(service):
     assert service.client.get("/v1/library/notes", headers=service.bearer()).json()["meta"]["total"] == 3
 
 
+# --- searching inside notes
+
+def make_note(service, title, body, tags=(), files=()):
+    note = service.client.post("/v1/library/notes", headers=service.bearer(), json={"title": title, "body": body, "tags": list(tags)}).json()["result"]["note"]
+    for name, content in files:
+        attached = service.client.post(f"/v1/library/notes/{note['id']}/attachments", headers=service.bearer(), files={"file": (name, content, "application/octet-stream")})
+        assert attached.status_code == 200, attached.text
+    return note["id"]
+
+
+def find(service, query, **more):
+    response = service.client.post("/v1/library/search", headers=service.bearer(), json={"query": query, **more})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_notes_are_found_by_their_text_and_by_text_read_from_their_files(service):
+    boiler = make_note(service, "Boiler handbook", "Bleed the radiators every autumn.\nThe pressure should read 1.5 bar when cold.", tags=["home"])
+    garden = make_note(service, "Garden plan", "Order compost and bean seeds.", files=[("soil-report.txt", b"Soil pH is 6.5.\nThe pressure washer is in the shed.\n")])
+    recipe = make_note(service, "Pressure cooker lentils", "Twenty minutes, natural release.")
+    service.upload()  # a medical receipt is never among note results
+
+    found = find(service, "PRESSURE")
+    assert [note["id"] for note in found["result"]] == [recipe, boiler, garden]  # by title, then own text, then a file
+    assert found["meta"] == {"total": 3, "offset": 0, "limit": 50}
+    by_id = {note["id"]: note["match"] for note in found["result"]}
+    assert by_id[recipe] == {"where": "title"}
+    assert by_id[boiler] == {"where": "note", "before": "Bleed the radiators every autumn. The ", "found": "pressure", "after": " should read 1.5 bar when cold."}
+    assert by_id[garden]["where"] == "file" and by_id[garden]["file"] == "soil-report.txt" and by_id[garden]["found"] == "pressure"
+    assert find(service, "pressure", limit=1, offset=1)["result"][0]["id"] == boiler
+
+    # Every word must be somewhere in the note; quoted words must be together.
+    assert [note["id"] for note in find(service, "radiators home")["result"]] == [boiler]
+    assert [note["id"] for note in find(service, "compost pH")["result"]] == [garden]
+    assert find(service, "compost radiators")["result"] == []
+    assert [note["id"] for note in find(service, '"bean seeds"')["result"]] == [garden]
+    assert find(service, '"seeds bean"')["result"] == []
+    assert find(service, "(pressure")["result"] == [] and find(service, "1.5")["meta"]["total"] == 1  # typed characters are never a pattern
+
+
+def test_search_follows_edits_the_trash_and_deletion(service):
+    note = make_note(service, "Car insurance", "Policy renews in March with Northwind.")
+    assert find(service, "northwind")["meta"]["total"] == 1
+    service.client.put(f"/v1/library/notes/{note}", headers=service.bearer(), json={"title": "Car insurance", "body": "Policy renews in April with Contoso."})
+    assert find(service, "northwind")["meta"]["total"] == 0 and find(service, "contoso")["meta"]["total"] == 1
+    service.client.post(f"/v1/library/notes/{note}/attachments", headers=service.bearer(), files={"file": ("schedule.txt", b"Excess is two hundred and fifty.\n", "text/plain")})
+    assert find(service, "excess")["result"][0]["match"]["file"] == "schedule.txt"
+
+    service.client.post(f"/v1/library/notes/{note}/trash", headers=service.bearer())
+    assert find(service, "contoso")["meta"]["total"] == 0 and find(service, "contoso", trash=True)["meta"]["total"] == 1
+    service.client.delete(f"/v1/library/notes/{note}", headers=service.bearer(), params={"confirm": True})
+    assert find(service, "contoso", trash=True)["meta"]["total"] == 0
+    assert note not in kaal._TEXT_CACHE
+
+
+def test_searching_inside_notes_needs_the_reveal_scope_and_a_query(service):
+    make_note(service, "Secret", "The safe code is written here.")
+    refused = service.client.post("/v1/library/search", headers=service.bearer("reader"), json={"query": "safe"})
+    assert refused.status_code == 403 and "safe code" not in refused.text
+    assert service.client.post("/v1/library/search", json={"query": "safe"}).status_code == 401
+    for bad in ({}, {"query": ""}, {"query": "x" * 201}, {"query": "safe", "limit": 1000}, {"query": '  ""  '}):
+        response = service.client.post("/v1/library/search", headers=service.bearer(), json=bad)
+        assert response.status_code == 400 and "safe code" not in response.text, bad
+
+
+def test_a_note_is_decrypted_once_until_it_changes(service, monkeypatch):
+    note = make_note(service, "Bike service", "Chain replaced and brakes bled.")
+    make_note(service, "Other", "Nothing about bicycles.")
+    find(service, "brakes")
+    reads = []
+    original = kaal.load_note
+    monkeypatch.setattr(kaal, "load_note", lambda meta: reads.append(meta["id"]) or original(meta))
+    assert find(service, "chain")["meta"]["total"] == 1 and reads == []
+    service.client.put(f"/v1/library/notes/{note}", headers=service.bearer(), json={"title": "Bike service", "body": "New tyres fitted."})
+    reads.clear()
+    assert find(service, "tyres")["meta"]["total"] == 1 and reads.count(note) == 1 and len(reads) == 1
+
+
 # --- files inside notes
 
 def note_with(service, name, content):

@@ -128,6 +128,14 @@ def test_delete_for_good_is_offered_only_to_a_device_allowed_to_do_it():
         assert re.search(r"mayDelete \? twoStepButton\(\"Delete", text), name
 
 
+def test_search_words_travel_in_the_request_body_and_results_are_shown_as_text():
+    api = (WEB / "api.js").read_text()
+    assert 'request("POST", "/v1/library/search", { json: search })' in api
+    notes = (WEB / "views" / "notes.js").read_text()
+    assert "api.searchNotes({ query, trash" in notes and "api.notes({ trash, limit" in notes
+    assert 'h("mark", {}, match.found)' in notes and "turn !== latest" in notes
+
+
 def test_the_web_files_are_packaged_with_kaal():
     assert '"web/*"' in (ROOT / "pyproject.toml").read_text()
 

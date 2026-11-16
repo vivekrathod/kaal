@@ -333,6 +333,10 @@ class Commands:
     def library_list(self, args: Any) -> None:
         _print(self.api.call("GET", "/v1/library/notes", params={"trash": bool(getattr(args, "trash", False)), "limit": getattr(args, "limit", 100)}))
 
+    def library_search(self, args: Any) -> None:
+        _print(self.api.call("POST", "/v1/library/search", json_body={
+            "query": args.query, "trash": bool(getattr(args, "trash", False)), "limit": getattr(args, "limit", 50), "offset": getattr(args, "offset", 0)}))
+
     def library_show(self, args: Any) -> None:
         _print(self.api.call("GET", f"/v1/library/notes/{_id(args.note_id)}"))
 

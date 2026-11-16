@@ -83,7 +83,7 @@ class RemoteCliTests(unittest.TestCase):
 
     def test_read_commands_print_exactly_what_the_local_cli_prints(self):
         note = self.add("Parity note", "Passport: X1234567\nline two", "--tags", "ids,parity")
-        for argv in (["list", "--json"], ["list"], ["show", note["id"], "--json"], ["show", "Parity note"], ["show", note["id"], "--full", "--json"], ["search", "parity"], ["library", "list"]):
+        for argv in (["list", "--json"], ["list"], ["show", note["id"], "--json"], ["show", "Parity note"], ["show", note["id"], "--full", "--json"], ["search", "parity"], ["library", "list"], ["library", "search", "line two"], ["library", "search", "x1234567 parity", "--limit", "5"]):
             remote = self.kaal(*argv)
             local = self.kaal(*argv, env=self.local_env())
             self.assertEqual(remote.stdout, local.stdout, argv)

@@ -78,6 +78,12 @@ shown as formatted Markdown; pictures inside a note appear in place, each PDF
 shows its first page with the text read from it, and a "Show source" switch
 shows the raw note. HTML inside a note is displayed as text, never run.
 
+The notes search looks in titles, tags, the text of each note and the text read
+from its files (PDFs, scans, text files). Every word typed must appear
+somewhere in the note; put words in "quotes" to find them together. Each result
+shows the line it was found in, and names the file when the match is in one.
+Medical receipts have their own search on the Receipts screen.
+
 Notes are written in Markdown, with a Preview switch beside the text. Pictures,
 PDFs and other files can be added while writing a note or from the note itself
 ("Add files"). A file added to a new note is stored when the note is saved. In
@@ -145,6 +151,13 @@ each encrypted attachment. Token names and their scopes are in `tokens.json`,
 outside the vault. Backups made before `kaal encrypt-all` was run still hold the
 older readable copies until they are pruned, so keep backups as private as the
 vault.
+
+**Search and the server's memory.** Searching inside notes means decrypting
+them. The running server does that once per note and keeps the text in its own
+memory, so that later searches are quick; it rereads a note when the note or
+one of its files changes. Nothing of this is written to disk, and it is gone
+when the server stops. The key is already in that memory, so this does not
+change who can read the vault.
 
 **On the server.** Only `kaal-server`, running as its own user, reads the vault
 and the key file. The key is never stored next to the data, and keep a recovery
@@ -372,6 +385,7 @@ sidecar copies—never the original browser/local source.
 ```bash
 # The CLI namespace remains `library` for compatibility.
 kaal library list
+kaal library search "boiler pressure"     # titles, tags, note text and the text read from files
 kaal library show NOTE_ID
 kaal library trash NOTE_ID
 kaal library restore NOTE_ID

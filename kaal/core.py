@@ -1024,6 +1024,121 @@ def library_list(args: argparse.Namespace) -> None:
     emit([library_note_summary(note) for note in notes], ensure_ascii=False, meta=paging)
 
 
+# --- searching inside notes
+#
+# Every note and every text read from a file is encrypted on disk, so finding a
+# word means decrypting them. That is done once per note and kept in this
+# process's memory, keyed by what would change if the note or its files did.
+# Nothing here is written to disk.
+_TEXT_CACHE: dict[str, tuple[Any, list[tuple[str, str, str]]]] = {}
+SEARCH_PIECE_LIMIT = 400_000   # characters of one note or one file's text that are searched
+SNIPPET_BEFORE, SNIPPET_AFTER = 60, 110
+
+
+def _file_stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_mtime_ns, info.st_size)
+
+
+def _note_text_stamp(meta: dict[str, Any]) -> tuple[Any, ...]:
+    """Changes whenever the note's text or a file's text does. The files on disk are
+    looked at, not only the index: two edits in one second share an ``updated`` time."""
+    nid = meta["id"]
+    note_file = plaintext_note_path(nid) if meta.get("storage", "encrypted") == "plaintext" else encrypted_note_path(nid)
+    files = tuple(
+        (att.get("id"), _file_stamp(attachment_note_dir(nid) / att["id"] / "extracted.md.json") or _file_stamp(attachment_note_dir(nid) / att["id"] / "extracted.md"))
+        for att in meta.get("attachments", []) if att.get("id"))
+    return (meta.get("updated", ""), _file_stamp(note_file), files)
+
+
+def note_text_pieces(meta: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """The searchable text of one note as (where, file name, text): its body, then the text read from each file."""
+    stamp = _note_text_stamp(meta)
+    cached = _TEXT_CACHE.get(meta["id"])
+    if cached and cached[0] == stamp:
+        return cached[1]
+    pieces: list[tuple[str, str, str]] = []
+    try:
+        body = load_note(meta).get("body", "")
+    except (KaalError, OSError, ValueError):
+        body = ""   # a note that cannot be read is simply not found by its text
+    if body.strip():
+        pieces.append(("note", "", body[:SEARCH_PIECE_LIMIT]))
+    for att in meta.get("attachments", []):
+        try:
+            text = extracted_plain_text(read_attachment_extracted_sidecar(meta, att))
+        except (KaalError, OSError, ValueError, KeyError):
+            text = ""
+        if text:
+            pieces.append(("file", att.get("name") or "file", text[:SEARCH_PIECE_LIMIT]))
+    _TEXT_CACHE[meta["id"]] = (stamp, pieces)
+    return pieces
+
+
+def search_terms(query: str) -> list[str]:
+    """Words that must all be found; "quoted words" stay together."""
+    terms = [quoted or word for quoted, word in re.findall(r'"([^"]+)"|(\S+)', query or "")]
+    terms = [term.strip().strip('"').strip() for term in terms]   # a stray quote mark is not a word
+    return [term for term in terms if term][:10]
+
+
+def _snippet(text: str, found: re.Match[str]) -> dict[str, str]:
+    start, end = max(0, found.start() - SNIPPET_BEFORE), min(len(text), found.end() + SNIPPET_AFTER)
+    clean = lambda part: re.sub(r"\s+", " ", part)
+    return {
+        "before": ("…" if start else "") + clean(text[start:found.start()]).lstrip(),
+        "found": clean(found.group(0)),
+        "after": clean(text[found.end():end]).rstrip() + ("…" if end < len(text) else ""),
+    }
+
+
+def library_search(args: argparse.Namespace) -> None:
+    """Find notes by their title, tags, text, or the text read from their files.
+
+    Every word must appear somewhere in the note. Notes found by title or tag
+    come first, then by their own text, then by a file's text.
+    """
+    init_if_needed()
+    terms = search_terms(getattr(args, "query", "") or "")
+    if not terms:
+        die("Enter something to search for.")
+    trash = bool(getattr(args, "trash", False))
+    limit = max(1, min(int(getattr(args, "limit", 50) or 50), 100))
+    index = load_index()
+    notes = index.get("notes", [])
+    for gone in set(_TEXT_CACHE) - {note["id"] for note in notes}:
+        del _TEXT_CACHE[gone]
+    patterns = [re.compile(re.escape(term), re.IGNORECASE) for term in terms]
+    hits: list[tuple[int, str, dict[str, Any]]] = []
+    for note in notes:
+        if is_medical_receipt(note) or bool(note.get("trashed_at")) != trash:
+            continue
+        head = " ".join([note.get("title", ""), *note.get("tags", []), (note.get("source") or {}).get("title", "") or ""])
+        pieces: list[tuple[str, str, str]] | None = None
+        match: dict[str, Any] | None = None
+        for pattern in patterns:
+            if pattern.search(head):
+                continue
+            if pieces is None:
+                pieces = note_text_pieces(note)
+            found = next(((where, name, text, hit) for where, name, text in pieces if (hit := pattern.search(text))), None)
+            if found is None:
+                break
+            if match is None or (match["where"] == "file" and found[0] == "note"):
+                match = {"where": found[0], **({"file": found[1]} if found[0] == "file" else {}), **_snippet(found[2], found[3])}
+        else:
+            match = match or {"where": "title"}
+            rank = {"title": 0, "note": 1, "file": 2}[match["where"]]
+            hits.append((rank, note.get("updated", note.get("created", "")), library_note_summary(note) | {"match": match}))
+    hits.sort(key=lambda hit: hit[1], reverse=True)
+    hits.sort(key=lambda hit: hit[0])
+    page, paging = page_of([hit[2] for hit in hits], SimpleNamespace(offset=getattr(args, "offset", 0), limit=limit))
+    emit(page, ensure_ascii=False, meta=paging)
+
+
 def library_show(args: argparse.Namespace) -> None:
     init_if_needed()
     meta = library_note_meta(load_index(), args.note_id)

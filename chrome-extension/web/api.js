@@ -100,6 +100,8 @@ export const api = {
   report: (filter) => result(request("POST", "/v1/medical/report", { json: filter })),
 
   notes: (params) => request("GET", "/v1/library/notes", { params }),
+  // The words searched for go in the request's body, never its address.
+  searchNotes: (search) => request("POST", "/v1/library/search", { json: search }),
   note: (noteId) => result(request("GET", `/v1/library/notes/${id(noteId)}`)).then((data) => data.note),
   createNote: (note) => result(request("POST", "/v1/library/notes", { json: note })),
   updateNote: (noteId, note) => result(request("PUT", `/v1/library/notes/${id(noteId)}`, { json: note })),

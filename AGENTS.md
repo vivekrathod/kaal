@@ -15,7 +15,7 @@ Kaal is a personal notes vault. Every note, attachment, extracted text and the i
 
 ## Safety rules
 
-1. Search/list metadata first. `kaal list` and `kaal search` are metadata-only.
+1. Search/list metadata first. `kaal list` and `kaal search` are metadata-only. `kaal library search "words"` also looks inside note text and the text read from files, and its results quote a line around each match, so treat its output as private content.
 2. Retrieve plaintext only for an explicit user request. `kaal show` is redacted by default; `--full` is sensitive.
 3. Use `--sensitivity sensitive` when the user identifies private data. Automatic classification is best effort, not a guarantee.
 4. Preserve external source files. Kaal manages its own attachment copy and must not remove browser downloads or user-selected originals.

@@ -417,6 +417,13 @@ class LibraryCreate(BaseModel):
     source_title: str = Short
 
 
+class LibrarySearch(BaseModel):
+    query: str = Field(min_length=1, max_length=200)
+    trash: bool = False
+    limit: int = Field(default=50, ge=1, le=100)
+    offset: int = Field(default=0, ge=0)
+
+
 class LibraryUpdate(BaseModel):
     title: str = Title
     body: str = Body
@@ -691,6 +698,12 @@ def create_app(settings: Settings) -> FastAPI:
     @app.get("/v1/library/notes", tags=["library"], dependencies=[require("read")])
     def library_list(request: Request, trash: bool = False, limit: int = Query(100, ge=0, le=100), offset: int = Query(0, ge=0), q: str = Query("", max_length=200)):
         return _run(S(request), core.library_list, trash=trash, limit=limit, offset=offset, q=q)
+
+    # The words searched for travel in the request body, not the address, and
+    # what comes back quotes note text, so this needs reveal.
+    @app.post("/v1/library/search", tags=["library"], dependencies=[require("read", "reveal")])
+    def library_search(request: Request, search: LibrarySearch):
+        return _run(S(request), core.library_search, **search.model_dump())
 
     @app.post("/v1/library/notes", tags=["library"], dependencies=[require("write")])
     def library_create(request: Request, note: LibraryCreate):

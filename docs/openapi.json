@@ -237,6 +237,39 @@
         "title": "LibraryCreate",
         "type": "object"
       },
+      "LibrarySearch": {
+        "properties": {
+          "limit": {
+            "default": 50,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "query": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          },
+          "trash": {
+            "default": false,
+            "title": "Trash",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "LibrarySearch",
+        "type": "object"
+      },
       "LibraryUpdate": {
         "properties": {
           "body": {
@@ -592,7 +625,7 @@
   "info": {
     "description": "An encrypted notes vault. Every request needs `Authorization: Bearer <token>` except /v1/health.",
     "title": "Kaal",
-    "version": "0.16.0"
+    "version": "0.17.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -1175,6 +1208,45 @@
           }
         },
         "summary": "Library Trash",
+        "tags": [
+          "library"
+        ]
+      }
+    },
+    "/v1/library/search": {
+      "post": {
+        "operationId": "library_search_v1_library_search_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LibrarySearch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Library Search",
         "tags": [
           "library"
         ]

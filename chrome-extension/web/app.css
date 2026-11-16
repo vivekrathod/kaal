@@ -194,3 +194,8 @@ button.segment.active { background: var(--surface); color: var(--text); }
 .label { font-weight: 600; font-size: 0.92rem; }
 .add-files { margin: 4px 0 12px; }
 label.button { cursor: pointer; }
+
+/* Search results: the words around what was found */
+.row-snippet { color: var(--muted); font-size: 0.88rem; white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.snippet-file { color: var(--text); }
+mark { background: var(--warn-bg); color: var(--warn-text); border-radius: 3px; padding: 0 2px; }
