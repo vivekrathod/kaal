@@ -102,6 +102,10 @@ def stage(tmp_path, request):
     core.configure_vault(settings.vault)
     core.call_captured(core.init_vault, SimpleNamespace())
     _record, token = tokens.TokenStore(settings.tokens_file).create("e2e-extension", ["read", "reveal", "write"])
+    # A receipt saved earlier from a made-up portal, for the extension to learn that site from the server.
+    receipt = tmp_path / "earlier-receipt.txt"
+    receipt.write_text("Amount paid: $12.50\nService date: 01/02/2026\n")
+    core.call_captured(core.medical_capture, SimpleNamespace(file=str(receipt), title="", source_url="https://www.portal.example.org/pay/receipt?id=42", source_title="Paid", captured_at=""))
     kaal_port, site_port, debug_port = free_port(), free_port(), free_port()
     app = uvicorn.Server(uvicorn.Config(server.create_app(settings), host="127.0.0.1", port=kaal_port, log_level="error", access_log=False))
     threading.Thread(target=app.run, daemon=True).start()
@@ -218,6 +222,7 @@ def test_connect_save_review_and_close_in_a_real_browser(stage):
     assert out["popupUnconnected"] == "Connect to Kaal"
     assert "https://" in out["settingsBadAddress"] and "didn't accept that token" in out["settingsBadToken"]
     assert out["settingsGood"] == "Connected as “e2e-extension”." and out["storedServer"] == stage.kaal
+    assert out["sitesLearnt"] == ["portal.example.org"]  # from the server, host name only
 
     # An ordinary page is saved as a note, from the one main button.
     assert out["popupFirst"] == ["Save to Kaal", "Save as a medical receipt instead"]
@@ -238,7 +243,7 @@ def test_connect_save_review_and_close_in_a_real_browser(stage):
     assert out["badgeAfterClose"]["tab"] == out["badgeAfterClose"]["all"]
 
     # The site is remembered, and a PDF tab is kept as the file it is.
-    assert out["rememberedSites"] == ["127.0.0.1"] and out["popupSecond"][0] == "Save receipt"
+    assert out["rememberedSites"] == ["127.0.0.1", "portal.example.org"] and out["popupSecond"][0] == "Save receipt"
     assert out["pdf"]["stage"] == "review" and out["pdf"]["source"] == f"{stage.site}/statement.pdf" and out["pdf"]["fileName"].endswith(".pdf")
     assert out["pdf"]["size"] == out["pdf"]["sizeOnTheSite"] > 0  # fetched through the tab, byte for byte
 

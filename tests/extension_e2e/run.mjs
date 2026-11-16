@@ -46,6 +46,8 @@ out.settingsBadAddress = await submit("http://example.com", token);
 out.settingsBadToken = await submit(KAAL, "kaal_made_up_token");
 out.settingsGood = await submit(KAAL.replace("http://", ""), token);  // typed without http://, as a person would
 out.storedServer = await sw.run("chrome.storage.local.get('server').then(s => s.server)");
+// Connecting also asks the server which sites receipts were saved from.
+out.sitesLearnt = await until(() => sw.run("chrome.storage.local.get('receiptSites').then(s => (s.receiptSites || []).length ? s.receiptSites : null)"), "the receipt sites", 15000).catch(() => []);
 await browser.closeTab(target.id);
 
 step("3");

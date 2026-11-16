@@ -13,7 +13,7 @@
 // If a file cannot be read through the tab, the panel offers to ask Chrome
 // for access to that one site, and only then is it fetched directly.
 
-import { MODES, chooseMode, rememberSite, mergeSites, siteOf, looksLikePdf, isProtectedPage, fileNameFor, explain, stateKey } from "./lib.js";
+import { MODES, chooseMode, rememberSite, mergeSites, siteOf, isBlanketAccess, looksLikePdf, isProtectedPage, fileNameFor, explain, stateKey } from "./lib.js";
 
 const MENU_GENERAL = "kaal-save";
 const MENU_MEDICAL = "kaal-save-receipt";
@@ -242,6 +242,21 @@ async function save(page, mode, { linkUrl = "", selectionText = "" } = {}) {
     badge(page.id, "!", false);
   }
 }
+
+// Earlier versions held access to every website, and Chrome carries such a
+// grant over when a version stops asking for it. Give it up whenever the
+// worker starts: only single sites the person agreed to are kept.
+async function dropBlanketAccess() {
+  try {
+    const { origins = [] } = await chrome.permissions.getAll();
+    const blanket = origins.filter(isBlanketAccess);
+    if (blanket.length) await chrome.permissions.remove({ origins: blanket });
+  } catch {
+    // Chrome refuses to remove what the manifest requires; there is nothing of the kind now.
+  }
+}
+
+dropBlanketAccess();
 
 // The side panel can only be opened in the same breath as the click or key
 // press that asked for it, so it opens first and fills in as the save goes on.

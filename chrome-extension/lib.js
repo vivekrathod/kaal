@@ -64,6 +64,13 @@ export function siteOf(address) {
   }
 }
 
+// Access that covers every site, in whatever way Chrome writes it down.
+export function isBlanketAccess(pattern) {
+  if (pattern === "<all_urls>") return true;
+  const parts = /^([a-z*]+):\/\/([^/]*)\//i.exec(String(pattern || ""));
+  return Boolean(parts) && parts[2] === "*";
+}
+
 export function looksLikePdf(address) {
   try {
     return new URL(address).pathname.toLowerCase().endsWith(".pdf");

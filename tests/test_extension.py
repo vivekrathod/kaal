@@ -98,6 +98,9 @@ def test_every_request_the_worker_makes_is_in_the_published_api():
     for page in ("panel.js", "popup.js"):
         assert "chrome.permissions.request({ origins: [`${state.site}/*`] })" in (EXT / page).read_text()
     assert "permissions.request" not in worker
+    # A grant covering every site, left over from an older version, is given up when the worker starts.
+    assert "origins.filter(isBlanketAccess)" in worker and "chrome.permissions.remove({ origins: blanket })" in worker
+    assert re.search(r"^dropBlanketAccess\(\);$", worker, flags=re.M)
 
 
 def test_right_click_has_two_entries_and_the_panel_opens_with_the_click():
@@ -145,6 +148,7 @@ console.log(JSON.stringify({
   names: [lib.fileNameFor("Payment: receipt / March", "", "application/pdf"), lib.fileNameFor("", "https://a.example/files/statement%202.pdf", "application/pdf"),
           lib.fileNameFor("photo.JPG", "https://a.example/p", "image/jpeg; q=1"), lib.fileNameFor("", "https://a.example/data.csv", ""), lib.fileNameFor("", "", "")],
   told: [0, 401, 403, 413, 500].map((status) => lib.explain(status, "from the server")),
+  blanket: ["<all_urls>", "*://*/*", "https://*/*", "http://*/*", "https://portal.example.org/*", "https://*.example.org/*", "http://127.0.0.1:8080/*", "", "nonsense"].map(lib.isBlanketAccess),
   origins: ["https://portal.example.org/files/a.pdf?x=1", "http://localhost:8080/x", "file:///Users/x/a.pdf", "chrome://settings", "nonsense"].map(lib.siteOf),
   merged: [lib.mergeSites(["mine.example"], ["theirs.example", "mine.example", "", 7]), lib.mergeSites(undefined, ["a.example"]), lib.mergeSites(["a", "b", "c"], ["d"], 3)],
 }));
@@ -157,6 +161,7 @@ console.log(JSON.stringify({
     assert out["names"] == ["Payment receipt March.pdf", "statement 2.pdf", "photo.JPG", "data.csv", "Saved page.bin"]
     assert out["merged"] == [["mine.example", "theirs.example"], ["a.example"], ["a", "b", "c"]]
     assert out["origins"] == ["https://portal.example.org", "http://localhost:8080", "", "", ""]
+    assert out["blanket"] == [True, True, True, True, False, False, False, False, False]
     assert out["told"][1]["settings"] is True and "token" in out["told"][1]["message"]
     assert out["told"][4]["message"] == "from the server" and out["told"][0]["message"] == "Can't reach Kaal."
 
