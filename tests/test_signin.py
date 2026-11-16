@@ -170,7 +170,10 @@ def test_a_disabled_account_cannot_sign_in_and_its_browsers_stop_working(house):
     house.store.set_disabled("sam", True)
     assert client.get("/v1/library/notes").status_code == 401
     assert house.browser().post("/v1/sign-in", json={"login": "sam", "password": GOOD}).status_code == 401
+    # Enabling it again does not bring old browsers back: the person signs in afresh.
     house.store.set_disabled("sam", False)
+    assert client.get("/v1/library/notes").status_code == 401
+    assert client.post("/v1/sign-in", json={"login": "sam", "password": GOOD}).status_code == 200
     assert client.get("/v1/library/notes").status_code == 200
 
 

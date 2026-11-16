@@ -61,7 +61,33 @@ export function signInView({ onSignedIn }) {
       send: () => api.signInWithPassword(login.value.trim(), password.value),
       done: onSignedIn,
       wrong: (error) => tooMany(error) || (error.status === 401 ? "That sign-in name and password don't match." : error.message),
-      footer: h("p", { class: "muted small choices" }, link("Forgot your password?", recover), link("Use a device token instead", withToken)),
+      footer: h("p", { class: "muted small choices" }, link("Forgot your password?", recover), link("Use a device token instead", withToken), createLink),
+    }));
+    login.focus();
+  }
+
+  // Offered only where the administrator has left sign-up open.
+  const createLink = link("Create an account", create);
+  createLink.hidden = true;
+  api.signInOptions().then((options) => { createLink.hidden = options.signup !== "open"; }).catch(() => {});
+
+  function create() {
+    const [loginLabel, login] = field("login", "Choose a sign-in name", { type: "text", autocomplete: "username", maxlength: "64" });
+    const [nameLabel, name] = field("name", "Your name (optional)", { type: "text", autocomplete: "name", maxlength: "100" });
+    name.required = false;
+    const [passwordLabel, password] = field("new-password", "Password", { type: "password", autocomplete: "new-password" });
+    const [againLabel, again] = field("again", "Password again", { type: "password", autocomplete: "new-password" });
+    replace(page, form({
+      title: "Create an account",
+      intro: "You get a vault of your own. Nobody else here can see into it.",
+      fields: [loginLabel, login, nameLabel, name, passwordLabel, password, againLabel, again],
+      submitLabel: "Create account",
+      busyLabel: "Creating…",
+      check: () => (!login.value.trim() ? "Choose a sign-in name." : password.value.length < 10 ? "Choose a password of at least 10 characters." : password.value !== again.value ? "The two passwords don't match." : null),
+      send: () => api.signUp(login.value.trim(), name.value.trim(), password.value),
+      done: (signedIn) => replace(page, recoveryCodesCard(signedIn.recovery_codes || [], () => onSignedIn(signedIn))),
+      wrong: (error) => (error.status === 429 ? "Too many new accounts just now. Try again later." : error.message),
+      footer: h("p", { class: "muted small choices" }, link("Back to sign in", withPassword)),
     }));
     login.focus();
   }

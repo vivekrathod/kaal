@@ -206,3 +206,12 @@ mark { background: var(--warn-bg); color: var(--warn-text); border-radius: 3px; 
 .codes { list-style: none; margin: 0; padding: 12px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; background: var(--info-bg); border-radius: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.95rem; }
 .quiet-field { border: 0; background: none; padding: 0; min-height: 0; height: 0; opacity: 0; pointer-events: none; position: absolute; }
 .stack { display: grid; gap: 10px; margin-top: 10px; }
+.copy-field { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
+.checks { border: 0; margin: 0; padding: 0; display: grid; gap: 6px; }
+.checks legend { font-weight: 600; padding: 0; margin-bottom: 6px; }
+.check { display: flex; align-items: flex-start; gap: 10px; font-weight: 400; min-height: 32px; }
+.check input { flex: none; width: 18px; height: 18px; min-height: 0; padding: 0; margin: 2px 0 0; accent-color: var(--accent); }
+select { min-height: 44px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; max-width: 100%; }
+.line select { min-height: 34px; padding: 4px 8px; font-size: 0.88rem; }
+.row { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.line.tall { align-items: flex-start; flex-wrap: wrap; }

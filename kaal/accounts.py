@@ -204,6 +204,10 @@ class AccountStore:
             row = db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else None
 
+    def put(self, key: str, value: str) -> None:
+        with self._db(write=True) as db:
+            self._set(db, key, value)
+
     def _set(self, db: sqlite3.Connection, key: str, value: str) -> None:
         db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
 
@@ -237,6 +241,31 @@ class AccountStore:
         with self._db() as db:
             return [self._account(row) for row in db.execute("SELECT * FROM accounts ORDER BY rowid")]
 
+    def overview(self) -> list[dict[str, Any]]:
+        """Everyone, for an administrator: their vaults, whether they have chosen a password, and how many browsers are signed in."""
+        now = _now()
+        with self._db() as db:
+            people = []
+            for row in db.execute("SELECT a.*, (SELECT 1 FROM passwords p WHERE p.account_id = a.id) AS has_password, "
+                                  "(SELECT COUNT(*) FROM sessions s WHERE s.account_id = a.id AND s.ended_at IS NULL AND s.expires > ?) AS browsers, "
+                                  "(SELECT 1 FROM setup_codes c WHERE c.account_id = a.id AND c.used_at IS NULL AND c.expires > ?) AS link_waiting "
+                                  "FROM accounts a ORDER BY a.rowid", (now, now)).fetchall():
+                vaults = db.execute("SELECT v.id, v.name, m.role FROM memberships m JOIN vaults v ON v.id = m.vault_id WHERE m.account_id = ? ORDER BY m.rowid", (row["id"],))
+                people.append({**self._account(row), "has_password": bool(row["has_password"]), "browsers": row["browsers"], "link_waiting": bool(row["link_waiting"]),
+                               "vaults": [{"id": v["id"], "name": v["name"], "role": v["role"]} for v in vaults]})
+        return people
+
+    def set_admin(self, id_or_login: str, admin: bool) -> dict[str, Any]:
+        with self._db(write=True) as db:
+            row = db.execute("SELECT * FROM accounts WHERE id = ? OR login = ?", (id_or_login, id_or_login)).fetchone()
+            if row is None:
+                raise AccountError(f"No account {id_or_login!r}.")
+            if not admin and row["is_admin"] and not db.execute(
+                    "SELECT 1 FROM accounts WHERE is_admin = 1 AND disabled_at IS NULL AND id != ?", (row["id"],)).fetchone():
+                raise AccountError("This is the only working administrator; make another one first.")
+            db.execute("UPDATE accounts SET is_admin = ? WHERE id = ?", (int(admin), row["id"]))
+            return self._account(db.execute("SELECT * FROM accounts WHERE id = ?", (row["id"],)).fetchone())
+
     def set_disabled(self, id_or_login: str, disabled: bool) -> dict[str, Any]:
         with self._db(write=True) as db:
             row = db.execute("SELECT * FROM accounts WHERE id = ? OR login = ?", (id_or_login, id_or_login)).fetchone()
@@ -246,6 +275,8 @@ class AccountStore:
                     "SELECT 1 FROM accounts WHERE is_admin = 1 AND disabled_at IS NULL AND id != ?", (row["id"],)).fetchone():
                 raise AccountError("This is the only working administrator; make another one first.")
             db.execute("UPDATE accounts SET disabled_at = ? WHERE id = ?", (_now() if disabled else None, row["id"]))
+            if disabled and SCHEMA_VERSION >= 2:
+                db.execute("UPDATE sessions SET ended_at = ? WHERE account_id = ? AND ended_at IS NULL", (_now(), row["id"]))
             return self._account(db.execute("SELECT * FROM accounts WHERE id = ?", (row["id"],)).fetchone())
 
     # --- vaults

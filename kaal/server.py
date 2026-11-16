@@ -91,6 +91,10 @@ class Settings:
     tmp_dir: Path
     # Who has an account and who belongs to which vault. Empty means home/accounts.db.
     accounts_file: Path | None = None
+    # When sign-up is open, how many accounts may be created per hour.
+    signups_per_hour: int = 10
+    # How many vaults one person may create for themselves.
+    vaults_per_person: int = 10
     max_upload_bytes: int = 100 * MiB
     rate_per_minute: int = 600
     host: str = "127.0.0.1"
@@ -115,6 +119,8 @@ class Settings:
             tokens_file=Path(env.get("KAAL_TOKENS_FILE") or home / "tokens.json").expanduser(),
             tmp_dir=Path(env.get("KAAL_TMP_DIR") or home / "tmp").expanduser(),
             accounts_file=Path(env.get("KAAL_ACCOUNTS_FILE") or home / "accounts.db").expanduser(),
+            signups_per_hour=int(env.get("KAAL_SIGNUPS_PER_HOUR") or 10),
+            vaults_per_person=int(env.get("KAAL_VAULTS_PER_PERSON") or 10),
             max_upload_bytes=int(env.get("KAAL_MAX_UPLOAD_BYTES") or 100 * MiB),
             rate_per_minute=int(env.get("KAAL_RATE_PER_MINUTE") or 600),
             host=env.get("KAAL_BIND") or "127.0.0.1",
@@ -323,6 +329,7 @@ class AppState:
     vaults: Vaults
     worker: Any = None
     guard: Any = None
+    signups: Any = None
 
 
 class Scoped:
@@ -578,6 +585,44 @@ def require_person() -> Callable:
     return Depends(dependency)
 
 
+def require_admin() -> Callable:
+    """Managing who may use the installation: an administrator, signed in as themselves."""
+    def dependency(person: dict[str, Any] = require_person()) -> dict[str, Any]:
+        if not person["person"]["admin"]:
+            raise HTTPException(403, "Only an administrator may do that.")
+        return person
+
+    return Depends(dependency)
+
+
+def require_owner() -> Callable:
+    """Managing who shares a vault: one of its owners, signed in as themselves, with that vault open."""
+    def dependency(person: dict[str, Any] = require_person()) -> dict[str, Any]:
+        if person["role"] != "owner":
+            raise HTTPException(403, "Only an owner of this vault may do that.")
+        return person
+
+    return Depends(dependency)
+
+
+class SignUpGuard:
+    """Caps how many accounts strangers can create in an hour when sign-up is open."""
+
+    def __init__(self, per_hour: int) -> None:
+        self.per_hour = max(0, per_hour)
+        self._lock = threading.Lock()
+        self._times: list[float] = []
+
+    def allow(self) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            self._times = [moment for moment in self._times if now - moment < 3600]
+            if len(self._times) >= self.per_hour:
+                return False
+            self._times.append(now)
+            return True
+
+
 def _run(state: AppState, handler: Callable[[Any], None], *, exact_note: str | None = None, **params: Any) -> JSONResponse:
     """Run a core handler under the server lock; ``exact_note`` must be an existing note id."""
     with state.in_vault():
@@ -763,6 +808,42 @@ class PasswordProof(BaseModel):
     password: str = Field(min_length=1, max_length=1024)
 
 
+class PersonNew(BaseModel):
+    login: str = Field(min_length=1, max_length=64)
+    name: str = Field(default="", max_length=100)
+    admin: bool = False
+    own_vault: bool = True
+
+
+class Flag(BaseModel):
+    on: bool
+
+
+class SignUpSetting(BaseModel):
+    signup: Literal["open", "invitation"]
+
+
+class SignUp(BaseModel):
+    login: str = Field(min_length=1, max_length=64)
+    name: str = Field(default="", max_length=100)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class MemberChange(BaseModel):
+    login: str = Field(min_length=1, max_length=64)
+    role: Literal["owner", "editor", "viewer"]
+
+
+class VaultNew(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class TokenNew(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    scopes: list[str] = Field(min_length=1, max_length=5)
+    vault: str = Field(min_length=1, max_length=64)
+
+
 class VaultChoice(BaseModel):
     vault: str = Field(min_length=1, max_length=64)
 
@@ -808,7 +889,8 @@ def create_app(settings: Settings) -> FastAPI:
 
     app = FastAPI(title="Kaal", version=__version__, docs_url=None, redoc_url=None, openapi_url=None,
                   description="An encrypted notes vault. Every request needs `Authorization: Bearer <token>` except /v1/health.")
-    app.state.kaal = AppState(settings, tokens.TokenStore(settings.tokens_file), RateLimiter(settings.rate_per_minute), store, registry, guard=SignInGuard())
+    app.state.kaal = AppState(settings, tokens.TokenStore(settings.tokens_file), RateLimiter(settings.rate_per_minute), store, registry, guard=SignInGuard(),
+                               signups=SignUpGuard(settings.signups_per_hour))
     app.state.kaal.worker = ExtractionWorker(registry.all)
     app.add_middleware(BodyLimitMiddleware, limit=settings.max_upload_bytes + MiB)
 
@@ -1077,6 +1159,177 @@ def create_app(settings: Settings) -> FastAPI:
     @app.post("/v1/account/sessions/sign-out-others", tags=["account"])
     def account_end_other_sessions(request: Request, person: dict[str, Any] = require_person()):
         return answer({"status": "signed_out", "count": S(request).accounts.end_sessions(person["account"], keep=person["session"])})
+
+    # --- tokens for one's scripts and the browser extension
+
+    def tokens_of(state: Any, person: dict[str, Any]) -> list[dict[str, Any]]:
+        """A person's active tokens. Tokens from before accounts name nobody and belong to the first account."""
+        mine = {person["account"], None} if state.accounts.defaults()[0] == person["account"] else {person["account"]}
+        default_vault = state.accounts.defaults()[1]
+        names = {vault["id"]: vault["name"] for vault in person["vaults"]}
+        return [{"id": record["id"], "name": record["name"], "scopes": record["scopes"], "created": record["created"],
+                 "vault": record.get("vault") or default_vault, "vault_name": names.get(record.get("vault") or default_vault, "")}
+                for record in state.tokens.list() if not record.get("revoked_at") and record.get("account") in mine]
+
+    @app.get("/v1/account/tokens", tags=["account"])
+    def account_tokens(request: Request, person: dict[str, Any] = require_person()):
+        return answer({"tokens": tokens_of(S(request), person)})
+
+    @app.post("/v1/account/tokens", tags=["account"])
+    def account_token_create(request: Request, body: TokenNew, person: dict[str, Any] = require_person()):
+        """Make a token for a script or the extension. Its secret is in this answer and nowhere else, ever."""
+        state = S(request)
+        vault = next((entry for entry in person["vaults"] if entry["id"] == body.vault), None)
+        if vault is None:
+            return _error(404, "You do not belong to that vault.", "not_found")
+        beyond = [scope for scope in body.scopes if scope not in accounts.ROLE_SCOPES[vault["role"]]]
+        if beyond:
+            return _error(400, f"Your role in that vault does not allow: {', '.join(beyond)}.", "invalid")
+        try:
+            record, secret = state.tokens.create(body.name, body.scopes, account=person["account"], vault=body.vault)
+        except tokens.TokenError as error:
+            return _error(400, str(error), "invalid")
+        return answer({"token": {"id": record["id"], "name": record["name"], "scopes": record["scopes"], "created": record["created"],
+                                 "vault": body.vault, "vault_name": vault["name"]}, "secret": secret})
+
+    @app.delete("/v1/account/tokens/{token_id}", tags=["account"])
+    def account_token_revoke(request: Request, token_id: str, person: dict[str, Any] = require_person()):
+        state = S(request)
+        mine = {person["account"], None} if state.accounts.defaults()[0] == person["account"] else {person["account"]}
+        try:
+            record = state.tokens.revoke_id(token_id, accounts=mine)
+        except tokens.TokenError:
+            return _error(404, "You have no such token.", "not_found")
+        return answer({"status": "revoked", "id": record["id"]})
+
+    # --- one's vaults and who shares them
+
+    @app.post("/v1/account/vaults", tags=["account"])
+    def account_vault_create(request: Request, body: VaultNew, person: dict[str, Any] = require_person()):
+        """Create another vault of one's own, for example one to share with a household."""
+        state = S(request)
+        if sum(1 for vault in person["vaults"] if vault["role"] == "owner") >= state.settings.vaults_per_person:
+            return _error(409, f"You already own {state.settings.vaults_per_person} vaults, which is the limit here.", "conflict")
+        try:
+            vault = create_vault(state.accounts, body.name.strip(), person["account"])
+        except core.KaalError as error:
+            return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind)
+        return answer({"vault": {"id": vault["id"], "name": vault["name"], "role": "owner"}})
+
+    @app.get("/v1/vault/members", tags=["account"])
+    def vault_members(request: Request, person: dict[str, Any] = require_owner()):
+        state = S(request)
+        return answer({"vault": next(vault for vault in who(person)["vaults"] if vault["id"] == person["vault"]),
+                       "members": state.accounts.members(person["vault"])})
+
+    @app.post("/v1/vault/members", tags=["account"])
+    def vault_member_set(request: Request, body: MemberChange, person: dict[str, Any] = require_owner()):
+        """Let someone with an account into this vault, or change their role in it."""
+        state = S(request)
+        try:
+            state.accounts.grant(body.login.strip().lower(), person["vault"], body.role)
+        except accounts.AccountError as error:
+            missing = str(error).startswith("No account")
+            return _error(404 if missing else 409, "Nobody here has that sign-in name." if missing else str(error), "not_found" if missing else "conflict")
+        return answer({"members": state.accounts.members(person["vault"])})
+
+    @app.delete("/v1/vault/members/{account_id}", tags=["account"])
+    def vault_member_remove(request: Request, account_id: str, person: dict[str, Any] = require_owner()):
+        state = S(request)
+        try:
+            state.accounts.ungrant(account_id, person["vault"])
+        except accounts.AccountError as error:
+            return _error(409, str(error), "conflict")
+        return answer({"members": state.accounts.members(person["vault"])})
+
+    # --- who may use this installation (administrators)
+
+    def setup_path(state: Any, account_id: str) -> str:
+        """The part of a setup link after the site's address; the page that asked knows the address."""
+        return f"/#/setup/{state.accounts.new_setup_code(account_id)}"
+
+    def signup_setting(state: Any) -> str:
+        return "open" if state.accounts.get("signup") == "open" else "invitation"
+
+    @app.get("/v1/admin/people", tags=["admin"])
+    def admin_people(request: Request, person: dict[str, Any] = require_admin()):
+        state = S(request)
+        return answer({"people": state.accounts.overview(), "signup": signup_setting(state), "you": person["account"]})
+
+    @app.post("/v1/admin/people", tags=["admin"])
+    def admin_person_add(request: Request, body: PersonNew, person: dict[str, Any] = require_admin()):
+        """Create an account and a single-use link with which that person chooses their password."""
+        state = S(request)
+        try:
+            made = state.accounts.add_account(body.login, body.name, admin=body.admin)
+            vault = create_vault(state.accounts, "My notes", made["id"]) if body.own_vault else None
+        except accounts.AccountError as error:
+            return _error(409 if "already" in str(error) else 400, str(error), "conflict" if "already" in str(error) else "invalid")
+        except core.KaalError as error:
+            return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind)
+        return answer({"account": made, "vault": vault and {"id": vault["id"], "name": vault["name"]}, "setup_path": setup_path(state, made["id"])})
+
+    @app.post("/v1/admin/people/{account_id}/setup-link", tags=["admin"])
+    def admin_person_link(request: Request, account_id: str, person: dict[str, Any] = require_admin()):
+        """A new single-use link for someone who has not chosen a password yet, or has lost theirs."""
+        state = S(request)
+        try:
+            return answer({"setup_path": setup_path(state, account_id)})
+        except accounts.AccountError:
+            return _error(404, "No such account.", "not_found")
+
+    @app.post("/v1/admin/people/{account_id}/disabled", tags=["admin"])
+    def admin_person_disable(request: Request, account_id: str, body: Flag, person: dict[str, Any] = require_admin()):
+        state = S(request)
+        if body.on and account_id == person["account"]:
+            return _error(400, "You cannot switch off your own account.", "invalid")
+        try:
+            return answer({"account": state.accounts.set_disabled(account_id, body.on)})
+        except accounts.AccountError as error:
+            missing = str(error).startswith("No account")
+            return _error(404 if missing else 409, str(error), "not_found" if missing else "conflict")
+
+    @app.post("/v1/admin/people/{account_id}/admin", tags=["admin"])
+    def admin_person_admin(request: Request, account_id: str, body: Flag, person: dict[str, Any] = require_admin()):
+        state = S(request)
+        try:
+            return answer({"account": state.accounts.set_admin(account_id, body.on)})
+        except accounts.AccountError as error:
+            missing = str(error).startswith("No account")
+            return _error(404 if missing else 409, str(error), "not_found" if missing else "conflict")
+
+    @app.post("/v1/admin/sign-up", tags=["admin"])
+    def admin_signup(request: Request, body: SignUpSetting, person: dict[str, Any] = require_admin()):
+        """Whether anyone who can reach this Kaal may create an account, or only people an administrator adds."""
+        state = S(request)
+        state.accounts.put("signup", body.signup)
+        return answer({"signup": signup_setting(state)})
+
+    @app.get("/v1/sign-in/options", tags=["session"])
+    def sign_in_options(request: Request):
+        """What the sign-in page should offer. Needs no sign-in, and says nothing about who has an account."""
+        return answer({"signup": signup_setting(S(request))})
+
+    @app.post("/v1/sign-up", tags=["session"])
+    def sign_up(request: Request, body: SignUp):
+        """Create one's own account, where the administrator has left sign-up open."""
+        state = S(request)
+        if signup_setting(state) != "open":
+            return _error(403, "Accounts here are created by an administrator. Ask them for a setup link.", "forbidden")
+        if not state.limiter.allow("unauthenticated") or not state.signups.allow():
+            raise HTTPException(429, "Too many new accounts just now. Try again later.", headers={"Retry-After": "600"})
+        try:
+            login = accounts.clean_login(body.login)
+            passwords.check_new(body.password, login=login)
+            made = state.accounts.add_account(login, body.name)
+        except passwords.PasswordError as error:
+            return _error(400, str(error), "invalid")
+        except accounts.AccountError as error:
+            return _error(409 if "already" in str(error) else 400, "That sign-in name is taken." if "already" in str(error) else str(error),
+                          "conflict" if "already" in str(error) else "invalid")
+        create_vault(state.accounts, "My notes", made["id"])
+        state.accounts.set_password(made["id"], passwords.hash_password(body.password))
+        return start_session(request, state, made, recovery_codes=state.accounts.new_recovery_codes(made["id"]))
 
     @app.get("/v1/status", tags=["service"], dependencies=[require("read")])
     def status(request: Request):

@@ -119,6 +119,22 @@ passwords for one sign-in name are free, after which each further try has to
 wait, from one minute up to fifteen. Settings shows a person their signed-in
 browsers and lets them sign any of them out.
 
+In the web app, Settings has three more pages for people signed in as
+themselves. **Vaults and sharing**: open another of your vaults, create one,
+and (as an owner) let someone into the open vault as viewer, editor or owner,
+or take them out. **Tokens**: make and revoke tokens for your own scripts and
+the browser extension; a token can do no more than your role in its vault, and
+its secret is shown once. **People**, for administrators: add a person and get
+their setup link, make a new link for someone who lost their password, switch
+an account off or on, share the administrator's job, and choose whether
+strangers may create accounts.
+
+Accounts are by invitation unless an administrator opens sign-up, in which
+case the sign-in page offers "Create an account". Open sign-up is capped at
+ten new accounts an hour (`KAAL_SIGNUPS_PER_HOUR`), and a person may own at
+most ten vaults (`KAAL_VAULTS_PER_PERSON`). An administrator manages who has
+an account, and cannot see into anyone's vault by being one.
+
 A token can never change the password, codes or sessions of the account it
 acts for, so a script's token cannot be turned into its owner's sign-in.
 Tokens remain the way for scripts, the command-line client and the browser

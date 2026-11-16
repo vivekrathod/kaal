@@ -112,7 +112,8 @@ class TokenStore:
         wanted = self._wanted(scopes)
         with self._lock:
             records = [dict(r) for r in self._load()]
-            if any(r["name"] == name and not r.get("revoked_at") for r in records):
+            # Names are a person's own: two people may each have a "laptop".
+            if any(r["name"] == name and not r.get("revoked_at") and r.get("account") == account for r in records):
                 raise TokenError(f"An active token named {name!r} already exists; revoke it first.")
             token_id = secrets.token_hex(4)
             while any(r["id"] == token_id for r in records):
@@ -137,6 +138,18 @@ class TokenStore:
                 record["revoked_at"] = _now()
             self._save(records)
         return self._public(active[0])
+
+    def revoke_id(self, token_id: str, *, accounts: Iterable[str | None]) -> dict[str, Any]:
+        """Revoke one token by id, provided it belongs to one of ``accounts`` (None meaning a token that names no account)."""
+        allowed = set(accounts)
+        with self._lock:
+            records = [dict(r) for r in self._load()]
+            match = next((r for r in records if r["id"] == token_id and not r.get("revoked_at") and r.get("account") in allowed), None)
+            if match is None:
+                raise TokenError("No such token.")
+            match["revoked_at"] = _now()
+            self._save(records)
+        return self._public(match)
 
     def set_scopes(self, name_or_id: str, scopes: Iterable[str]) -> dict[str, Any]:
         """Change what an active token may do. Its secret stays the same, so

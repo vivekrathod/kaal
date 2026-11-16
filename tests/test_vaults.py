@@ -334,6 +334,25 @@ def test_every_route_works_on_the_servers_vault_and_never_on_the_default(tmp_pat
     call("POST", "/v1/account/password", json={"current": "another made-up password", "new": "a third made-up password"}, headers=person)
     call("POST", "/v1/account/recovery-codes", json={"password": "a third made-up password"}, headers=person)
     call("POST", "/v1/session/vault", json={"vault": shown["vault"]["id"]}, headers=person)
+    # tokens, vaults and sharing, as a person
+    made_token = result(call("POST", "/v1/account/tokens", json={"name": "made-up script", "scopes": ["read"], "vault": shown["vault"]["id"]}, headers=person))
+    call("GET", "/v1/account/tokens", headers=person)
+    call("DELETE", f"/v1/account/tokens/{made_token['token']['id']}", headers=person)
+    call("POST", "/v1/account/vaults", json={"name": "Made-up second vault"}, headers=person)
+    call("GET", "/v1/vault/members", headers=person)
+
+    # administrators, and open sign-up
+    added = result(call("POST", "/v1/admin/people", json={"login": "made-up-person"}, headers=person))["account"]["id"]
+    call("GET", "/v1/admin/people", headers=person)
+    call("POST", f"/v1/admin/people/{added}/setup-link", headers=person)
+    call("POST", f"/v1/admin/people/{added}/admin", json={"on": True}, headers=person)
+    call("POST", "/v1/vault/members", json={"login": "made-up-person", "role": "viewer"}, headers=person)
+    call("DELETE", f"/v1/vault/members/{added}", headers=person)
+    call("POST", f"/v1/admin/people/{added}/disabled", json={"on": True}, headers=person)
+    call("POST", "/v1/admin/sign-up", json={"signup": "open"}, headers=person)
+    call("GET", "/v1/sign-in/options", headers={})
+    call("POST", "/v1/sign-up", json={"login": "made-up-newcomer", "password": "a made-up password"}, headers={})
+
     # A person's session opens the vault by the same route as a token does.
     assert call("GET", "/v1/library/notes", headers=person).status_code == 200
     call("POST", "/v1/library/notes", json={"title": "Made-up, as a person", "body": "x"}, headers=person)

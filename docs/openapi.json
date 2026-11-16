@@ -182,6 +182,19 @@
         "title": "ExtractRun",
         "type": "object"
       },
+      "Flag": {
+        "properties": {
+          "on": {
+            "title": "On",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "on"
+        ],
+        "title": "Flag",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -298,6 +311,31 @@
           "body"
         ],
         "title": "LibraryUpdate",
+        "type": "object"
+      },
+      "MemberChange": {
+        "properties": {
+          "login": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Login",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "editor",
+              "viewer"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "login",
+          "role"
+        ],
+        "title": "MemberChange",
         "type": "object"
       },
       "NoteCreate": {
@@ -423,6 +461,37 @@
           }
         },
         "title": "PeopleChange",
+        "type": "object"
+      },
+      "PersonNew": {
+        "properties": {
+          "admin": {
+            "default": false,
+            "title": "Admin",
+            "type": "boolean"
+          },
+          "login": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Login",
+            "type": "string"
+          },
+          "name": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Name",
+            "type": "string"
+          },
+          "own_vault": {
+            "default": true,
+            "title": "Own Vault",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "login"
+        ],
+        "title": "PersonNew",
         "type": "object"
       },
       "ProviderForget": {
@@ -651,6 +720,51 @@
         "title": "SignIn",
         "type": "object"
       },
+      "SignUp": {
+        "properties": {
+          "login": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Login",
+            "type": "string"
+          },
+          "name": {
+            "default": "",
+            "maxLength": 100,
+            "title": "Name",
+            "type": "string"
+          },
+          "password": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "login",
+          "password"
+        ],
+        "title": "SignUp",
+        "type": "object"
+      },
+      "SignUpSetting": {
+        "properties": {
+          "signup": {
+            "enum": [
+              "open",
+              "invitation"
+            ],
+            "title": "Signup",
+            "type": "string"
+          }
+        },
+        "required": [
+          "signup"
+        ],
+        "title": "SignUpSetting",
+        "type": "object"
+      },
       "TextBody": {
         "properties": {
           "body": {
@@ -703,6 +817,38 @@
           "text"
         ],
         "title": "TextCapture",
+        "type": "object"
+      },
+      "TokenNew": {
+        "properties": {
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 5,
+            "minItems": 1,
+            "title": "Scopes",
+            "type": "array"
+          },
+          "vault": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Vault",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "scopes",
+          "vault"
+        ],
+        "title": "TokenNew",
         "type": "object"
       },
       "ValidationError": {
@@ -759,6 +905,21 @@
         ],
         "title": "VaultChoice",
         "type": "object"
+      },
+      "VaultNew": {
+        "properties": {
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "VaultNew",
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -771,7 +932,7 @@
   "info": {
     "description": "An encrypted notes vault. Every request needs `Authorization: Bearer <token>` except /v1/health.",
     "title": "Kaal",
-    "version": "0.22.0"
+    "version": "0.22.1"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -931,6 +1092,381 @@
         "summary": "Account End Session",
         "tags": [
           "account"
+        ]
+      }
+    },
+    "/v1/account/tokens": {
+      "get": {
+        "operationId": "account_tokens_v1_account_tokens_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Account Tokens",
+        "tags": [
+          "account"
+        ]
+      },
+      "post": {
+        "description": "Make a token for a script or the extension. Its secret is in this answer and nowhere else, ever.",
+        "operationId": "account_token_create_v1_account_tokens_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenNew"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Account Token Create",
+        "tags": [
+          "account"
+        ]
+      }
+    },
+    "/v1/account/tokens/{token_id}": {
+      "delete": {
+        "operationId": "account_token_revoke_v1_account_tokens__token_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token_id",
+            "required": true,
+            "schema": {
+              "title": "Token Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Account Token Revoke",
+        "tags": [
+          "account"
+        ]
+      }
+    },
+    "/v1/account/vaults": {
+      "post": {
+        "description": "Create another vault of one's own, for example one to share with a household.",
+        "operationId": "account_vault_create_v1_account_vaults_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VaultNew"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Account Vault Create",
+        "tags": [
+          "account"
+        ]
+      }
+    },
+    "/v1/admin/people": {
+      "get": {
+        "operationId": "admin_people_v1_admin_people_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Admin People",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "Create an account and a single-use link with which that person chooses their password.",
+        "operationId": "admin_person_add_v1_admin_people_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonNew"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Person Add",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/people/{account_id}/admin": {
+      "post": {
+        "operationId": "admin_person_admin_v1_admin_people__account_id__admin_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Flag"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Person Admin",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/people/{account_id}/disabled": {
+      "post": {
+        "operationId": "admin_person_disable_v1_admin_people__account_id__disabled_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Flag"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Person Disable",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/people/{account_id}/setup-link": {
+      "post": {
+        "description": "A new single-use link for someone who has not chosen a password yet, or has lost theirs.",
+        "operationId": "admin_person_link_v1_admin_people__account_id__setup_link_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Person Link",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/sign-up": {
+      "post": {
+        "description": "Whether anyone who can reach this Kaal may create an account, or only people an administrator adds.",
+        "operationId": "admin_signup_v1_admin_sign_up_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignUpSetting"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Signup",
+        "tags": [
+          "admin"
         ]
       }
     },
@@ -3258,6 +3794,26 @@
         ]
       }
     },
+    "/v1/sign-in/options": {
+      "get": {
+        "description": "What the sign-in page should offer. Needs no sign-in, and says nothing about who has an account.",
+        "operationId": "sign_in_options_v1_sign_in_options_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Sign In Options",
+        "tags": [
+          "session"
+        ]
+      }
+    },
     "/v1/sign-in/recover": {
       "post": {
         "description": "Use a recovery code to choose a new password. Signs every other browser out.",
@@ -3298,6 +3854,46 @@
         ]
       }
     },
+    "/v1/sign-up": {
+      "post": {
+        "description": "Create one's own account, where the administrator has left sign-up open.",
+        "operationId": "sign_up_v1_sign_up_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignUp"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sign Up",
+        "tags": [
+          "session"
+        ]
+      }
+    },
     "/v1/status": {
       "get": {
         "operationId": "status_v1_status_get",
@@ -3314,6 +3910,103 @@
         "summary": "Status",
         "tags": [
           "service"
+        ]
+      }
+    },
+    "/v1/vault/members": {
+      "get": {
+        "operationId": "vault_members_v1_vault_members_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Vault Members",
+        "tags": [
+          "account"
+        ]
+      },
+      "post": {
+        "description": "Let someone with an account into this vault, or change their role in it.",
+        "operationId": "vault_member_set_v1_vault_members_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemberChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Vault Member Set",
+        "tags": [
+          "account"
+        ]
+      }
+    },
+    "/v1/vault/members/{account_id}": {
+      "delete": {
+        "operationId": "vault_member_remove_v1_vault_members__account_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Vault Member Remove",
+        "tags": [
+          "account"
         ]
       }
     },
