@@ -10,6 +10,7 @@ User=kaal
 Group=kaal
 Environment=KAAL_LOCAL=1
 Environment=KAAL_CONFIG=/nonexistent
+Environment=KAAL_HOME=/srv/kaal
 Environment=KAAL_VAULT=/srv/kaal/data
 Environment=KAAL_BACKUP_DIR=/srv/kaal/backups
 ExecStart=/opt/kaal/venv/bin/kaal backup --keep 14

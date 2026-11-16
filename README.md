@@ -88,7 +88,9 @@ Accounts and memberships are kept in `accounts.db` in `KAAL_HOME`; new vaults
 are folders under `KAAL_HOME/vaults/`. Each new vault is encrypted with a key
 of its own, which sits in the vault folder wrapped by the installation's key
 file, so one person's files cannot be read as another's even by mixing up
-folders. Back up the whole of `KAAL_HOME`, not only the first vault.
+folders. `kaal backup` copies all of it: the first vault as before, and in a
+folder named `_installation` inside each backup, the accounts file, the token
+file and every other vault. The key file is never copied.
 
 An installation that began with a single vault keeps working untouched: on
 first start that vault becomes the vault of an administrator account named

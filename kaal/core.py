@@ -3089,45 +3089,111 @@ def backup_vault(args: argparse.Namespace) -> None:
     if final.exists():
         die("A backup with this timestamp already exists; run it again in a second.", kind="conflict")
     work = dest / f".incomplete-{stamp}"
-    files = copied = linked = total_bytes = 0
+    counts = {"files": 0, "copied": 0, "linked": 0, "bytes": 0}
+    complete = sorted(p for p in dest.iterdir() if p.is_dir() and BACKUP_NAME_RE.match(p.name))
+    previous = complete[-1] if complete else None
+    _mkdir_700(work)
     with vault_capture_lock():
-        complete = sorted(p for p in dest.iterdir() if p.is_dir() and BACKUP_NAME_RE.match(p.name))
-        previous = complete[-1] if complete else None
-        _mkdir_700(work)
-        for root, dirs, names in os.walk(current_vault().root):
-            rel_root = Path(root).relative_to(current_vault().root)
-            top = rel_root == Path(".")
-            dirs[:] = sorted(d for d in dirs if not (top and d in EXPORT_EXCLUDED) and not os.path.islink(os.path.join(root, d)))
-            for name in dirs:
-                _mkdir_700(work / rel_root / name)
-            for name in sorted(names):
-                source = Path(root) / name
-                if (top and name in EXPORT_EXCLUDED) or source.is_symlink() or not source.is_file():
-                    continue
-                rel = rel_root / name
-                target = work / rel
-                info = source.stat()
-                earlier = previous / rel if previous else None
-                if earlier is not None and earlier.is_file() and not earlier.is_symlink():
-                    earlier_info = earlier.stat()
-                    if (earlier_info.st_size, earlier_info.st_mtime_ns) == (info.st_size, info.st_mtime_ns):
-                        os.link(earlier, target)
-                        linked += 1
-                        files += 1
-                        total_bytes += info.st_size
-                        continue
-                shutil.copy2(source, target)
-                os.chmod(target, 0o600)
-                copied += 1
-                files += 1
-                total_bytes += info.st_size
+        _backup_tree(current_vault().root, work, previous, counts)
+    others = _backup_installation(work, previous, counts, dest)
     os.rename(work, final)
     complete = sorted(p for p in dest.iterdir() if p.is_dir() and BACKUP_NAME_RE.match(p.name))
     expired = complete[:-keep]
     for old in expired:
         shutil.rmtree(old)
-    emit({"status": "ok", "backup": str(final), "files": files, "bytes": total_bytes, "copied": copied, "linked": linked,
-          "kept": len(complete) - len(expired), "pruned": len(expired)}, indent=2)
+    emit({"status": "ok", "backup": str(final), **counts, "kept": len(complete) - len(expired), "pruned": len(expired), **others}, indent=2)
+
+
+# Inside a backup, beside the first vault's own files: the accounts file, the
+# token file and every other vault of the installation.
+BACKUP_INSTALLATION_DIR = "_installation"
+
+
+def _backup_tree(source_root: Path, work: Path, previous: Path | None, counts: dict[str, int]) -> None:
+    """Copy one vault folder into ``work``, hard-linking files unchanged since ``previous``."""
+    for root, dirs, names in os.walk(source_root):
+        rel_root = Path(root).relative_to(source_root)
+        top = rel_root == Path(".")
+        dirs[:] = sorted(d for d in dirs if not (top and d in EXPORT_EXCLUDED) and not os.path.islink(os.path.join(root, d)))
+        for name in dirs:
+            _mkdir_700(work / rel_root / name)
+        for name in sorted(names):
+            source = Path(root) / name
+            if (top and name in EXPORT_EXCLUDED) or source.is_symlink() or not source.is_file():
+                continue
+            rel = rel_root / name
+            target = work / rel
+            info = source.stat()
+            earlier = previous / rel if previous else None
+            counts["files"] += 1
+            counts["bytes"] += info.st_size
+            if earlier is not None and earlier.is_file() and not earlier.is_symlink():
+                earlier_info = earlier.stat()
+                if (earlier_info.st_size, earlier_info.st_mtime_ns) == (info.st_size, info.st_mtime_ns):
+                    os.link(earlier, target)
+                    counts["linked"] += 1
+                    continue
+            shutil.copy2(source, target)
+            os.chmod(target, 0o600)
+            counts["copied"] += 1
+
+
+def installation_home() -> Path | None:
+    """The folder holding accounts.db for the current vault's installation, if it has one."""
+    named = os.environ.get("KAAL_HOME", "").strip()
+    candidates = [Path(named).expanduser()] if named else []
+    candidates.append(current_vault().root.parent)
+    return next((home for home in candidates if (home / "accounts.db").is_file()), None)
+
+
+def _backup_installation(work: Path, previous: Path | None, counts: dict[str, int], dest: Path) -> dict[str, Any]:
+    """Add the accounts file, the token file and the installation's other vaults to a backup."""
+    home = installation_home()
+    if home is None:
+        return {}
+    import sqlite3
+
+    from kaal import accounts as account_store
+
+    store = account_store.AccountStore(home / "accounts.db", home)
+    extra = work / BACKUP_INSTALLATION_DIR
+    _mkdir_700(extra)
+    # SQLite's own backup gives a consistent copy even while the server is writing.
+    source_db = sqlite3.connect(home / "accounts.db", timeout=15)
+    try:
+        target_db = sqlite3.connect(extra / "accounts.db")
+        try:
+            source_db.backup(target_db)
+        finally:
+            target_db.close()
+    finally:
+        source_db.close()
+    os.chmod(extra / "accounts.db", 0o600)
+    counts["files"] += 1
+    counts["copied"] += 1
+    counts["bytes"] += (extra / "accounts.db").stat().st_size
+    tokens_file = Path(os.environ.get("KAAL_TOKENS_FILE") or home / "tokens.json").expanduser()
+    if tokens_file.is_file() and not tokens_file.is_symlink():
+        shutil.copy2(tokens_file, extra / "tokens.json")
+        os.chmod(extra / "tokens.json", 0o600)
+        counts["files"] += 1
+        counts["copied"] += 1
+        counts["bytes"] += tokens_file.stat().st_size
+    here = current_vault().root.resolve()
+    saved = 0
+    for record in store.vaults():
+        folder = store.folder_of(record)
+        if folder.resolve() == here or not (folder / "index.json").is_file():
+            continue
+        if dest.is_relative_to(folder.resolve()):
+            die("Backups must live outside every vault.")
+        target = extra / "vaults" / record["id"]
+        _mkdirs_700(target)
+        earlier = previous / BACKUP_INSTALLATION_DIR / "vaults" / record["id"] if previous else None
+        with use_vault(Vault(folder)), vault_capture_lock():
+            _backup_tree(folder, target, earlier, counts)
+        saved += 1
+    return {"accounts": True, "other_vaults": saved}
 
 @holds_vault_lock
 def delete_note(args: argparse.Namespace) -> None:
