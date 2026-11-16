@@ -361,7 +361,8 @@ The Chrome extension sends what you save straight to your Kaal server:
 - **The number on the icon** is how many receipts are waiting to be checked.
 - **No access to websites.** The extension reads the page or file you save
   through the tab itself, at the moment you save, and holds no standing access
-  to any site. The sites you have saved receipts from are also learnt from the
+  to any site. If a file cannot be read that way, it offers to ask Chrome for
+  access to that one site. The sites you have saved receipts from are also learnt from the
   server (`GET /v1/medical/sources`, host names only).
 
 Notes, totals, the Trash and settings are in the web app. Setting the extension

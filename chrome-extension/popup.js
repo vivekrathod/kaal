@@ -36,7 +36,16 @@ function show(state, tab, server) {
   if (state.stage === "error") {
     const fix = state.settings ? element("button", "button small", "Open settings") : null;
     if (fix) fix.addEventListener("click", () => chrome.runtime.openOptionsPage());
-    return say(element("p", "notice error", state.message), state.hint ? element("p", "hint", state.hint) : null, fix);
+    // The file could not be read through the tab: offer to ask Chrome for access to its one site.
+    const allow = state.site ? element("button", "button small", `Let Kaal fetch from ${new URL(state.site).host}`) : null;
+    if (allow) {
+      allow.addEventListener("click", async () => {
+        const granted = await chrome.permissions.request({ origins: [`${state.site}/*`] }).catch(() => false);
+        if (granted) chrome.runtime.sendMessage({ action: "save", mode: state.mode, tabId: tab.id, url: state.url, title: state.title, linkUrl: state.linkUrl }).catch(() => {});
+      });
+    }
+    return say(element("p", "notice error", state.message), state.hint ? element("p", "hint", state.hint) : null,
+      allow ? element("p", "hint", "Kaal has no access to websites. You can give it access to this one site, then save again.") : null, fix, allow);
   }
   if (state.stage === "review") {
     const review = element("button", "button small", "Check it now");

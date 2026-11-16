@@ -125,5 +125,22 @@ if (pdfId) {
   }
   await browser.closeTab(target.id);
 }
+step("7");
+// 7. A file that refuses to be read through the tab: the panel offers to ask for that one site.
+const receiptsBeforeLocked = (await api("/v1/medical/receipts?limit=1")).meta.total;
+await browser.newTab(`${SITE}/locked.pdf`);
+await wait(800);
+const lockedId = await newestTab();
+({ target, page } = await browser.newTab(popupFor(lockedId, `${SITE}/locked.pdf`, "Locked statement")));
+await until(() => page.run("!document.getElementById('primary').hidden"), "popup buttons");
+await page.click("#primary");
+const lockedState = await until(() => sw.run(`chrome.storage.session.get("tab:${lockedId}").then(s => { const v = s["tab:${lockedId}"]; return v && v.stage !== "saving" ? v : null; })`), "locked save", 60000);
+await browser.closeTab(target.id).catch(() => {});
+const lockedPanel = await browser.newTab(`${EXT}/panel.html?tab=${lockedId}`);
+await until(() => lockedPanel.page.run("document.querySelectorAll('.actions .button').length > 0"), "error panel");
+const lockedButtons = await lockedPanel.page.run("[...document.querySelectorAll('.actions .button')].map(b => b.textContent)");
+out.locked = { stage: lockedState.stage, site: lockedState.site, message: lockedState.message, retry: lockedButtons[0], offer: lockedButtons[1],
+  accessHeld: await sw.run(`chrome.permissions.contains({ origins: ["${SITE}/*"] })`), receiptsAdded: (await api("/v1/medical/receipts?limit=1")).meta.total - receiptsBeforeLocked };
+out.hostAccessAtTheEnd = await sw.run("chrome.permissions.getAll().then(all => all.origins)");
 console.log(JSON.stringify(out, null, 2));
 process.exit(0);

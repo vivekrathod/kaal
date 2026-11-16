@@ -10,8 +10,10 @@
 // for the moment a save takes; Kaal's server lets the extension's own pages
 // call it. Chrome tells the extension a tab's address only when you invoke
 // it there (the toolbar button, a right-click entry, the keyboard shortcut).
+// If a file cannot be read through the tab, the panel offers to ask Chrome
+// for access to that one site, and only then is it fetched directly.
 
-import { MODES, chooseMode, rememberSite, mergeSites, looksLikePdf, isProtectedPage, fileNameFor, explain, stateKey } from "./lib.js";
+import { MODES, chooseMode, rememberSite, mergeSites, siteOf, looksLikePdf, isProtectedPage, fileNameFor, explain, stateKey } from "./lib.js";
 
 const MENU_GENERAL = "kaal-save";
 const MENU_MEDICAL = "kaal-save-receipt";
@@ -126,7 +128,9 @@ async function loadThroughTab(command, address, title) {
   }
   const status = (resource && resource.httpStatusCode) || 0;
   if (!resource || !resource.success || !resource.stream || status >= 400) {
-    throw new Problem(`That file couldn't be fetched${status ? ` (${status})` : ""}.`, FILE_HINT);
+    const problem = new Problem(`That file couldn't be fetched${status ? ` (${status})` : ""}.`, FILE_HINT);
+    problem.status = status;
+    throw problem;
   }
   const parts = [];
   try {
@@ -165,21 +169,51 @@ async function showsPdf(command) {
   }
 }
 
+// Fetching a file directly, with the person's sign-in on its site. Only ever
+// done for a site they have told Chrome this extension may reach.
+async function fetchDirectly(address, title) {
+  let response;
+  try {
+    response = await fetch(address, { credentials: "include" });
+  } catch {
+    throw new Problem("Chrome couldn't read that file.", FILE_HINT);
+  }
+  if (!response.ok) throw new Problem(`That file couldn't be fetched (${response.status}).`, FILE_HINT);
+  const blob = await response.blob();
+  if (!blob.size) throw new Problem("That file is empty.");
+  return new File([blob], fileNameFor(title, address, blob.type), { type: blob.type || "application/octet-stream" });
+}
+
+// A file is read through the tab. Where that fails, it is fetched directly if
+// access to its site has been given; otherwise the failure names the site, so
+// that the panel can offer to ask for it. One site at a time, never all.
+async function fileFrom(command, address, title) {
+  try {
+    return await loadThroughTab(command, address, title);
+  } catch (error) {
+    const site = siteOf(address);
+    if (!site || !(error instanceof Problem)) throw error;
+    if (await chrome.permissions.contains({ origins: [`${site}/*`] })) return fetchDirectly(address, title);
+    if (error.status !== 404 && error.status !== 410) error.site = site;   // a file that is not there is not an access problem
+    throw error;
+  }
+}
+
 function pageAsFile(page) {
   if (isProtectedPage(page.url)) throw new Problem("Chrome doesn't let extensions save this kind of page.", "Open the page you want to keep and try again.");
   return withDebugger(page, async (command) => (looksLikePdf(page.url) || page.url.startsWith("file:") || await showsPdf(command)
-    ? loadThroughTab(command, page.url, page.title)
+    ? fileFrom(command, page.url, page.title)
     : printPage(command, page)));
 }
 
-const linkAsFile = (page, address) => withDebugger(page, (command) => loadThroughTab(command, address, page.title));
+const linkAsFile = (page, address) => withDebugger(page, (command) => fileFrom(command, address, page.title));
 
 // --- saving
 
 // `page` is { id, url, title }: the tab a save was asked for on.
 async function save(page, mode, { linkUrl = "", selectionText = "" } = {}) {
   if (!page || !Number.isInteger(page.id)) return;
-  const about = { mode, url: page.url || "", title: page.title || "" };   // kept so "Try again" can repeat it
+  const about = { mode, url: page.url || "", title: page.title || "", linkUrl };   // kept so "Try again" can repeat it
   await setState(page.id, { stage: "saving", ...about });
   badge(page.id, "…");
   const source = { source_url: linkUrl || page.url || "", source_title: page.title || "", captured_at: new Date().toISOString() };
@@ -204,7 +238,7 @@ async function save(page, mode, { linkUrl = "", selectionText = "" } = {}) {
     refreshCount();
   } catch (error) {
     const known = error instanceof Problem;
-    await setState(page.id, { stage: "error", ...about, message: known ? error.message : "Something went wrong while saving.", hint: known ? error.hint : "", settings: known && error.settings });
+    await setState(page.id, { stage: "error", ...about, message: known ? error.message : "Something went wrong while saving.", hint: known ? error.hint : "", settings: known && error.settings, site: (known && error.site) || "" });
     badge(page.id, "!", false);
   }
 }
@@ -255,7 +289,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (!message || typeof message !== "object" || sender.id !== chrome.runtime.id) return undefined;
   if (message.action === "save" && MODES[message.mode] && Number.isInteger(message.tabId)) {
     const page = { id: message.tabId, url: typeof message.url === "string" ? message.url : "", title: typeof message.title === "string" ? message.title : "" };
-    save(page, message.mode).then(() => respond({ ok: true }), () => respond({ ok: false }));
+    save(page, message.mode, { linkUrl: typeof message.linkUrl === "string" ? message.linkUrl : "" }).then(() => respond({ ok: true }), () => respond({ ok: false }));
     return true;
   }
   if (message.action === "count") {

@@ -54,6 +54,16 @@ export function mergeSites(local, server, limit = 200) {
   return [...mine, ...theirs].slice(0, limit);
 }
 
+// The one site a file comes from, as Chrome names it when access is asked for.
+export function siteOf(address) {
+  try {
+    const parsed = new URL(address);
+    return /^https?:$/.test(parsed.protocol) ? parsed.origin : "";
+  } catch {
+    return "";
+  }
+}
+
 export function looksLikePdf(address) {
   try {
     return new URL(address).pathname.toLowerCase().endsWith(".pdf");

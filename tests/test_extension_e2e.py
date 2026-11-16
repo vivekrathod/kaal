@@ -104,8 +104,19 @@ def stage(tmp_path):
     site_dir.mkdir()
     (site_dir / "receipt.html").write_text(RECEIPT_PAGE)
     (site_dir / "statement.pdf").write_bytes(made_up_pdf())
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(site_dir))
-    handler.log_message = lambda *args: None
+    class Site(http.server.SimpleHTTPRequestHandler):
+        """A made-up portal. One of its files refuses to be read."""
+
+        def do_GET(self):
+            if self.path.startswith("/locked.pdf"):
+                self.send_error(403)
+            else:
+                super().do_GET()
+
+        def log_message(self, *args):
+            pass
+
+    handler = functools.partial(Site, directory=str(site_dir))
     site = http.server.ThreadingHTTPServer(("127.0.0.1", site_port), handler)
     threading.Thread(target=site.serve_forever, daemon=True).start()
 
@@ -175,3 +186,9 @@ def test_connect_save_review_and_close_in_a_real_browser(stage):
     assert out["rememberedSites"] == ["127.0.0.1"] and out["popupSecond"][0] == "Save receipt"
     assert out["pdf"]["stage"] == "review" and out["pdf"]["source"] == f"{stage.site}/statement.pdf" and out["pdf"]["fileName"].endswith(".pdf")
     assert out["pdf"]["size"] == out["pdf"]["sizeOnTheSite"] > 0  # fetched through the tab, byte for byte
+
+    # A file the tab cannot read: nothing is saved, and the panel offers to ask for that one site.
+    locked = out["locked"]
+    assert locked["stage"] == "error" and locked["site"] == stage.site and "403" in locked["message"]
+    assert locked["offer"] == f"Let Kaal fetch from {stage.site.removeprefix('http://')}" and locked["retry"] == "Try again"
+    assert locked["accessHeld"] is False and locked["receiptsAdded"] == 0 and out["hostAccessAtTheEnd"] == []

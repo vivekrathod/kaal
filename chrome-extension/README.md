@@ -66,6 +66,13 @@ The extension holds **no access to any website**. It asks for:
   right-click entries, the saved address and token, and the periodic refresh of
   the number on the icon and the list of receipt sites.
 
+If a file cannot be read through the tab (a site that refuses, or a file on
+another site), nothing is saved and the panel offers **"Let Kaal fetch from
+that-site"**. Pressing it has Chrome ask you for access to that one site; if
+you agree, files from it are fetched directly from then on. Access is only ever
+asked for one site at a time, by you, and can be withdrawn on the extension's
+card at `chrome://extensions`.
+
 It reaches your Kaal server because the server names this extension as allowed
 to call it (see `KAAL_EXTENSION_IDS` in the main README). The server must be
 version 0.19 or later.

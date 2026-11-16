@@ -25,7 +25,9 @@ def test_the_extension_asks_for_what_it_uses_and_nothing_from_the_old_design():
     assert data["manifest_version"] == 3
     assert sorted(data["permissions"]) == ["activeTab", "alarms", "contextMenus", "debugger", "sidePanel", "storage"]
     # No access to any website: pages are read through the tab, and the server names the extension.
-    assert "host_permissions" not in data and "optional_host_permissions" not in data and "optional_permissions" not in data
+    assert "host_permissions" not in data and "optional_permissions" not in data
+    # One site at a time may be granted, by the person, when a file cannot be read through the tab.
+    assert data["optional_host_permissions"] == ["*://*/*"]
     assert data["background"] == {"service_worker": "background.js", "type": "module"}
     assert data["action"]["default_popup"] == "popup.html" and data["options_ui"]["page"] == "options.html"
     assert set(data["commands"]) == {"_execute_action", "save"}
@@ -86,8 +88,16 @@ def test_every_request_the_worker_makes_is_in_the_published_api():
             assert "fetch(" not in script.read_text(), f"{script.name} makes requests itself"
     assert "Authorization: `Bearer ${token}`" in worker and 'credentials: "omit"' in worker
     # The worker's only requests are to Kaal; a site's file is read through the tab, not fetched with the person's sign-in.
-    assert worker.count("fetch(") == 1 and 'credentials: "include"' not in worker
     assert "Network.loadNetworkResource" in worker and "sender.id !== chrome.runtime.id" in worker
+    # The only other request, a file fetched with the person's sign-in, happens after a check that they gave access to that site.
+    assert worker.count("fetch(") == 2 and worker.count('credentials: "include"') == 1
+    direct = worker[worker.index("async function fileFrom"):worker.index("function pageAsFile")]
+    assert direct.index("chrome.permissions.contains({ origins: [`${site}/*`] })") < direct.index("fetchDirectly(address, title)")
+    assert worker.count("fetchDirectly(") == 2  # its definition and that one guarded call
+    # Access is asked for by the person pressing a button, for the one site named in the failure.
+    for page in ("panel.js", "popup.js"):
+        assert "chrome.permissions.request({ origins: [`${state.site}/*`] })" in (EXT / page).read_text()
+    assert "permissions.request" not in worker
 
 
 def test_right_click_has_two_entries_and_the_panel_opens_with_the_click():
@@ -135,6 +145,7 @@ console.log(JSON.stringify({
   names: [lib.fileNameFor("Payment: receipt / March", "", "application/pdf"), lib.fileNameFor("", "https://a.example/files/statement%202.pdf", "application/pdf"),
           lib.fileNameFor("photo.JPG", "https://a.example/p", "image/jpeg; q=1"), lib.fileNameFor("", "https://a.example/data.csv", ""), lib.fileNameFor("", "", "")],
   told: [0, 401, 403, 413, 500].map((status) => lib.explain(status, "from the server")),
+  origins: ["https://portal.example.org/files/a.pdf?x=1", "http://localhost:8080/x", "file:///Users/x/a.pdf", "chrome://settings", "nonsense"].map(lib.siteOf),
   merged: [lib.mergeSites(["mine.example"], ["theirs.example", "mine.example", "", 7]), lib.mergeSites(undefined, ["a.example"]), lib.mergeSites(["a", "b", "c"], ["d"], 3)],
 }));
 """)
@@ -145,6 +156,7 @@ console.log(JSON.stringify({
     assert out["blocked"] == [True, True, True, False, False, True]
     assert out["names"] == ["Payment receipt March.pdf", "statement 2.pdf", "photo.JPG", "data.csv", "Saved page.bin"]
     assert out["merged"] == [["mine.example", "theirs.example"], ["a.example"], ["a", "b", "c"]]
+    assert out["origins"] == ["https://portal.example.org", "http://localhost:8080", "", "", ""]
     assert out["told"][1]["settings"] is True and "token" in out["told"][1]["message"]
     assert out["told"][4]["message"] == "from the server" and out["told"][0]["message"] == "Can't reach Kaal."
 

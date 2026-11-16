@@ -56,11 +56,18 @@ async function render() {
     return;
   }
   if (state.stage === "error") {
+    const again = () => chrome.runtime.sendMessage({ action: "save", mode: state.mode, tabId, url: state.url, title: state.title, linkUrl: state.linkUrl }).catch(() => {});
+    // The file could not be read through the tab. Chrome can be asked for access to its one site.
+    const allow = state.site ? h("button", { type: "button", class: "button", onClick: async () => {
+      if (await chrome.permissions.request({ origins: [`${state.site}/*`] }).catch(() => false)) again();
+    } }, `Let Kaal fetch from ${new URL(state.site).host}`) : null;
     replace(root, notice(state.message, "error"), state.hint ? h("p", { class: "hint" }, state.hint) : null,
+      allow ? h("p", { class: "hint" }, "Kaal has no access to websites. You can give it access to this one site; Chrome will ask you to confirm.") : null,
       h("div", { class: "actions" },
         state.settings
           ? h("button", { type: "button", class: "button primary", onClick: () => chrome.runtime.openOptionsPage() }, "Open settings")
-          : h("button", { type: "button", class: "button primary", onClick: () => chrome.runtime.sendMessage({ action: "save", mode: state.mode, tabId, url: state.url, title: state.title }).catch(() => {}) }, "Try again")));
+          : h("button", { type: "button", class: "button primary", onClick: again }, "Try again"),
+        allow));
     return;
   }
   if (state.stage === "saved") {
