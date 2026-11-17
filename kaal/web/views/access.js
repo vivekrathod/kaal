@@ -1,7 +1,7 @@
 // Who may reach what: tokens for scripts, who shares a vault, and (for
 // administrators) who has an account at all.
 
-import { api } from "/web/api.js";
+import { api, vaultExportUrl } from "/web/api.js";
 import { h, replace, notice, actionButton, twoStepButton, formatDate } from "/web/ui.js";
 
 const SCOPES = [
@@ -161,6 +161,8 @@ export function sharingView(container, _params, context) {
         h("h1", {}, `“${shared.vault.name}”`),
         h("label", { for: "vault-rename" }, "Name of this vault"),
         renameForm,
+        h("p", { class: "muted small" }, h("a", { href: vaultExportUrl(), download: "" }, "Download a copy"),
+          " · everything in this vault, readable without Kaal: notes as Markdown, the files, and receipts as a spreadsheet. Keep it as safe as the vault."),
         h("h2", { class: "sub" }, "Who shares it"),
         h("ul", { class: "plain" }, shared.members.map((member) => {
           const pick = h("select", { "aria-label": `Role of ${member.login}` }, ROLES.map(([value, label]) => h("option", { value, selected: value === member.role }, label.split(":")[0])));
@@ -173,7 +175,28 @@ export function sharingView(container, _params, context) {
     }
     replace(container, backLink(), status, vaultsCard(),
       membersCard || (session.vault ? h("section", { class: "card section" }, h("h1", {}, `Who shares “${session.vault.name}”`),
-        h("p", { class: "muted" }, "Only an owner of this vault can see or change who shares it.")) : null));
+        h("p", { class: "muted" }, "Only an owner of this vault can see or change who shares it.")) : null),
+      shared ? deleteVaultCard(shared.vault) : null);
+  }
+
+  // Deleting the open vault for good, confirmed with the password (or, without one, the vault's name).
+  function deleteVaultCard(vault) {
+    const hasPassword = (context.session.account || {}).has_password !== false;
+    const proof = h("input", { type: hasPassword ? "password" : "text", id: "delete-vault-proof", autocomplete: hasPassword ? "current-password" : "off",
+      placeholder: hasPassword ? "Your password" : `Type ${vault.name}` });
+    const button = twoStepButton("Delete this vault", "Delete it and everything in it?", () => attempt(async () => {
+      if (!proof.value) {
+        replace(status, notice(hasPassword ? "Enter your password to delete it." : "Type the vault's name to delete it.", "error"));
+        return;
+      }
+      await api.deleteVault(hasPassword ? proof.value : "", hasPassword ? "" : proof.value);
+      await context.refresh();
+    }));
+    return h("section", { class: "card section" },
+      h("h1", {}, "Delete this vault"),
+      h("p", { class: "muted" }, `Every note, file and receipt in “${vault.name}” is deleted for good, for everyone who shares it, and its tokens stop working. Copies already made by the daily backup remain until they are pruned. Download a copy first if you might want any of it.`),
+      h("label", { for: "delete-vault-proof" }, hasPassword ? "Your password" : "The vault's name"),
+      h("div", { class: "inline-form" }, proof, button));
   }
 
   attempt(async () => {
@@ -187,7 +210,29 @@ export function peopleView(container, _params, context) {
   const { status, attempt, alive, leave } = page(container, context);
   const linkFor = (path) => `${location.origin}${path}`;
 
-  function draw(all, link = null) {
+  // Removing someone for good: shows what goes with them, then asks for their sign-in name again.
+  function removalCard(all, { person, plan }) {
+    const typed = h("input", { type: "text", id: "remove-confirm", autocomplete: "off", autocapitalize: "off", spellcheck: "false", placeholder: person.login });
+    const cancel = h("button", { type: "button", class: "button", onClick: () => draw(all) }, "Cancel");
+    if (plan.blocked.length) {
+      return h("section", { class: "card section" }, h("h1", {}, `Remove “${person.login}”?`), plan.blocked.map((reason) => notice(reason, "warn")), cancel);
+    }
+    const remove = twoStepButton("Remove for good", "Really remove?", () => attempt(async () => {
+      await api.adminRemove(person.id, typed.value.trim());
+      draw(await api.everyone());
+      replace(status, notice(`“${person.login}” was removed.`));
+    }));
+    return h("section", { class: "card section" },
+      h("h1", {}, `Remove “${person.login}”?`),
+      h("p", { class: "muted" }, plan.vaults_to_delete.length
+        ? `Their account goes, and with it these vaults that only they belong to, with everything in them: ${plan.vaults_to_delete.join(", ")}.`
+        : "Their account goes. They belong to no vault on their own, so no notes are deleted."),
+      plan.vaults_to_leave.length ? h("p", { class: "muted" }, `They are taken out of: ${plan.vaults_to_leave.join(", ")}.`) : null,
+      h("label", { for: "remove-confirm" }, "Type their sign-in name to confirm"),
+      h("div", { class: "inline-form" }, typed, remove, cancel));
+  }
+
+  function draw(all, link = null, removing = null) {
     const login = h("input", { type: "text", id: "new-login", maxlength: "64", placeholder: "A first name or an email address", autocomplete: "off", autocapitalize: "off", spellcheck: "false" });
     const name = h("input", { type: "text", id: "new-name", maxlength: "100", autocomplete: "off" });
     const form = h("form", { class: "stack", novalidate: true },
@@ -213,6 +258,7 @@ export function peopleView(container, _params, context) {
     }));
 
     replace(container, backLink(), status,
+      removing ? removalCard(all, removing) : null,
       link ? h("section", { class: "card section" },
         h("h1", {}, `Setup link for “${link.who}”`),
         notice("Send them this link. It works once, for 24 hours, and lets them choose their own password. It is not shown again.", "warn"),
@@ -229,6 +275,7 @@ export function peopleView(container, _params, context) {
               person.browsers ? ` · ${person.browsers} browser${person.browsers === 1 ? "" : "s"} signed in` : "",
             ].join(""))),
           h("span", { class: "row" },
+            person.id === all.you ? null : actionButton("Remove…", () => attempt(async () => draw(await api.everyone(), null, { person, plan: await api.adminRemovalPlan(person.id) })), { kind: "small" }),
             actionButton(person.has_password ? "Reset link" : "Setup link", () => attempt(async () => draw(await api.everyone(), { who: person.login, path: await api.newSetupLink(person.id) })), { kind: "small" }),
             person.id === all.you ? null : actionButton(person.admin ? "Not admin" : "Make admin", () => attempt(async () => { await api.setAdmin(person.id, !person.admin); draw(await api.everyone()); }), { kind: "small" }),
             person.id === all.you ? null : (person.disabled_at

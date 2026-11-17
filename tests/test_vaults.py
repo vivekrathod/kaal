@@ -355,7 +355,18 @@ def test_every_route_works_on_the_servers_vault_and_never_on_the_default(tmp_pat
     call("POST", f"/v1/admin/people/{added}/disabled", json={"on": True}, headers=person)
     call("POST", "/v1/admin/sign-up", json={"signup": "open"}, headers=person)
     call("GET", "/v1/sign-in/options", headers={})
-    call("POST", "/v1/sign-up", json={"login": "made-up-newcomer", "password": "a made-up password"}, headers={})
+    joined = call("POST", "/v1/sign-up", json={"login": "made-up-newcomer", "password": "a made-up password"}, headers={})
+    newcomer = {"Cookie": joined.headers["set-cookie"].split(";", 1)[0], "X-Kaal-Request": "1"}
+
+    # a way out: a readable copy, deleting a vault, an account, and someone else's account
+    call("GET", "/v1/vault/export", headers=person)
+    spare = result(call("POST", "/v1/account/vaults", json={"name": "Made-up vault to delete"}, headers=newcomer))["vault"]["id"]
+    call("POST", "/v1/session/vault", json={"vault": spare}, headers=newcomer)
+    call("DELETE", "/v1/vault", json={"password": "a made-up password"}, headers=newcomer)
+    call("GET", "/v1/account/removal", headers=newcomer)
+    call("DELETE", "/v1/account", json={"password": "a made-up password"}, headers=newcomer)
+    call("GET", f"/v1/admin/people/{added}/removal", headers=person)
+    call("DELETE", f"/v1/admin/people/{added}", json={"confirm": "made-up-person"}, headers=person)
 
     # sign-in services: offered by an administrator, connected by a person, then used to sign in
     google = FakeService()

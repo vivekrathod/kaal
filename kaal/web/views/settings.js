@@ -61,6 +61,28 @@ function accountSection(account, { status, attempt, redraw, signOut }) {
     return h("li", { class: "line" }, h("span", {}, entry.name, h("span", { class: "muted-text" }, " · not connected")), connectForm);
   });
 
+  // Deleting one's own account: what goes with it is shown before anything is asked.
+  const leaving = h("div", {});
+  const showLeaving = () => attempt(async () => {
+    const plan = await api.removalPlan();
+    if (plan.blocked.length) {
+      replace(leaving, plan.blocked.map((reason) => notice(reason, "warn")));
+      return;
+    }
+    const proof = h("input", { type: account.has_password ? "password" : "text", id: "leave-proof", autocomplete: account.has_password ? "current-password" : "off",
+      placeholder: account.has_password ? "Your password" : account.account.login });
+    replace(leaving,
+      h("p", { class: "muted" }, plan.vaults_to_delete.length
+        ? `These vaults are only yours and are deleted with everything in them: ${plan.vaults_to_delete.join(", ")}.`
+        : "No vault is only yours, so no notes are deleted."),
+      plan.vaults_to_leave.length ? h("p", { class: "muted" }, `You leave: ${plan.vaults_to_leave.join(", ")}; the people who share them keep them.`) : null,
+      h("label", { for: "leave-proof" }, account.has_password ? "Your password" : "Type your sign-in name to confirm"),
+      h("div", { class: "inline-form" }, proof, twoStepButton("Delete my account", "Delete it for good?", () => attempt(async () => {
+        await api.deleteAccount(account.has_password ? proof.value : "", account.has_password ? "" : proof.value);
+        location.assign("/");
+      }))));
+  });
+
   const others = account.sessions.filter((entry) => !entry.current);
   return [
     h("section", { class: "card section" },
@@ -90,6 +112,11 @@ function accountSection(account, { status, attempt, redraw, signOut }) {
           h("span", { class: "muted-text" }, ` · since ${formatDate(entry.created.slice(0, 10))}`)),
         entry.current ? null : actionButton("Sign out", () => attempt(async () => { await api.endSession(entry.id); await redraw(); }), { kind: "small" })))),
       others.length > 1 ? actionButton("Sign out all the others", () => attempt(async () => { await api.endOtherSessions(); await redraw(); })) : null),
+    h("section", { class: "card section" },
+      h("h1", {}, "Delete my account"),
+      h("p", { class: "muted" }, "Your sign-in, your tokens and every vault that is only yours are deleted for good. Download a copy of your vaults first (Vaults and sharing)."),
+      leaving,
+      h("div", {}, h("button", { type: "button", class: "button", onClick: showLeaving }, "What would be deleted?"))),
     !account.has_password ? null : h("section", { class: "card section" },
       h("h1", {}, "Recovery codes"),
       h("p", { class: "muted" }, account.recovery_codes_left

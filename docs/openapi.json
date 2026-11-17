@@ -1,6 +1,22 @@
 {
   "components": {
     "schemas": {
+      "AdminRemoval": {
+        "properties": {
+          "confirm": {
+            "description": "The account's sign-in name, typed again",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Confirm",
+            "type": "string"
+          }
+        },
+        "required": [
+          "confirm"
+        ],
+        "title": "AdminRemoval",
+        "type": "object"
+      },
       "AppSignInFinish": {
         "properties": {
           "code": {
@@ -555,6 +571,25 @@
         "title": "PersonNew",
         "type": "object"
       },
+      "Proof": {
+        "description": "What a person gives to confirm something that cannot be undone: their password, or,\nfor an account that signs in only through another service, the name of what is deleted.",
+        "properties": {
+          "confirm": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Confirm",
+            "type": "string"
+          },
+          "password": {
+            "default": "",
+            "maxLength": 1024,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "title": "Proof",
+        "type": "object"
+      },
       "ProviderForget": {
         "properties": {
           "forget": {
@@ -1066,6 +1101,44 @@
   "openapi": "3.1.0",
   "paths": {
     "/v1/account": {
+      "delete": {
+        "description": "Delete one's own account for good, with the vaults only one belongs to.\nNeeds the password, or, for an account without one, the sign-in name typed.",
+        "operationId": "account_delete_v1_account_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Proof"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Account Delete",
+        "tags": [
+          "account"
+        ]
+      },
       "get": {
         "operationId": "account_show_v1_account_get",
         "responses": {
@@ -1288,6 +1361,26 @@
           }
         },
         "summary": "Account Recovery Codes",
+        "tags": [
+          "account"
+        ]
+      }
+    },
+    "/v1/account/removal": {
+      "get": {
+        "description": "What deleting one's own account would delete, and anything that stops it.",
+        "operationId": "account_removal_plan_v1_account_removal_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Account Removal Plan",
         "tags": [
           "account"
         ]
@@ -1547,6 +1640,57 @@
         ]
       }
     },
+    "/v1/admin/people/{account_id}": {
+      "delete": {
+        "description": "Remove someone's account for good, with the vaults only they belonged to. Their sign-in name must be typed again.",
+        "operationId": "admin_remove_person_v1_admin_people__account_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminRemoval"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Remove Person",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/v1/admin/people/{account_id}/admin": {
       "post": {
         "operationId": "admin_person_admin_v1_admin_people__account_id__admin_post",
@@ -1642,6 +1786,47 @@
           }
         },
         "summary": "Admin Person Disable",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/people/{account_id}/removal": {
+      "get": {
+        "description": "What removing someone would delete, and anything that stops it.",
+        "operationId": "admin_removal_plan_v1_admin_people__account_id__removal_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Removal Plan",
         "tags": [
           "admin"
         ]
@@ -4426,6 +4611,61 @@
         "summary": "Status",
         "tags": [
           "service"
+        ]
+      }
+    },
+    "/v1/vault": {
+      "delete": {
+        "description": "Delete the open vault for good, with everything in it. Needs the password (or the vault's name, typed).",
+        "operationId": "vault_delete_v1_vault_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Proof"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Vault Delete",
+        "tags": [
+          "account"
+        ]
+      }
+    },
+    "/v1/vault/export": {
+      "get": {
+        "description": "Everything in the open vault, decrypted, as a zip: notes as Markdown, the files, receipts.csv. Owners only.",
+        "operationId": "vault_export_readable_v1_vault_export_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Vault Export Readable",
+        "tags": [
+          "account"
         ]
       }
     },

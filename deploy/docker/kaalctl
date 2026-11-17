@@ -8,6 +8,10 @@
 #   kaalctl key-backup FILE        write a copy of the key to FILE (keep it off this machine)
 #   kaalctl key-restore FILE       put a saved key back on an installation that has lost its key
 #   kaalctl backup-now             make a copy of everything now
+#   kaalctl backups                list the copies kept here, newest last
+#   kaalctl backup-copy NAME DIR   copy one of them out of Docker into DIR (to take it off this machine)
+#   kaalctl restore NAME           put everything back as that copy has it; what is there now is kept aside
+#   kaalctl export-readable FILE   everything in the first vault, decrypted, as a zip (keep it safe)
 #   kaalctl run COMMAND...         run a kaal or kaal-server command inside the container,
 #                                  for example: kaalctl run kaal-server account list
 #   kaalctl stop | start           stop or start Kaal; nothing stored is touched
@@ -86,10 +90,10 @@ key-restore)
     [ $# -eq 1 ] || stop "say which: kaalctl key-restore FILE"
     [ -s "$1" ] || stop "$1 is missing or empty"
     # Looked at before anything is stopped, so a refusal leaves Kaal running as it was.
-    docker compose run --rm --no-deps -T --entrypoint sh kaal -c '[ ! -s "$KAAL_KEY_FILE" ]' > /dev/null 2>&1 \
+    docker compose --progress quiet run --rm --no-deps -T --entrypoint sh kaal -c '[ ! -s "$KAAL_KEY_FILE" ]' > /dev/null 2>&1 \
         || stop "this installation already has a key; it is not replaced"
     docker compose stop kaal backup > /dev/null 2>&1 || true
-    docker compose run --rm --no-deps -T --entrypoint sh kaal -c 'umask 077; cat > "$KAAL_KEY_FILE"' < "$1" > /dev/null 2>&1 \
+    docker compose --progress quiet run --rm --no-deps -T --entrypoint sh kaal -c 'umask 077; cat > "$KAAL_KEY_FILE"' < "$1" > /dev/null 2>&1 \
         || stop "the key could not be put back"
     docker compose up -d > /dev/null 2>&1 || true
     healthy || stop "the key is in place but Kaal did not come up: it may be the wrong key. See: kaalctl logs"
@@ -97,6 +101,39 @@ key-restore)
     ;;
 backup-now)
     docker compose exec -T kaal kaal backup --keep "${KAAL_BACKUP_KEEP:-14}"
+    ;;
+backups)
+    docker compose --progress quiet run --rm --no-deps -T --entrypoint sh kaal -c 'ls -1 "$KAAL_BACKUP_DIR" 2>/dev/null | grep -E "^[0-9]{8}T[0-9]{6}Z$" || true'
+    ;;
+backup-copy)
+    [ $# -eq 2 ] || stop "say which and where: kaalctl backup-copy NAME DIR (see kaalctl backups)"
+    printf '%s' "$1" | grep -Eq '^[0-9]{8}T[0-9]{6}Z$' || stop "$1 is not the name of a backup (see kaalctl backups)"
+    [ -d "$2" ] || stop "$2 is not a folder"
+    [ ! -e "$2/$1" ] || stop "$2/$1 already exists"
+    docker compose --progress quiet cp "kaal:/srv/kaal/backups/$1" "$2/$1" > /dev/null 2>&1 || stop "the copy failed; is Kaal running? (kaalctl start)"
+    chmod -R go-rwx "$2/$1"
+    echo "Copied to $2/$1. It is encrypted except the list of accounts; keep the key somewhere else."
+    ;;
+restore)
+    [ $# -eq 1 ] || stop "say which: kaalctl restore NAME (see kaalctl backups)"
+    printf '%s' "$1" | grep -Eq '^[0-9]{8}T[0-9]{6}Z$' || stop "$1 is not the name of a backup (see kaalctl backups)"
+    echo "==> Stopping Kaal"
+    docker compose stop kaal backup > /dev/null 2>&1 || true
+    echo "==> Restoring $1 (what is there now is moved aside, not deleted)"
+    docker compose --progress quiet run --rm --no-deps -T kaal kaal restore "/srv/kaal/backups/$1" || { docker compose up -d > /dev/null 2>&1; stop "the restore did not happen; Kaal is running as it was"; }
+    docker compose up -d > /dev/null 2>&1 || true
+    healthy || stop "Kaal did not come up after the restore. See: kaalctl logs"
+    echo "==> Restored, and Kaal is running"
+    ;;
+export-readable)
+    [ $# -eq 1 ] || stop "say where: kaalctl export-readable FILE.zip"
+    [ ! -e "$1" ] || stop "$1 already exists; choose another name"
+    # The export is written inside the container, then streamed out; any failure on the way counts.
+    docker compose exec -T kaal sh -c 'out="$KAAL_TMP_DIR/readable-$$.zip"; kaal export-readable --output "$out" > /dev/null || exit 1; cat "$out"; done=$?; rm -f "$out"; exit $done' > "$1.partial" \
+        || { rm -f "$1.partial"; stop "the export failed"; }
+    [ -s "$1.partial" ] || { rm -f "$1.partial"; stop "the export came out empty"; }
+    chmod 600 "$1.partial" && mv "$1.partial" "$1"
+    echo "Everything in the first vault, readable, is in $1. Anyone with this file can read it all."
     ;;
 run)
     [ $# -ge 1 ] || stop "say what: kaalctl run kaal-server account list"
@@ -109,7 +146,7 @@ start)
     docker compose up -d > /dev/null 2>&1 && healthy && echo "Running at $(sed -n 's/^KAAL_PUBLIC_URL=//p' .env)"
     ;;
 help | -h | --help)
-    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
     ;;
 *)
     stop "unknown command $command (see: kaalctl help)"

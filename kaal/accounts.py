@@ -375,9 +375,50 @@ class AccountStore:
             return self._vault(db.execute("SELECT * FROM vaults WHERE id = ?", (vault_id,)).fetchone())
 
     def remove_vault_record(self, vault_id: str) -> None:
-        """Forget a vault that was recorded but whose folder could not be made."""
+        """Forget a vault: its record and who belonged to it. The folder is the caller's to remove."""
         with self._db(write=True) as db:
             db.execute("DELETE FROM vaults WHERE id = ?", (vault_id,))
+            if db.execute("SELECT 1 FROM meta WHERE key = 'default_vault' AND value = ?", (vault_id,)).fetchone():
+                db.execute("DELETE FROM meta WHERE key = 'default_vault'")
+
+    def plan_account_removal(self, account_id: str) -> dict[str, Any]:
+        """What removing an account would do, or why it cannot be removed yet.
+
+        Returns {"account", "vaults_to_delete": [...], "vaults_to_leave": [...], "blocked": [reasons]}.
+        A vault the person alone belongs to is deleted with them. A vault they own
+        together with others but are its only owner blocks removal: someone else
+        must become an owner first, so nobody is left with a vault nobody can run.
+        The last working administrator cannot be removed while anyone else has an account.
+        """
+        with self._db() as db:
+            row = db.execute("SELECT * FROM accounts WHERE id = ? OR login = ?", (account_id, account_id)).fetchone()
+            if row is None:
+                raise AccountError("No such account.")
+            blocked: list[str] = []
+            if row["is_admin"] and not db.execute("SELECT 1 FROM accounts WHERE is_admin = 1 AND disabled_at IS NULL AND id != ?", (row["id"],)).fetchone():
+                others = db.execute("SELECT COUNT(*) FROM accounts WHERE id != ?", (row["id"],)).fetchone()[0]
+                blocked.append("This is the only administrator. Make someone else an administrator first." if others
+                               else "This is the installation's only account, so it cannot be removed.")
+            to_delete, to_leave = [], []
+            for vault in db.execute("SELECT v.*, m.role FROM memberships m JOIN vaults v ON v.id = m.vault_id WHERE m.account_id = ? ORDER BY m.rowid", (row["id"],)):
+                members = db.execute("SELECT COUNT(*) FROM memberships WHERE vault_id = ?", (vault["id"],)).fetchone()[0]
+                if members == 1:
+                    to_delete.append({"id": vault["id"], "name": vault["name"]})
+                    continue
+                if vault["role"] == "owner" and not db.execute(
+                        "SELECT 1 FROM memberships WHERE vault_id = ? AND role = 'owner' AND account_id != ?", (vault["id"], row["id"])).fetchone():
+                    blocked.append(f"“{vault['name']}” is shared with others and this is its only owner. Make someone else an owner of it first.")
+                    continue
+                to_leave.append({"id": vault["id"], "name": vault["name"]})
+        return {"account": self._account(row), "vaults_to_delete": to_delete, "vaults_to_leave": to_leave, "blocked": blocked}
+
+    def remove_account(self, account_id: str) -> None:
+        """Forget an account and everything that hangs off it (password, sessions, codes,
+        connections, memberships). Its vaults and tokens are the caller's to deal with first."""
+        with self._db(write=True) as db:
+            db.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+            if db.execute("SELECT 1 FROM meta WHERE key = 'default_account' AND value = ?", (account_id,)).fetchone():
+                db.execute("DELETE FROM meta WHERE key = 'default_account'")
 
     def vault(self, vault_id: str) -> dict[str, Any] | None:
         with self._db() as db:

@@ -3004,6 +3004,125 @@ def export_vault(args: argparse.Namespace) -> None:
     emit({"status": "exported", "path": str(out), "bytes": out.stat().st_size, "sha256": _file_sha256(out), "notes": notes, "files": files}, indent=2)
 
 
+READABLE_RECEIPT_COLUMNS = ("id", "title", "status", "person", "patient_name", "provider", "insurer", "service_date", "paid_date",
+                            "amount", "amount_due", "reimbursed_at", "reimbursement_note", "trashed", "files")
+_READABLE_UNSAFE = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]+')
+
+
+def _readable_name(text: str, fallback: str, limit: int = 80) -> str:
+    """A file name anyone's computer accepts, kept recognisable."""
+    cleaned = _READABLE_UNSAFE.sub(" ", text or "").strip().strip(".")
+    cleaned = " ".join(cleaned.split())[:limit].strip()
+    return cleaned or fallback
+
+
+def _front_matter(fields: dict[str, Any]) -> str:
+    lines = ["---"]
+    for key, value in fields.items():
+        if value in (None, "", []):
+            continue
+        lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
+    lines.append("---")
+    return "\n".join(lines) + "\n\n"
+
+
+def export_readable(args: argparse.Namespace) -> None:
+    """Write everything in the vault, decrypted, to a new zip file (mode 600).
+
+    For leaving Kaal, or keeping a copy that needs no key: each note as a Markdown
+    file with its files beside it, each receipt's original file, and the receipts
+    as a spreadsheet (receipts.csv). Anyone who has the file can read all of it.
+    """
+    import csv
+    import io
+    import zipfile
+
+    init_if_needed()
+    out = Path(args.output).expanduser().resolve()
+    if out.exists() or out.is_symlink():
+        die(f"Output exists: {out}")
+    if out.is_relative_to(current_vault().root.resolve()):
+        die("Write the export outside the vault.")
+    counts = {"notes": 0, "receipts": 0, "files": 0}
+    rows: list[dict[str, Any]] = []
+    with vault_capture_lock():
+        index = load_index()
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as handle, zipfile.ZipFile(handle, "w", zipfile.ZIP_DEFLATED) as archive:
+                taken: set[str] = set()
+
+                def unique(path: str) -> str:
+                    stem, dot, suffix = path.rpartition(".") if "." in path.rsplit("/", 1)[-1] else (path, "", "")
+                    candidate, number = path, 2
+                    while candidate.lower() in taken:
+                        candidate = f"{stem} ({number}){dot}{suffix}" if dot else f"{path} ({number})"
+                        number += 1
+                    taken.add(candidate.lower())
+                    return candidate
+
+                for meta in index.get("notes", []):
+                    receipt = is_medical_receipt(meta)
+                    trashed = bool(meta.get("trashed_at"))
+                    top = ("Trash/" if trashed else "") + ("Receipts" if receipt else "Notes")
+                    stem = unique(f"{top}/{_readable_name(meta.get('title', ''), meta['id'])}")
+                    folder_name = stem.rsplit("/", 1)[-1]
+                    saved: list[str] = []
+                    links: dict[str, str] = {}
+                    for attachment in meta.get("attachments", []):
+                        data = attachment_original_bytes(meta, attachment)
+                        name = _readable_name(attachment.get("name", ""), attachment["id"], 120)
+                        path = unique(f"{stem}/{name}")
+                        archive.writestr(path, data)
+                        counts["files"] += 1
+                        relative = f"{folder_name}/{path.rsplit('/', 1)[-1]}"
+                        saved.append(relative)
+                        # The note's text refers to its files by id; point those at the copies instead.
+                        links[str(attachment["id"]).lower()] = relative
+                        resource = str((attachment.get("source") or {}).get("resource_id") or "").lower()
+                        if resource:
+                            links[resource] = relative
+                    body = load_note(meta).get("body", "")
+
+                    def relink(match: re.Match) -> str:
+                        target = links.get((match.group(2) or match.group(3) or "").lower())
+                        return f"]({target.replace(' ', '%20')})" if target else match.group(0)
+
+                    body = re.sub(r"\]\(\s*(:/([0-9a-fA-F]{32})|attachment:([0-9a-fA-F]{6,32}))\s*\)", relink, body)
+                    fields: dict[str, Any] = {"title": meta.get("title", ""), "tags": meta.get("tags", []), "created": meta.get("created", ""),
+                                              "updated": meta.get("updated", ""), "kaal_id": meta["id"], "trashed": meta.get("trashed_at") or ""}
+                    source = meta.get("source") or {}
+                    if source.get("url"):
+                        fields["source"] = source["url"]
+                    archive.writestr(f"{stem}.md", _front_matter(fields) + body + ("\n" if body and not body.endswith("\n") else ""))
+                    counts["receipts" if receipt else "notes"] += 1
+                    if receipt:
+                        state = meta.get("receipt") or {}
+                        values = state.get("fields") or {}
+                        rows.append({"id": meta["id"], "title": meta.get("title", ""), "status": state.get("status", ""), "person": state.get("person", ""),
+                                     **{key: values.get(key, "") for key in ("patient_name", "provider", "insurer", "service_date", "paid_date", "amount", "amount_due")},
+                                     "reimbursed_at": state.get("reimbursed_at") or "", "reimbursement_note": state.get("reimbursement_note") or "",
+                                     "trashed": "yes" if trashed else "", "files": " ; ".join(f"{top}/{item}" for item in saved)})
+                sheet = io.StringIO()
+                writer = csv.DictWriter(sheet, fieldnames=READABLE_RECEIPT_COLUMNS, extrasaction="ignore")
+                writer.writeheader()
+                for row in rows:
+                    # A spreadsheet must not mistake a value for a formula.
+                    writer.writerow({key: ("'" + value if isinstance(value, str) and value[:1] in "=+-@\t\r" else value) for key, value in row.items()})
+                archive.writestr("receipts.csv", sheet.getvalue())
+                archive.writestr("README.txt", (
+                    "A copy of a Kaal vault, readable without Kaal.\n\n"
+                    "Notes/     each note as a Markdown file, its pictures and files in the folder of the same name\n"
+                    "Receipts/  each medical receipt: the original file, and a Markdown file with what was read from it\n"
+                    "Trash/     what was in the Trash\n"
+                    "receipts.csv  every receipt's values, for a spreadsheet\n\n"
+                    "Nothing here is encrypted. Keep this file as safe as the vault itself.\n"))
+        except BaseException:
+            out.unlink(missing_ok=True)
+            raise
+    emit({"status": "exported", "path": str(out), "bytes": out.stat().st_size, **counts}, indent=2)
+
+
 def _mkdirs_700(path: Path) -> None:
     missing = []
     while not path.exists():
@@ -3194,6 +3313,107 @@ def _backup_installation(work: Path, previous: Path | None, counts: dict[str, in
             _backup_tree(folder, target, earlier, counts)
         saved += 1
     return {"accounts": True, "other_vaults": saved}
+
+def _copy_tree_private(source: Path, target: Path, skip_top: frozenset[str] = frozenset()) -> int:
+    """Copy a folder, giving the copy owner-only permissions. Returns how many files were copied."""
+    copied = 0
+    _mkdirs_700(target)
+    for root, dirs, names in os.walk(source):
+        rel = Path(root).relative_to(source)
+        if rel == Path("."):
+            dirs[:] = [name for name in dirs if name not in skip_top]
+        for name in dirs:
+            if not os.path.islink(os.path.join(root, name)):
+                _mkdirs_700(target / rel / name)
+        for name in names:
+            from_path = Path(root) / name
+            if from_path.is_symlink() or not from_path.is_file():
+                continue
+            to_path = target / rel / name
+            shutil.copy2(from_path, to_path)
+            os.chmod(to_path, 0o600)
+            copied += 1
+    return copied
+
+
+def _check_vault(folder: Path) -> dict[str, Any]:
+    """Whether the key opens a vault and its files are all there. Counts and problem kinds only."""
+    with use_vault(Vault(folder)):
+        result, _ = call_captured(verify_vault, SimpleNamespace(deep=False))
+    return {"notes": result.get("notes", 0), "problems": sorted({problem["kind"] for problem in result.get("problems", [])})}
+
+
+def restore_backup(args: argparse.Namespace) -> None:
+    """Put an installation back the way a backup (from `kaal backup`) holds it.
+
+    Kaal must not be running. The first vault comes from the backup's top level;
+    when the backup has them, the accounts, the tokens and the other vaults come
+    from its _installation folder. Nothing is deleted: what is there now is moved
+    into a dated before-restore folder first. The key must be the one the backup
+    was made with; it is checked before anything is moved.
+    """
+    backup = Path(args.backup).expanduser().resolve()
+    if not (backup / "index.json").is_file():
+        die("That is not a Kaal backup: it has no index.json.", kind="not_found")
+    first = current_vault().root.resolve()
+    if first.is_relative_to(backup) or backup.is_relative_to(first):
+        die("The backup and the vault must be separate folders.")
+    extra = backup / BACKUP_INSTALLATION_DIR
+    installation = (extra / "accounts.db").is_file()
+    try:
+        before = _check_vault(backup)
+    except KaalError:
+        die("The key cannot open this backup. Restore needs the key the backup was made with.", kind="forbidden")
+    if "decrypt_failed" in before["problems"]:
+        die("The key cannot open this backup. Restore needs the key the backup was made with.", kind="forbidden")
+    home = Path(os.environ.get("KAAL_HOME") or first.parent).expanduser().resolve()
+    tokens_file = Path(os.environ.get("KAAL_TOKENS_FILE") or home / "tokens.json").expanduser().resolve()
+    from kaal import accounts as account_store
+
+    # Everything that belongs to the installation now, so it can be moved aside as a whole.
+    present: list[Path] = [first]
+    if installation:
+        present += [home / "accounts.db", home / "accounts.db-wal", home / "accounts.db-shm", tokens_file]
+        if (home / "accounts.db").is_file():
+            current = account_store.AccountStore(home / "accounts.db", home)
+            present += [current.folder_of(record).resolve() for record in current.vaults()]
+    present = [path for path in dict.fromkeys(present) if path.exists()]
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    aside = home / f"before-restore-{stamp}"
+    moved = 0
+    if present:
+        _mkdirs_700(aside)
+        for number, path in enumerate(present):
+            try:
+                label = path.relative_to(home).as_posix().replace("/", "__")
+            except ValueError:
+                label = f"outside-{number}-{path.name}"
+            os.rename(path, aside / label)
+            moved += 1
+    files = _copy_tree_private(backup, first, frozenset({BACKUP_INSTALLATION_DIR}))
+    checked = {"first_vault": _check_vault(first)}
+    other_vaults = 0
+    if installation:
+        shutil.copy2(extra / "accounts.db", home / "accounts.db")
+        os.chmod(home / "accounts.db", 0o600)
+        if (extra / "tokens.json").is_file():
+            _mkdirs_700(tokens_file.parent)
+            shutil.copy2(extra / "tokens.json", tokens_file)
+            os.chmod(tokens_file, 0o600)
+        restored = account_store.AccountStore(home / "accounts.db", home)
+        for record in restored.vaults():
+            folder = restored.folder_of(record).resolve()
+            saved = extra / "vaults" / record["id"]
+            if folder == first or not saved.is_dir():
+                continue
+            files += _copy_tree_private(saved, folder)
+            checked[record["id"]] = _check_vault(folder)
+            other_vaults += 1
+    trouble = sorted({kind for result in checked.values() for kind in result["problems"]})
+    emit({"status": "restored" if not trouble else "restored_with_problems", "backup": backup.name, "files": files, "accounts": installation,
+          "other_vaults": other_vaults, "notes": sum(result["notes"] for result in checked.values()), "problems": trouble,
+          "moved_aside": str(aside) if moved else ""}, indent=2)
+
 
 @holds_vault_lock
 def delete_note(args: argparse.Namespace) -> None:

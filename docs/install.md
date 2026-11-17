@@ -97,6 +97,36 @@ at any time.
 
 The key is never included in a backup.
 
+## Restoring a backup
+
+```bash
+deploy/docker/kaalctl backups                 # the copies kept here, newest last
+deploy/docker/kaalctl restore 20260101T020000Z
+```
+
+Kaal is stopped, everything is put back as that copy has it (vaults, accounts
+and tokens), and Kaal starts again. What was there before is not deleted: it is
+moved into a `before-restore-…` folder in the data volume. The key must be the
+one the copy was made with; if it is not, nothing is changed.
+
+To keep copies somewhere other than this machine, copy one out of Docker and
+take it elsewhere:
+
+```bash
+deploy/docker/kaalctl backup-copy 20260101T020000Z ~/kaal-backups
+```
+
+A copy is encrypted, except the list of accounts; it is useless without the key,
+so keep the key apart from it.
+
+## Leaving
+
+`deploy/docker/kaalctl export-readable ~/kaal-copy.zip` writes everything in
+the first vault, decrypted: notes as Markdown, the files, and receipts as a
+spreadsheet. Each person can download their own vaults the same way in the web
+app (Settings → Vaults and sharing → Download a copy), and delete their account
+under Settings.
+
 ## Settings
 
 Extra settings go in `deploy/docker/kaal.env`, one `NAME=value` per line, and

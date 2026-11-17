@@ -12,6 +12,7 @@ strings, file contents or tokens.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import contextlib
 import hashlib
 import json
@@ -324,6 +325,10 @@ class Vaults:
     def all(self) -> list[core.Vault]:
         return [vault for vault in (self.get(record["id"]) for record in self.store.vaults()) if vault is not None]
 
+    def forget(self, vault_id: str) -> None:
+        with self._lock:
+            self._open.pop(vault_id, None)
+
 
 @dataclass
 class AppState:
@@ -374,6 +379,60 @@ def open_store(settings: Settings) -> accounts.AccountStore:
     if vault.index_path.is_file() and store.adopt(vault.root):
         log.info("accounts: adopted the existing vault as the first account's")
     return store
+
+
+def delete_vault(settings: Settings, store: accounts.AccountStore, token_store: tokens.TokenStore, vault_id: str,
+                 registry: "Vaults | None" = None) -> dict[str, Any]:
+    """Delete a vault for good: its folder, its record, who belonged to it and the tokens made for it.
+
+    The installation's first vault is kept: backups and tokens from before
+    accounts existed depend on it. Copies already in backups remain until they
+    are pruned.
+    """
+    record = store.vault(vault_id)
+    if record is None:
+        raise accounts.AccountError("No such vault.")
+    folder = store.folder_of(record).resolve()
+    if folder == Path(settings.vault).expanduser().resolve():
+        raise accounts.AccountError(f"“{record['name']}” is this installation's first vault, which backups and older tokens depend on, "
+                                    "so it cannot be deleted. Move to the Trash what you do not want to keep.")
+    opened = registry.get(vault_id) if registry is not None else core.Vault(folder)
+    if opened is not None and folder.exists():
+        with core.use_vault(opened), core.vault_capture_lock():
+            shutil.rmtree(folder)
+    if registry is not None:
+        registry.forget(vault_id)
+    store.remove_vault_record(vault_id)
+    return {"id": record["id"], "name": record["name"], "tokens_revoked": token_store.revoke_where(vault=vault_id)}
+
+
+def removal_plan(settings: Settings, store: accounts.AccountStore, account_id: str) -> dict[str, Any]:
+    """What removing an account would delete, and anything that stops it."""
+    plan = store.plan_account_removal(account_id)
+    first = Path(settings.vault).expanduser().resolve()
+    for vault in plan["vaults_to_delete"]:
+        record = store.vault(vault["id"])
+        if record is not None and store.folder_of(record).resolve() == first:
+            plan["blocked"].append(f"“{vault['name']}” is this installation's first vault and cannot be deleted. Share it with someone and make them its owner first.")
+    return plan
+
+
+def remove_account(settings: Settings, store: accounts.AccountStore, token_store: tokens.TokenStore, account_id: str,
+                   registry: "Vaults | None" = None) -> dict[str, Any]:
+    """Remove an account for good, with the vaults only it belonged to and every token it made."""
+    plan = removal_plan(settings, store, account_id)
+    if plan["blocked"]:
+        raise accounts.AccountError(" ".join(plan["blocked"]))
+    deleted = [delete_vault(settings, store, token_store, vault["id"], registry)["name"] for vault in plan["vaults_to_delete"]]
+    revoked = token_store.revoke_where(account=plan["account"]["id"])
+    store.remove_account(plan["account"]["id"])
+    return {"status": "removed", "account": plan["account"]["login"], "vaults_deleted": deleted,
+            "vaults_left": [vault["name"] for vault in plan["vaults_to_leave"]], "tokens_revoked": revoked}
+
+
+def _public_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    return {"login": plan["account"]["login"], "vaults_to_delete": [vault["name"] for vault in plan["vaults_to_delete"]],
+            "vaults_to_leave": [vault["name"] for vault in plan["vaults_to_leave"]], "blocked": plan["blocked"]}
 
 
 def create_vault(store: accounts.AccountStore, name: str, owner: str) -> dict[str, Any]:
@@ -905,6 +964,17 @@ class AppSignInStart(BaseModel):
     challenge: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$")
 
 
+class Proof(BaseModel):
+    """What a person gives to confirm something that cannot be undone: their password, or,
+    for an account that signs in only through another service, the name of what is deleted."""
+    password: str = Field(default="", max_length=1024)
+    confirm: str = Field(default="", max_length=200)
+
+
+class AdminRemoval(BaseModel):
+    confirm: str = Field(min_length=1, max_length=200, description="The account's sign-in name, typed again")
+
+
 class AppSignInFinish(BaseModel):
     code: str = Field(min_length=1, max_length=200)
     verifier: str = Field(min_length=43, max_length=128, pattern=r"^[A-Za-z0-9._~-]+$")
@@ -1072,7 +1142,8 @@ def create_app(settings: Settings) -> FastAPI:
         told: dict[str, Any] = {"name": record["name"], "scopes": record.get("scopes", [])}
         if record.get("person"):
             person = record["person"]
-            told["account"] = {"login": person["login"], "name": person["name"], "admin": person["admin"]}
+            told["account"] = {"login": person["login"], "name": person["name"], "admin": person["admin"],
+                               "has_password": app.state.kaal.accounts.password_hash(person["id"]) is not None}
             told["vaults"] = [{"id": vault["id"], "name": vault["name"], "role": vault["role"]} for vault in record["vaults"]]
             told["vault"] = next((vault for vault in told["vaults"] if vault["id"] == record["vault"]), None)
         return told
@@ -1227,6 +1298,28 @@ def create_app(settings: Settings) -> FastAPI:
 
     # --- one's own account
 
+    @app.get("/v1/account/removal", tags=["account"])
+    def account_removal_plan(request: Request, person: dict[str, Any] = require_person()):
+        """What deleting one's own account would delete, and anything that stops it."""
+        state = S(request)
+        return answer(_public_plan(removal_plan(state.settings, state.accounts, person["account"])))
+
+    @app.delete("/v1/account", tags=["account"])
+    def account_delete(request: Request, body: Proof, person: dict[str, Any] = require_person()):
+        """Delete one's own account for good, with the vaults only one belongs to.
+        Needs the password, or, for an account without one, the sign-in name typed."""
+        state = S(request)
+        if not proved(state, person, body, person["person"]["login"]):
+            return _error(403, "That is not right, so nothing was deleted.", "forbidden")
+        try:
+            done = remove_account(state.settings, state.accounts, state.tokens, person["account"], state.vaults)
+        except accounts.AccountError as error:
+            return _error(409, str(error), "conflict")
+        log.info("account deleted by its owner")
+        response = answer({"status": "removed", "vaults_deleted": done["vaults_deleted"]})
+        response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=state.settings.cookie_secure, samesite="strict")
+        return response
+
     @app.get("/v1/account", tags=["account"])
     def account_show(request: Request, person: dict[str, Any] = require_person()):
         state = S(request)
@@ -1337,6 +1430,43 @@ def create_app(settings: Settings) -> FastAPI:
             return _error(400, str(error), "invalid")
         return answer({"vault": {"id": vault["id"], "name": vault["name"], "role": "owner"}})
 
+    def proved(state: Any, person: dict[str, Any], body: Proof, name: str) -> bool:
+        """Whether a person confirmed with their password, or, having none, by typing ``name``."""
+        if state.accounts.password_hash(person["account"]) is not None:
+            return checked_password(state, person["person"], body.password, person["name"])
+        return body.confirm.strip() == name
+
+    @app.get("/v1/vault/export", tags=["account"], dependencies=[require("read", "reveal", "admin")], response_class=Response)
+    def vault_export_readable(request: Request):
+        """Everything in the open vault, decrypted, as a zip: notes as Markdown, the files, receipts.csv. Owners only."""
+        state = S(request)
+        workdir = Path(tempfile.mkdtemp(prefix="export-", dir=state.settings.tmp_dir))
+        out = workdir / "kaal.zip"
+        with state.in_vault():
+            try:
+                core.call_captured(core.export_readable, SimpleNamespace(output=str(out)))
+            except core.KaalError as error:
+                shutil.rmtree(workdir, ignore_errors=True)
+                return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind)
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return FileResponse(out, media_type="application/zip", filename=f"kaal-{stamp}.zip", background=BackgroundTask(shutil.rmtree, workdir, True))
+
+    @app.delete("/v1/vault", tags=["account"])
+    def vault_delete(request: Request, body: Proof, person: dict[str, Any] = require_owner()):
+        """Delete the open vault for good, with everything in it. Needs the password (or the vault's name, typed)."""
+        state = S(request)
+        vault = next((entry for entry in person["vaults"] if entry["id"] == person["vault"]), None)
+        if vault is None:
+            return _error(404, "You do not belong to that vault.", "not_found")
+        if not proved(state, person, body, vault["name"]):
+            return _error(403, "That is not right, so nothing was deleted.", "forbidden")
+        try:
+            done = delete_vault(state.settings, state.accounts, state.tokens, vault["id"], state.vaults)
+        except accounts.AccountError as error:
+            return _error(409, str(error), "conflict")
+        log.info("vault deleted by its owner")
+        return answer({"deleted": done["name"], **who(person_record(state, {"id": person["session"], "account": person["account"], "vault": None}))})
+
     @app.get("/v1/vault/members", tags=["account"])
     def vault_members(request: Request, person: dict[str, Any] = require_owner()):
         state = S(request)
@@ -1418,6 +1548,33 @@ def create_app(settings: Settings) -> FastAPI:
         except accounts.AccountError as error:
             missing = str(error).startswith("No account")
             return _error(404 if missing else 409, str(error), "not_found" if missing else "conflict")
+
+    @app.get("/v1/admin/people/{account_id}/removal", tags=["admin"])
+    def admin_removal_plan(request: Request, account_id: str, person: dict[str, Any] = require_admin()):
+        """What removing someone would delete, and anything that stops it."""
+        state = S(request)
+        try:
+            return answer(_public_plan(removal_plan(state.settings, state.accounts, account_id)))
+        except accounts.AccountError as error:
+            return _error(404, str(error), "not_found")
+
+    @app.delete("/v1/admin/people/{account_id}", tags=["admin"])
+    def admin_remove_person(request: Request, account_id: str, body: AdminRemoval, person: dict[str, Any] = require_admin()):
+        """Remove someone's account for good, with the vaults only they belonged to. Their sign-in name must be typed again."""
+        state = S(request)
+        target = state.accounts.account(account_id)
+        if target is None:
+            return _error(404, "No such account.", "not_found")
+        if target["id"] == person["account"]:
+            return _error(409, "To remove your own account, use Settings, Delete my account.", "conflict")
+        if body.confirm.strip().lower() != target["login"]:
+            return _error(400, "Type their sign-in name exactly to confirm.", "invalid")
+        try:
+            done = remove_account(state.settings, state.accounts, state.tokens, target["id"], state.vaults)
+        except accounts.AccountError as error:
+            return _error(409, str(error), "conflict")
+        log.info("account removed by an administrator")
+        return answer(done)
 
     @app.post("/v1/admin/sign-up", tags=["admin"])
     def admin_signup(request: Request, body: SignUpSetting, person: dict[str, Any] = require_admin()):
@@ -2035,6 +2192,19 @@ def _people(args: argparse.Namespace) -> None:
             out = [{**vault, "members": store.members(vault["id"])} for vault in store.vaults()]
         elif action == ("vault", "add"):
             out = {"status": "created", "vault": create_vault(store, args.name, args.owner)}
+        elif action == ("account", "remove"):
+            if not args.yes:
+                out = {"status": "would_remove", **_public_plan(removal_plan(settings, store, args.login))}
+            else:
+                out = remove_account(settings, store, tokens.TokenStore(settings.tokens_file), args.login)
+        elif action == ("vault", "remove"):
+            record = store.vault(args.vault)
+            if record is None:
+                raise accounts.AccountError("No such vault.")
+            if not args.yes:
+                out = {"status": "would_delete", "vault": record["name"], "members": [member["login"] for member in store.members(record["id"])]}
+            else:
+                out = {"status": "deleted", **delete_vault(settings, store, tokens.TokenStore(settings.tokens_file), args.vault)}
         elif action == ("vault", "grant"):
             out = {"status": "updated", "membership": store.grant(args.login, args.vault, args.role)}
         else:
@@ -2136,6 +2306,9 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--admin", action="store_true", help="May manage accounts and vaults")
     add.add_argument("--vault-name", default="", help="What to call their vault (default: My notes)")
     add.add_argument("--no-vault", action="store_true", help="Do not create a vault; grant them one with `vault grant`")
+    remove = account_sub.add_parser("remove", help="Delete an account for good, with the vaults only it belongs to")
+    remove.add_argument("login")
+    remove.add_argument("--yes", action="store_true", help="Really delete; without it, only say what would be deleted")
     for word, text in (("disable", "Stop an account from being used, keeping its data"), ("enable", "Let a disabled account be used again"),
                        ("password", "Set an account's password here, typed twice without being shown")):
         account_sub.add_parser(word, help=text).add_argument("login")
@@ -2155,6 +2328,9 @@ def build_parser() -> argparse.ArgumentParser:
     grant.add_argument("vault", help="Vault id")
     grant.add_argument("login")
     grant.add_argument("role", choices=accounts.ROLES)
+    vault_remove = vault_sub.add_parser("remove", help="Delete a vault for good, with everything in it")
+    vault_remove.add_argument("vault", help="Vault id")
+    vault_remove.add_argument("--yes", action="store_true", help="Really delete; without it, only say what would be deleted")
     ungrant = vault_sub.add_parser("ungrant", help="Take an account out of a vault")
     ungrant.add_argument("vault", help="Vault id")
     ungrant.add_argument("login")

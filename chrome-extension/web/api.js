@@ -101,6 +101,12 @@ export const api = {
   createVault: (name) => result(request("POST", "/v1/account/vaults", { json: { name } })).then((data) => data.vault),
   renameVault: (name) => result(request("POST", "/v1/vault/name", { json: { name } })).then((data) => data.vault),
   members: () => result(request("GET", "/v1/vault/members")),
+  // Deleting for good: each needs the password, or for an account without one the name typed.
+  deleteVault: (password, confirm) => result(request("DELETE", "/v1/vault", { json: { password, confirm } })),
+  removalPlan: () => result(request("GET", "/v1/account/removal")),
+  deleteAccount: (password, confirm) => result(request("DELETE", "/v1/account", { json: { password, confirm } })),
+  adminRemovalPlan: (accountId) => result(request("GET", `/v1/admin/people/${id(accountId)}/removal`)),
+  adminRemove: (accountId, confirm) => result(request("DELETE", `/v1/admin/people/${id(accountId)}`, { json: { confirm } })),
   setMember: (login, role) => result(request("POST", "/v1/vault/members", { json: { login, role } })).then((data) => data.members),
   removeMember: (accountId) => result(request("DELETE", `/v1/vault/members/${id(accountId)}`)).then((data) => data.members),
 
@@ -169,6 +175,8 @@ export async function fileAddress(path) {
   return URL.createObjectURL(await response.blob());
 }
 
+// Everything in the open vault, decrypted, as a zip (owners only).
+export const vaultExportUrl = () => "/v1/vault/export";
 export const previewUrl = (noteId, attachmentId, page = 1) => `/v1/medical/receipts/${id(noteId)}/attachments/${id(attachmentId)}/preview?page=${page}`;
 export const originalUrl = (noteId, attachmentId) => `/v1/medical/receipts/${id(noteId)}/attachments/${id(attachmentId)}/content`;
 export const noteFileUrl = (noteId, attachmentId) => `/v1/notes/${id(noteId)}/attachments/${id(attachmentId)}/content`;

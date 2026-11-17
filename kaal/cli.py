@@ -252,6 +252,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--output", required=True)
     sp.set_defaults(func=core.export_vault)
 
+    sp = sub.add_parser("restore", help="Put the installation back as a backup holds it (stop Kaal first); what is there now is moved aside, not deleted")
+    sp.add_argument("backup", help="The backup folder, for example /srv/kaal/backups/20260101T020000Z")
+    sp.set_defaults(func=core.restore_backup)
+
+    sp = sub.add_parser("export-readable", help="Write everything in the vault, decrypted, to a new zip: notes as Markdown, files, receipts.csv")
+    sp.add_argument("--output", required=True, help="The zip file to create")
+    sp.set_defaults(func=core.export_readable)
+
     sp = sub.add_parser("import", help="Restore a kaal export into an empty vault, then verify it")
     sp.add_argument("archive")
     sp.set_defaults(func=core.import_vault)

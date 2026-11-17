@@ -63,6 +63,8 @@ The web app is static files in `kaal/web/` (plain ES modules, no build step, no 
 
 The iPhone app is in `ios/` (SwiftUI, no dependencies; see `ios/README.md`). It signs in as a person through the web app's own sign-in page (`POST /v1/app-sign-ins`), reads answers by field name like the web app does, and must never run or load anything a note contains. Its tests need Xcode: `xcodebuild test -project ios/Kaal.xcodeproj -scheme Kaal -only-testing:KaalTests -destination 'platform=iOS Simulator,name=…'`. The screen-by-screen tests in `ios/KaalUITests/` run only against a server holding made-up data, named in `TEST_RUNNER_KAAL_UI_SERVER`; never point them at a real vault.
 
+Leaving and coming back: `kaal export-readable` (decrypted zip), `kaal restore` (a whole installation from a `kaal backup` folder; moves the current data aside, never deletes it), and account and vault deletion in `kaal/server.py` (`delete_vault`, `removal_plan`, `remove_account`). Deletion is permanent by design; keep the confirmations (password, or the name typed) and the rules in `AccountStore.plan_account_removal`.
+
 Tests use a throwaway key file, and never a real `~/.config/kaal/config.toml` (see `tests/conftest.py`); keep it that way. Run the full verification suite before reporting a code change complete:
 
 ```bash

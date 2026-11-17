@@ -55,7 +55,7 @@ def test_a_setup_link_lets_its_holder_choose_a_password_once(house):
     done = client.post("/v1/setup", json={"code": code, "password": GOOD, "name": "  Jane Doe "})
     assert done.status_code == 200
     told = done.json()["result"]
-    assert told["account"] == {"login": "owner", "name": "Jane Doe", "admin": True}
+    assert told["account"] == {"login": "owner", "name": "Jane Doe", "admin": True, "has_password": True}
     assert told["vault"]["name"] == "Main" and told["vault"]["role"] == "owner"
     assert told["scopes"] == ["read", "reveal", "write", "delete", "admin"]
     assert len(told["recovery_codes"]) == 8 and len(set(told["recovery_codes"])) == 8

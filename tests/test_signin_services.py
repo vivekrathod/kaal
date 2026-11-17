@@ -199,7 +199,7 @@ def test_where_sign_up_is_open_google_creates_an_account_with_its_own_vault(hous
     first = house.browser()
     assert house.through_google(first, "g-1", email="Jane.Doe@example.com", name="Jane Doe") == "/#/receipts"
     told = first.get("/v1/session").json()["result"]
-    assert told["account"] == {"login": "jane.doe", "name": "Jane Doe", "admin": False}
+    assert told["account"] == {"login": "jane.doe", "name": "Jane Doe", "admin": False, "has_password": False}
     assert told["vault"]["name"] == "My notes" and told["vault"]["role"] == "owner"
     shown = first.get("/v1/account").json()["result"]
     assert shown["has_password"] is False and shown["connections"][0]["connected"] is True
@@ -230,7 +230,7 @@ def test_a_setup_link_can_be_finished_with_google_instead_of_a_password(house):
     assert sam.post("/v1/sign-in/with/google", json={"setup_code": "not-a-code"}).status_code == 404
     assert house.through_google(sam, "g-sam", setup_code=code, email="sam@example.com", name="Sam Roe") == "/#/receipts"
     told = sam.get("/v1/session").json()["result"]
-    assert told["account"] == {"login": "sam", "name": "Sam Roe", "admin": False}
+    assert told["account"] == {"login": "sam", "name": "Sam Roe", "admin": False, "has_password": False}
     assert sam.get("/v1/account").json()["result"]["has_password"] is False
     assert house.store.password_hash(made["account"]["id"]) is None
     # The link is spent, and Google signs them in from now on.

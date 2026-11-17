@@ -141,7 +141,7 @@ def test_accounts_are_by_invitation_until_an_administrator_opens_sign_up(house):
     joined = stranger.post("/v1/sign-up", json={"login": "Stranger", "name": "A Stranger", "password": GOOD})
     assert joined.status_code == 200
     told = joined.json()["result"]
-    assert told["account"] == {"login": "stranger", "name": "A Stranger", "admin": False}
+    assert told["account"] == {"login": "stranger", "name": "A Stranger", "admin": False, "has_password": True}
     assert told["vault"]["role"] == "owner" and len(told["recovery_codes"]) == 8
     assert stranger.post("/v1/library/notes", json={"title": "Mine", "body": "b"}).status_code == 200
     assert admin.get("/v1/library/notes").json()["result"] == []

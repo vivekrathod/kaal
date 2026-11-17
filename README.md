@@ -292,6 +292,34 @@ files on disk and reports ids only. `kaal export --output FILE.tar` writes the
 vault exactly as stored (the key is not included). `kaal import FILE.tar`
 restores into an empty vault and verifies it.
 
+**Leaving, and coming back.**
+
+- **A readable copy.** `kaal export-readable --output FILE.zip` (or, for a
+  vault's owner, Settings → Vaults and sharing → Download a copy) writes
+  everything in a vault, decrypted: each note as a Markdown file with its files
+  beside it, each receipt's original file, and every receipt's values in
+  `receipts.csv`. It needs no key and no Kaal, so keep it as safe as the vault.
+- **Restoring a backup.** `kaal restore BACKUP_FOLDER`, with Kaal stopped, puts
+  the whole installation back the way a `kaal backup` folder has it: the
+  vaults, the accounts and the tokens. It first checks that the key opens the
+  backup, moves what is there now into a dated `before-restore-…` folder
+  instead of deleting it, and checks every restored vault afterwards.
+- **Deleting a vault.** An owner deletes the open vault under Settings → Vaults
+  and sharing, confirming with their password (or, for an account that signs
+  in only through another service, the vault's name). Everything in it goes,
+  for everyone who shares it, and tokens made for it stop working. The
+  installation's first vault cannot be deleted; backups and older tokens rely
+  on it. On the server: `kaal-server vault remove VAULT_ID --yes`.
+- **Deleting an account.** Settings → Delete my account shows what would go
+  first: the account, its tokens, and every vault only it belongs to. Vaults
+  shared with others stay with them, but the only owner of a shared vault must
+  make someone else an owner first, and the only administrator cannot leave.
+  Administrators remove someone else under Settings → People. On the server:
+  `kaal-server account remove LOGIN` says what would go, and `--yes` does it.
+
+Deleted data stays in the daily backups until they are pruned (14 days by
+default). To be rid of it sooner, delete the backups made since.
+
 ## Threat model
 
 **What encryption protects.** Every note body, attachment and extracted text

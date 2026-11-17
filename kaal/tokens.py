@@ -151,6 +151,19 @@ class TokenStore:
             self._save(records)
         return self._public(match)
 
+    def revoke_where(self, *, account: str | None = None, vault: str | None = None) -> int:
+        """Revoke every active token that names this account or this vault. Returns how many."""
+        if not account and not vault:
+            return 0
+        with self._lock:
+            records = [dict(r) for r in self._load()]
+            hit = [r for r in records if not r.get("revoked_at") and ((account and r.get("account") == account) or (vault and r.get("vault") == vault))]
+            for record in hit:
+                record["revoked_at"] = _now()
+            if hit:
+                self._save(records)
+        return len(hit)
+
     def set_scopes(self, name_or_id: str, scopes: Iterable[str]) -> dict[str, Any]:
         """Change what an active token may do. Its secret stays the same, so
         the devices using it stay signed in and see the change at once."""
