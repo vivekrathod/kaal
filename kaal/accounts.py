@@ -13,6 +13,7 @@ Roles cap what any credential of that person may do in that vault:
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import os
@@ -125,6 +126,18 @@ _MIGRATIONS: tuple[str, ...] = (
         expires TEXT NOT NULL
     );
     """,
+    # 4: an app on a person's own device (a phone) signs in as them, handed
+    # over by a browser they are already signed in on.
+    """
+    CREATE TABLE app_signins (
+        code_sha256 TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        vault_id TEXT,
+        challenge TEXT NOT NULL,
+        created TEXT NOT NULL,
+        expires TEXT NOT NULL
+    );
+    """,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 SESSION_PREFIX = "ks"
@@ -133,6 +146,8 @@ SESSION_TOUCH_SECONDS = 300   # how stale "last seen" may get before it is writt
 SETUP_HOURS = 24
 RECOVERY_CODE_COUNT = 8
 FLOW_MINUTES = 10             # how long a trip to a sign-in service and back may take
+APP_SIGNIN_MINUTES = 5        # how long an app has to collect the sign-in a browser approved for it
+APP_SESSION_DAYS = 365        # an app stays signed in longer than a browser: there is no sign-in page on it to return to
 _SERVICE_ID = re.compile(r"[a-z][a-z0-9-]{0,31}")
 
 
@@ -469,13 +484,13 @@ class AccountStore:
         return {"id": row["id"], "account": row["account_id"], "vault": row["vault_id"], "label": row["label"],
                 "created": row["created"], "last_seen": row["last_seen"], "expires": row["expires"]}
 
-    def start_session(self, account_id: str, vault_id: str | None, label: str = "") -> tuple[dict[str, Any], str]:
+    def start_session(self, account_id: str, vault_id: str | None, label: str = "", *, days: int = SESSION_DAYS) -> tuple[dict[str, Any], str]:
         """A new session and the cookie value for it, which is never stored."""
         session_id, secret = secrets.token_hex(8), secrets.token_urlsafe(32)
         now = _now()
         with self._db(write=True) as db:
             db.execute("INSERT INTO sessions (id, secret_sha256, account_id, vault_id, label, created, last_seen, expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                       (session_id, _sha(secret), account_id, vault_id, (label or "")[:80], now, now, _later(days=SESSION_DAYS)))
+                       (session_id, _sha(secret), account_id, vault_id, (label or "")[:80], now, now, _later(days=days)))
             row = db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         return self._session(row), f"{SESSION_PREFIX}_{session_id}_{secret}"
 
@@ -514,6 +529,31 @@ class AccountStore:
     def set_session_vault(self, session_id: str, vault_id: str) -> None:
         with self._db(write=True) as db:
             db.execute("UPDATE sessions SET vault_id = ? WHERE id = ?", (vault_id, session_id))
+
+    # --- app sign-ins: a browser the person is signed in on lets an app on their device in
+
+    def start_app_signin(self, account_id: str, vault_id: str | None, challenge: str) -> str:
+        """Approve one app sign-in. Returns a code that works once, for a few minutes, and
+        only together with the secret whose SHA-256 (base64url, unpadded) is ``challenge``."""
+        code = secrets.token_urlsafe(32)
+        with self._db(write=True) as db:
+            db.execute("DELETE FROM app_signins WHERE expires <= ?", (_now(),))
+            db.execute("INSERT INTO app_signins (code_sha256, account_id, vault_id, challenge, created, expires) VALUES (?, ?, ?, ?, ?, ?)",
+                       (_sha(code), account_id, vault_id, challenge, _now(), _later(minutes=APP_SIGNIN_MINUTES)))
+        return code
+
+    def finish_app_signin(self, code: str, verifier: str) -> dict[str, Any] | None:
+        """Whose sign-in a code is, used up by asking. None when the code is unknown,
+        too old, or the app does not hold the secret the challenge was made from."""
+        with self._db(write=True) as db:
+            row = db.execute("SELECT * FROM app_signins WHERE code_sha256 = ?", (_sha(code or ""),)).fetchone()
+            if row is None:
+                return None
+            db.execute("DELETE FROM app_signins WHERE code_sha256 = ?", (row["code_sha256"],))
+        made = base64.urlsafe_b64encode(hashlib.sha256((verifier or "").encode()).digest()).decode().rstrip("=")
+        if row["expires"] <= _now() or not hmac.compare_digest(made, row["challenge"]):
+            return None
+        return {"account": row["account_id"], "vault": row["vault_id"]}
 
     # --- recovery codes: a way back in when the password is forgotten
 

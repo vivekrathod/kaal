@@ -162,6 +162,16 @@ service is added the same way with `--issuer https://…` and an id of your own
 in place of `google`. Tokens are unaffected: scripts, the command-line client
 and the browser extension keep using theirs.
 
+**Apps on a person's own device.** The iPhone app ([`ios/`](ios/README.md))
+signs in as the person, not with a token. It opens Kaal's sign-in page in a
+browser sheet, the person signs in there however they usually do (password,
+Google) and presses Allow, and the browser hands the app a code. The app
+exchanges that code for a session (`POST /v1/app-sign-ins`); the code works
+once, for five minutes, and only together with a secret that never left the
+app, so a code seen by anything else is worthless. The session lasts a year,
+is listed with the person's signed-in browsers under Settings, and can be
+signed out there.
+
 In the web app, Settings has more pages for people signed in as
 themselves. **Vaults and sharing**: rename your vault, open another, create one,
 and (as an owner) let someone into the open vault as viewer, editor or owner,

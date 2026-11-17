@@ -1,6 +1,49 @@
 {
   "components": {
     "schemas": {
+      "AppSignInFinish": {
+        "properties": {
+          "code": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          },
+          "device": {
+            "default": "",
+            "maxLength": 80,
+            "title": "Device",
+            "type": "string"
+          },
+          "verifier": {
+            "maxLength": 128,
+            "minLength": 43,
+            "pattern": "^[A-Za-z0-9._~-]+$",
+            "title": "Verifier",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "verifier"
+        ],
+        "title": "AppSignInFinish",
+        "type": "object"
+      },
+      "AppSignInStart": {
+        "properties": {
+          "challenge": {
+            "pattern": "^[A-Za-z0-9_-]{43}$",
+            "title": "Challenge",
+            "type": "string"
+          }
+        },
+        "required": [
+          "challenge"
+        ],
+        "title": "AppSignInStart",
+        "type": "object"
+      },
       "Body_attach_v1_notes__note_id__attachments_post": {
         "properties": {
           "extract": {
@@ -1018,7 +1061,7 @@
   "info": {
     "description": "An encrypted notes vault. Every request needs `Authorization: Bearer <token>` except /v1/health.",
     "title": "Kaal",
-    "version": "0.23.1"
+    "version": "0.24.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -1036,6 +1079,46 @@
           }
         },
         "summary": "Account Show",
+        "tags": [
+          "account"
+        ]
+      }
+    },
+    "/v1/account/app-sign-ins": {
+      "post": {
+        "description": "Approve signing an app in as oneself. Answers a code that works once, for five minutes.",
+        "operationId": "app_sign_in_start_v1_account_app_sign_ins_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppSignInStart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "App Sign In Start",
         "tags": [
           "account"
         ]
@@ -1740,6 +1823,46 @@
         "summary": "Admin Signup",
         "tags": [
           "admin"
+        ]
+      }
+    },
+    "/v1/app-sign-ins": {
+      "post": {
+        "description": "An app collects the sign-in a browser approved for it. The session it is\ngiven is sent back as the ``kaal_session`` cookie, with ``X-Kaal-Request: 1``.",
+        "operationId": "app_sign_in_finish_v1_app_sign_ins_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppSignInFinish"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "App Sign In Finish",
+        "tags": [
+          "session"
         ]
       }
     },

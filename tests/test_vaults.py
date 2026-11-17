@@ -3,6 +3,8 @@
 The last test drives every route of the server with the default vault booby-trapped,
 so a piece of server code that forgets to say which vault it means fails loudly.
 """
+import base64
+import hashlib
 import logging
 import os
 import shutil
@@ -373,6 +375,13 @@ def test_every_route_works_on_the_servers_vault_and_never_on_the_default(tmp_pat
     assert back.headers["location"] == "/#/receipts"
     call("DELETE", "/v1/account/connections/google", headers=person)
     call("DELETE", "/v1/admin/sign-in-services/google", headers=person)
+
+    # an app on the person's own device is let in by their browser, then collects its session
+    made_up_secret = "made-up-app-secret-" + "x" * 30
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(made_up_secret.encode()).digest()).decode().rstrip("=")
+    approved = call("POST", "/v1/account/app-sign-ins", json={"challenge": challenge}, headers=person)
+    in_app = call("POST", "/v1/app-sign-ins", json={"code": result(approved)["code"], "verifier": made_up_secret, "device": "A made-up phone"}, headers={})
+    assert result(in_app)["account"]["login"] and result(in_app)["session"]
 
     # A person's session opens the vault by the same route as a token does.
     assert call("GET", "/v1/library/notes", headers=person).status_code == 200

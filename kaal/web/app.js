@@ -1,6 +1,6 @@
 import { api, ApiError, updateWaiting } from "/web/api.js";
 import { h, replace, notice } from "/web/ui.js";
-import { signInView, setupView } from "/web/views/signin.js";
+import { signInView, setupView, appSignInView, APP_CHALLENGE } from "/web/views/signin.js";
 import { inboxView } from "/web/views/inbox.js";
 import { reviewView } from "/web/views/review.js";
 import { totalsView } from "/web/views/totals.js";
@@ -35,6 +35,27 @@ function shell(active, content) {
   ];
 }
 
+// An app on this device asked to be signed in (#/app-sign-in/CHALLENGE). The
+// request is kept while the person signs in here, which may take the browser
+// to a sign-in service and back.
+const APP_SIGN_IN = "kaal.app-sign-in";
+function appSignInWaiting() {
+  try {
+    const { name, rest } = route();
+    if (name === "app-sign-in" && APP_CHALLENGE.test(rest[0] || "")) sessionStorage.setItem(APP_SIGN_IN, rest[0]);
+    return sessionStorage.getItem(APP_SIGN_IN) || "";
+  } catch {
+    return "";
+  }
+}
+function appSignInDone() {
+  try {
+    sessionStorage.removeItem(APP_SIGN_IN);
+  } catch {
+    // Nothing was kept.
+  }
+}
+
 async function signOut() {
   try {
     await api.signOut();
@@ -60,6 +81,7 @@ async function render() {
     replace(root, setupView(route().rest[0], { onSignedIn: (signedIn) => { session = signedIn; go("receipts"); } }));
     return;
   }
+  const forApp = appSignInWaiting();
   if (!session) {
     try {
       session = await api.session();
@@ -73,6 +95,10 @@ async function render() {
       replace(root, signInView({ problem, onSignedIn: (signedIn) => { session = signedIn; if (problem) go("receipts"); else render(); } }));
       return;
     }
+  }
+  if (forApp) {
+    replace(root, appSignInView(forApp, { session, signOut, onDone: appSignInDone }));
+    return;
   }
   const { name, rest, params } = route();
   const content = h("div", { class: "view" });

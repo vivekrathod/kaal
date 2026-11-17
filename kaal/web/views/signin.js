@@ -210,3 +210,41 @@ export function setupView(code, { onSignedIn }) {
   });
   return page;
 }
+
+// An app on this device (the iPhone app) asked to be signed in as this person.
+// Allowing it hands the app a code through its own address; the code is worth
+// nothing without a secret that never left the app.
+export const APP_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
+const APP_ADDRESS = "kaal://signed-in";
+
+export function appSignInView(challenge, { session, onDone, signOut }) {
+  const problem = h("div", {});
+  const leave = (query) => {
+    onDone();
+    location.assign(`${APP_ADDRESS}?${query}`);
+  };
+  const cancel = h("button", { type: "button", class: "button" }, "Cancel");
+  cancel.addEventListener("click", () => leave("cancelled=1"));
+  if (!session.account) {
+    return h("main", { class: "page narrow" }, h("div", { class: "card form" },
+      h("h1", {}, "Sign in as yourself first"),
+      notice("This browser is signed in with a device token. The app needs you to sign in with your own name: sign out, then sign in again.", "error"),
+      h("button", { type: "button", class: "button primary", onClick: signOut }, "Sign out"), cancel));
+  }
+  const allow = h("button", { type: "button", class: "button primary" }, "Allow");
+  allow.addEventListener("click", async () => {
+    problem.replaceChildren();
+    allow.disabled = true;
+    try {
+      leave(`code=${encodeURIComponent(await api.appSignIn(challenge))}`);
+    } catch (error) {
+      allow.disabled = false;
+      problem.append(notice(error.message, "error"));
+    }
+  });
+  return h("main", { class: "page narrow" }, h("div", { class: "card form" },
+    h("h1", {}, "Sign in the Kaal app?"),
+    h("p", { class: "muted" }, `The Kaal app on this device will be signed in as “${session.account.login}” and can do everything you can here. Allow this only if you opened the app yourself just now.`),
+    problem, allow, cancel,
+    h("p", { class: "muted small choices" }, link("Not you? Sign out", signOut))));
+}

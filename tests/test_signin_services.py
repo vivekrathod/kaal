@@ -444,13 +444,13 @@ def test_removing_an_account_removes_its_connections_and_an_older_store_is_broug
     old = accounts.AccountStore(tmp_path / "old" / "accounts.db", tmp_path / "old")
     old.add_account("jane")
     with sqlite3.connect(old.path) as db:
-        for table in ("signin_services", "identities", "signin_flows"):
+        for table in ("signin_services", "identities", "signin_flows", "app_signins"):
             db.execute(f"DROP TABLE {table}")
         db.execute("PRAGMA user_version = 2")
     reopened = accounts.AccountStore(old.path, old.home)
     assert reopened.account("jane")["login"] == "jane" and reopened.services() == []
     with sqlite3.connect(old.path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == accounts.SCHEMA_VERSION == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == accounts.SCHEMA_VERSION
 
 
 def test_free_sign_in_names(house):

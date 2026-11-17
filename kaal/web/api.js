@@ -87,6 +87,8 @@ export const api = {
   signInWith: (service, setupCode = "") => result(request("POST", `/v1/sign-in/with/${id(service)}`, { json: { setup_code: setupCode } })).then((data) => data.url),
   connect: (service, password = "") => result(request("POST", `/v1/account/connections/${id(service)}`, { json: { password } })).then((data) => data.url),
   disconnect: (service) => result(request("DELETE", `/v1/account/connections/${id(service)}`)),
+  // Approve signing in an app on this device; answers the code to hand it.
+  appSignIn: (challenge) => result(request("POST", "/v1/account/app-sign-ins", { json: { challenge } })).then((data) => data.code),
   signInServices: () => result(request("GET", "/v1/admin/sign-in-services")),
   addSignInService: (service) => result(request("POST", "/v1/admin/sign-in-services", { json: service })),
   removeSignInService: (service) => result(request("DELETE", `/v1/admin/sign-in-services/${id(service)}`)),

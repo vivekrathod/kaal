@@ -900,6 +900,17 @@ class ConnectStart(BaseModel):
     password: str = Field(default="", max_length=1024)
 
 
+class AppSignInStart(BaseModel):
+    # The SHA-256 of a secret only the app holds, base64url without padding.
+    challenge: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$")
+
+
+class AppSignInFinish(BaseModel):
+    code: str = Field(min_length=1, max_length=200)
+    verifier: str = Field(min_length=43, max_length=128, pattern=r"^[A-Za-z0-9._~-]+$")
+    device: str = Field(default="", max_length=80)
+
+
 class ServiceNew(BaseModel):
     kind: Literal["google", "other"] = "google"
     name: str = Field(default="", max_length=40)
@@ -1183,6 +1194,34 @@ def create_app(settings: Settings) -> FastAPI:
         state.accounts.end_sessions(account["id"])
         codes = state.accounts.new_recovery_codes(account["id"])
         return start_session(request, state, state.accounts.account(account["id"]), recovery_codes=codes)
+
+    # --- an app on a person's own device (a phone) signs in as them. The app
+    # opens Kaal's sign-in page in a browser, the person signs in there however
+    # they usually do and approves, and the browser hands the app a code. The
+    # code is worth nothing without a secret that never left the app.
+
+    @app.post("/v1/account/app-sign-ins", tags=["account"])
+    def app_sign_in_start(request: Request, body: AppSignInStart, person: dict[str, Any] = require_person()):
+        """Approve signing an app in as oneself. Answers a code that works once, for five minutes."""
+        state = S(request)
+        return answer({"code": state.accounts.start_app_signin(person["account"], person["vault"], body.challenge)})
+
+    @app.post("/v1/app-sign-ins", tags=["session"])
+    def app_sign_in_finish(request: Request, body: AppSignInFinish):
+        """An app collects the sign-in a browser approved for it. The session it is
+        given is sent back as the ``kaal_session`` cookie, with ``X-Kaal-Request: 1``."""
+        state = S(request)
+        found = state.accounts.finish_app_signin(body.code, body.verifier)
+        account = state.accounts.account(found["account"]) if found else None
+        if account is None or account["disabled_at"]:
+            if not state.limiter.allow("unauthenticated"):
+                raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
+            return _error(401, "That sign-in has been used or has run out. Start again from the app.")
+        theirs = state.accounts.vaults_of(account["id"])
+        vault = next((entry["id"] for entry in theirs if entry["id"] == found["vault"]), theirs[0]["id"] if theirs else None)
+        session_record, secret = state.accounts.start_session(account["id"], vault, body.device.strip() or "An app", days=accounts.APP_SESSION_DAYS)
+        request.state.token_name = f"account:{account['id']}"
+        return answer({**who(person_record(state, session_record)), "session": secret})
 
     # --- one's own account
 
