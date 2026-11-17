@@ -110,6 +110,30 @@ take effect after `deploy/docker/kaalctl start`. The ones most people want:
 Signing in with Google is set up in the web app, under Settings → Sign-in
 services; see the README.
 
+## Reading receipts with a model (optional)
+
+Kaal reads receipts with fixed rules by default. A model reads more layouts.
+To use one that runs on this same machine with [Ollama](https://ollama.com),
+so no receipt leaves it:
+
+```bash
+ollama pull qwen2.5vl:3b
+```
+
+and put this in `deploy/docker/kaal.env`:
+
+```
+KAAL_RECEIPT_AI=ollama
+KAAL_RECEIPT_AI_URL=http://host.docker.internal:11434
+```
+
+Ollama must accept connections from the container: start it with
+`OLLAMA_HOST=0.0.0.0` (on Linux, `systemctl edit ollama` and add
+`Environment="OLLAMA_HOST=0.0.0.0"`), and keep port 11434 closed to the
+internet. To use Claude instead, set `KAAL_RECEIPT_AI=anthropic` and put your
+API key in the environment as `ANTHROPIC_API_KEY`. The README lists every
+choice, and the daily limit that keeps a paid service from running up a bill.
+
 ## Using a ready-made image
 
 Each release is also published as a container image on GitHub's registry,

@@ -27,7 +27,13 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
       - name: Tools Kaal reads PDFs and scans with
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils tesseract-ocr
+        run: |
+          # The package mirrors are sometimes briefly out of step; try again before failing.
+          for attempt in 1 2 3; do
+            sudo apt-get update -o Acquire::Retries=3 && sudo apt-get install -y --no-install-recommends poppler-utils tesseract-ocr && break
+            sleep 20
+          done
+          command -v pdftotext && command -v tesseract
       - run: pip install -e '.[dev]'
       - run: python -m pytest -q
 

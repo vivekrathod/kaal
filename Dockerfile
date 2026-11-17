@@ -5,7 +5,7 @@
 # by itself. deploy/docker/install.sh sets all of this up; see docs/install.md.
 FROM python:3.14-slim
 
-ARG KAAL_EXTRAS=server
+ARG KAAL_EXTRAS=server,ai
 RUN apt-get update \
  && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr \
  && rm -rf /var/lib/apt/lists/* \

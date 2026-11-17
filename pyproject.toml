@@ -20,11 +20,18 @@ server = [
   "uvicorn>=0.30",
   "python-multipart>=0.0.9",
 ]
+# Reading receipts with Claude through Anthropic's API (KAAL_RECEIPT_AI=anthropic), and
+# shrinking pictures before any model sees them.
+ai = [
+  "anthropic>=2.10,<3",
+  "pillow>=11",
+]
 dev = [
   "pytest>=8",
   "httpx2>=2",
   "certifi",
   "pillow",
+  "anthropic>=2.10,<3",
   "fastapi>=0.115",
   "uvicorn>=0.30",
   "python-multipart>=0.0.9",

@@ -24,6 +24,9 @@ services:
     volumes:
       - kaal-data:/srv/kaal
       - kaal-key:/etc/kaal
+    extra_hosts:
+      # Lets receipt reading reach a model served on this machine (Ollama) as host.docker.internal.
+      - "host.docker.internal:host-gateway"
     ports:
       # Only this machine can reach Kaal directly; the proxy in front of it provides HTTPS.
       - "${KAAL_LISTEN:-127.0.0.1:8765}:8765"

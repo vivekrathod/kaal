@@ -78,8 +78,8 @@ def capture(directory, text, name="receipt.txt"):
 # --- settings
 
 def test_the_model_is_off_unless_configured():
-    assert receipt_ai.settings_from_env({}) == receipt_ai.Settings()
-    assert receipt_ai.settings_from_env({}).enabled is False
+    off = receipt_ai.settings_from_env({})
+    assert (off.backend, off.enabled) == ("off", False)
     on = receipt_ai.settings_from_env({"KAAL_RECEIPT_AI": " Claude-CLI ", "KAAL_RECEIPT_AI_COMMAND": "/opt/x/claude", "KAAL_RECEIPT_AI_MODEL": "small", "KAAL_RECEIPT_AI_TIMEOUT": "9999"})
     assert (on.backend, on.command, on.model, on.timeout, on.enabled) == ("claude-cli", "/opt/x/claude", "small", 600.0, True)
     for bad in ({"KAAL_RECEIPT_AI": "chatgpt"}, {"KAAL_RECEIPT_AI": "claude-cli", "KAAL_RECEIPT_AI_TIMEOUT": "soon"}):
@@ -89,10 +89,10 @@ def test_the_model_is_off_unless_configured():
 
 def test_describe_reports_whether_the_command_exists_without_calling_it(fake_claude):
     assert receipt_ai.describe(receipt_ai.Settings()) == {"backend": "off", "usable": False}
-    assert receipt_ai.describe(fake_claude.settings) == {"backend": "claude-cli", "model": "test-model", "usable": True}
+    assert receipt_ai.describe(fake_claude.settings) == {"backend": "claude-cli", "model": "test-model", "daily_limit": 0, "used_today": 0, "usable": True}
     assert not fake_claude.log.exists()
     missing = receipt_ai.Settings(backend="claude-cli", command="/nonexistent/claude")
-    assert receipt_ai.describe(missing) == {"backend": "claude-cli", "model": "haiku", "usable": False, "problem": "command not found"}
+    assert receipt_ai.describe(missing) == {"backend": "claude-cli", "model": "haiku", "daily_limit": 0, "used_today": 0, "usable": False, "problem": "command not found"}
 
 
 # --- the command line backend

@@ -333,10 +333,12 @@ values. Uploads go to a private folder that is removed after each request.
 
 **What leaves the server.** Nothing, unless `KAAL_RECEIPT_AI` is set. With it
 set, each captured or re-extracted medical receipt's text and page images are
-sent to the model provider behind the configured command (for `claude-cli`,
-Anthropic), under that account's terms and data settings. Notes and other
-attachments are never sent. The login for that command is a credential on the
-server: keep it readable only by root and the service.
+sent to the configured model: Anthropic for `anthropic` and `claude-cli`, the
+service at `KAAL_RECEIPT_AI_URL` for `openai`, and for `ollama` a model you run
+yourself, on this machine or your own network, so nothing leaves them. A paid
+service is used under that account's terms and data settings. Notes and other
+attachments are never sent. An API key or a login for the command is a
+credential on the server: keep it readable only by the service.
 
 **Not defended against.** A compromised client can do whatever its token allows
 until you revoke it, and a token with `admin` can export everything. A
@@ -355,19 +357,39 @@ denial-of-service protection.
 ### Reading receipt fields with a model (optional, off by default)
 
 The label rules above only recognise a few fixed layouts. A server can instead
-ask a language model which values on a receipt are which:
+ask a language model which values on a receipt are which. Choose one:
+
+| `KAAL_RECEIPT_AI` | What it uses | Needs |
+|---|---|---|
+| `off` | Nothing; the label rules alone (the default) | |
+| `ollama` | A model you run with [Ollama](https://ollama.com), on this machine or your network. Nothing leaves them. | Ollama with a vision model, for example `ollama pull qwen2.5vl:3b` (about 3 GB) |
+| `anthropic` | Claude, through Anthropic's API | An API key; `pip install 'kaal[ai]'` (the container image has it) |
+| `openai` | Any service offering OpenAI's chat completions: OpenAI, OpenRouter, LM Studio, vLLM and others | `KAAL_RECEIPT_AI_URL`, `KAAL_RECEIPT_AI_MODEL`, and a key if the service needs one |
+| `claude-cli` | The `claude` command line, signed in on the server | The command on `PATH` |
 
 ```bash
-KAAL_RECEIPT_AI=claude-cli            # default: off
-KAAL_RECEIPT_AI_COMMAND=/path/to/claude   # default: claude on PATH
-KAAL_RECEIPT_AI_MODEL=haiku           # default
-KAAL_RECEIPT_AI_TIMEOUT=90            # seconds, default
+KAAL_RECEIPT_AI=ollama                    # default: off
+KAAL_RECEIPT_AI_MODEL=qwen2.5vl:3b        # defaults: ollama qwen2.5vl:3b, anthropic claude-haiku-5-5, claude-cli haiku
+KAAL_RECEIPT_AI_URL=http://127.0.0.1:11434  # ollama and openai; plain http only for this machine or a private network
+KAAL_RECEIPT_AI_KEY_FILE=/etc/kaal/model.key  # anthropic and openai; readable only by its owner
+KAAL_RECEIPT_AI_DAILY_LIMIT=300           # receipts a day; default 300 for paid services, none for ollama; 0 = no limit
+KAAL_RECEIPT_AI_EFFORT=low                # anthropic only; empty for a model that does not take it
+KAAL_RECEIPT_AI_TIMEOUT=90                # seconds, default
+KAAL_RECEIPT_AI_COMMAND=/path/to/claude   # claude-cli only; default: claude on PATH
 ```
 
+Without a key file, `anthropic` uses `ANTHROPIC_API_KEY` and `openai` uses
+`OPENAI_API_KEY` from the environment. A key never appears in a log, an error or
+`kaal status`, which says which model is set up, whether it can be used, and
+how many receipts it has read today. When the daily limit is reached, receipts
+are still captured and read with the label rules, and the model is asked again
+the next day (UTC) or when you choose "Read it again".
+
 With this on, the model is given the receipt's text (its own text layer, or OCR
-for a scan) plus an image of the first pages, or the photo itself. It runs with no
-tools, no saved session, no user or project settings and an empty working
-directory, so nothing printed on a receipt can make it do anything.
+for a scan) plus an image of the first pages, or the photo itself. It is asked for
+nothing but the seven values, in a fixed JSON shape, and given no tools; with
+`claude-cli` it also runs with no saved session, no user or project settings and an
+empty working directory. So nothing printed on a receipt can make it do anything.
 
 The model only labels; Kaal decides what to trust:
 
