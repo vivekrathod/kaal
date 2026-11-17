@@ -977,7 +977,9 @@ def create_app(settings: Settings) -> FastAPI:
         route = request.scope.get("route")
         template = getattr(route, "path", "(unmatched)")
         token_name = getattr(request.state, "token_name", "-")
-        log.info("%s %s %s %s %dms", request.method, template, response.status_code, token_name, (time.monotonic() - started) * 1000)
+        # A container's health check asks every 30 seconds; only a failing answer is worth a line.
+        if not (template == "/v1/health" and response.status_code == 200):
+            log.info("%s %s %s %s %dms", request.method, template, response.status_code, token_name, (time.monotonic() - started) * 1000)
         return response
 
     # Added last so that it is the outermost layer: the browser's permission

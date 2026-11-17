@@ -9,3 +9,13 @@ notes/
 attachments/
 *.token
 *.key
+# Not needed to build the server image.
+ios/
+chrome-extension/
+tests/
+docs/
+.github/
+deploy/*
+!deploy/docker/
+deploy/docker/*
+!deploy/docker/entrypoint.sh

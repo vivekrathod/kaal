@@ -1,0 +1,7 @@
+# Caddy gets a certificate for the domain by itself and renews it.
+{$KAAL_DOMAIN} {
+	encode zstd gzip
+	# Browsers that have been here once never try plain http again.
+	header Strict-Transport-Security "max-age=31536000"
+	reverse_proxy kaal:8765
+}

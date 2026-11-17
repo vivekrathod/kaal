@@ -1,0 +1,144 @@
+# Installing Kaal
+
+Kaal runs on a machine you control: a small server you rent, a computer at
+home, or your own laptop to try it. This guide uses Docker, which is the
+shortest way. (Without Docker, see "Running Kaal as a server" in the
+[README](../README.md) and the systemd unit in [`deploy/`](../deploy).)
+
+## What you need
+
+- A machine running Linux or macOS with [Docker](https://docs.docker.com/engine/install/)
+  and its Compose plugin, version 2.24 or newer.
+- About 1 GB of disk for Kaal itself, plus room for what you keep in it.
+- One of: a domain name pointing at the machine, [Tailscale](https://tailscale.com),
+  or nothing at all if you only want to try it on that machine.
+
+## Install
+
+```bash
+git clone REPOSITORY-ADDRESS kaal
+cd kaal
+deploy/docker/install.sh
+```
+
+Use the address of the repository you are reading this in. The script asks
+where people will open Kaal:
+
+1. **A domain name of your own** that points at this machine, such as
+   `kaal.example.org`. HTTPS is set up for you: a certificate is fetched and
+   renewed automatically. Ports 80 and 443 must be reachable from the internet
+   and not used by anything else.
+2. **Through Tailscale, or another proxy you run.** Kaal listens only on this
+   machine (`127.0.0.1:8765`) and your proxy provides HTTPS. With Tailscale,
+   `tailscale serve --bg 8765` publishes it to your own devices only.
+3. **Only on this machine**, at `http://localhost:8765`, to try it out.
+
+The same choices without questions:
+
+```bash
+deploy/docker/install.sh --domain kaal.example.org
+deploy/docker/install.sh --behind https://kaal.example.ts.net
+deploy/docker/install.sh --local
+```
+
+It builds Kaal, starts it, and prints a link. Open the link once to choose
+your password; you are then the administrator and can add other people under
+Settings → People. Running the script again is safe: it keeps what is stored
+and only applies new answers.
+
+## Keep a copy of the key
+
+Everything in Kaal is encrypted with one key, which lives on the machine but
+apart from the data. **If the key is lost, nothing in Kaal can be read again**,
+by you or anyone else. Copy it somewhere off the machine straight away:
+
+```bash
+deploy/docker/kaalctl key-backup ~/kaal-master.key
+```
+
+Move that file to a password manager, an encrypted drive, or paper in a safe.
+Anyone who has both the key and a copy of the data can read everything, so do
+not keep them together.
+
+If the machine ever loses the key but still has the data, Kaal refuses to
+start instead of making a new key. Put the saved one back with
+`deploy/docker/kaalctl key-restore ~/kaal-master.key`.
+
+## Day to day
+
+```bash
+deploy/docker/kaalctl status                 # is it running, which version, where
+deploy/docker/kaalctl logs                   # what the server has said
+deploy/docker/kaalctl setup-link sam         # a single-use link for sam to choose a password
+deploy/docker/kaalctl run kaal-server account list
+deploy/docker/kaalctl stop                   # and start; nothing stored is touched
+```
+
+Any command from the [README](../README.md) runs inside the container with
+`kaalctl run`, for example `kaalctl run kaal-server sign-in list`.
+
+## Updating
+
+```bash
+git pull
+deploy/docker/kaalctl update
+```
+
+This makes a backup, builds the new version and restarts. If the new version
+does not come up, the one that was running is put back.
+
+## Backups
+
+A copy of everything is made each day and the newest 14 are kept. Unchanged
+files are shared between copies, so they take little room. They sit on the
+same machine as the data, which protects against a mistake or a bad update but
+not against losing the machine. `deploy/docker/kaalctl backup-now` makes one
+at any time.
+
+The key is never included in a backup.
+
+## Settings
+
+Extra settings go in `deploy/docker/kaal.env`, one `NAME=value` per line, and
+take effect after `deploy/docker/kaalctl start`. The ones most people want:
+
+| Setting | What it does |
+|---|---|
+| `KAAL_MAX_UPLOAD_BYTES` | The largest file Kaal accepts (default 100 MiB). |
+| `KAAL_SIGNUPS_PER_HOUR` | How many accounts strangers may create per hour when sign-up is open (default 10). |
+
+Signing in with Google is set up in the web app, under Settings → Sign-in
+services; see the README.
+
+## Using a ready-made image
+
+Each release is also published as a container image on GitHub's registry,
+next to the repository, for `linux/amd64` and `linux/arm64`. To use it instead
+of building:
+
+```bash
+deploy/docker/install.sh --image ghcr.io/OWNER/kaal:latest
+```
+
+where `OWNER` is the owner of the repository you cloned.
+
+## Removing Kaal
+
+`deploy/docker/kaalctl stop` stops it and keeps everything. To remove it and
+**everything stored in it**, from the `deploy/docker` folder:
+
+```bash
+docker compose --profile https down --volumes
+```
+
+There is no undo for that. Export what you want to keep first.
+
+## If something goes wrong
+
+- **"port is already allocated" or "address already in use"**: something else
+  on the machine uses port 80, 443 or 8765. Stop it, or choose the "behind a
+  proxy" option and point that program at `127.0.0.1:8765`.
+- **The certificate is not issued**: the domain must already point at this
+  machine, and ports 80 and 443 must be reachable from the internet.
+  `docker compose logs caddy` (in `deploy/docker`) says what failed.
+- **Kaal says its key is missing**: see "Keep a copy of the key" above.

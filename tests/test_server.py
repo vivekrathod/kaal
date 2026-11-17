@@ -60,6 +60,14 @@ class AuthTests(ServerTestCase):
         response = self.client.get("/v1/health")
         self.assertEqual(response.json(), {"status": "ok"})
 
+    def test_a_healthy_health_check_leaves_no_log_line_but_other_requests_do(self):
+        with self.assertLogs("kaal.server", level="INFO") as logged:
+            self.client.get("/v1/health")
+            self.client.get("/v1/notes")
+        lines = [line for line in logged.output if "/v1/" in line]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("GET /v1/notes 401", lines[0])
+
     def test_missing_wrong_and_revoked_tokens_get_401(self):
         self.assertEqual(self.client.get("/v1/notes").status_code, 401)
         self.assertEqual(self.client.get("/v1/notes", headers={"Authorization": "Bearer kaal_x_y"}).status_code, 401)

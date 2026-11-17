@@ -21,3 +21,7 @@ __pycache__/
 
 # Hermes session artifacts can contain user-provided documents and planning notes.
 /.hermes/
+
+# Settings of a local Docker installation (deploy/docker/install.sh).
+/deploy/docker/.env
+/deploy/docker/kaal.env

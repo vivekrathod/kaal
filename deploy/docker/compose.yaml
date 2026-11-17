@@ -1,0 +1,65 @@
+# Kaal with Docker Compose. Run deploy/docker/install.sh instead of using this
+# file directly: it writes the .env file these settings come from.
+name: kaal
+
+x-kaal: &kaal
+  image: ${KAAL_IMAGE:-kaal:local}
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp]
+
+services:
+  kaal:
+    <<: *kaal
+    build:
+      context: ../..
+    environment:
+      KAAL_PUBLIC_URL: ${KAAL_PUBLIC_URL:?Run deploy/docker/install.sh first}
+      KAAL_COOKIE_SECURE: ${KAAL_COOKIE_SECURE:-1}
+    env_file:
+      - path: kaal.env        # optional extra settings, such as receipt reading
+        required: false
+    volumes:
+      - kaal-data:/srv/kaal
+      - kaal-key:/etc/kaal
+    ports:
+      # Only this machine can reach Kaal directly; the proxy in front of it provides HTTPS.
+      - "${KAAL_LISTEN:-127.0.0.1:8765}:8765"
+
+  backup:
+    <<: *kaal
+    command: [backup-daily]
+    network_mode: none
+    healthcheck:
+      disable: true
+    volumes:
+      - kaal-data:/srv/kaal
+      - kaal-key:/etc/kaal:ro
+    depends_on:
+      kaal:
+        condition: service_healthy
+
+  # HTTPS for a domain name of your own, with certificates fetched and renewed automatically.
+  caddy:
+    profiles: [https]
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      KAAL_DOMAIN: ${KAAL_DOMAIN:-localhost}
+    ports:
+      - "${KAAL_HTTP_PORT:-80}:80"
+      - "${KAAL_HTTPS_PORT:-443}:443"
+      - "${KAAL_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [kaal]
+
+volumes:
+  kaal-data:
+  kaal-key:
+  caddy-data:
+  caddy-config:

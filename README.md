@@ -11,6 +11,19 @@ at rest.
 - **Chrome extension:** saves the page in front of you ([`chrome-extension/`](chrome-extension/README.md)).
 - **Encryption:** AES-256-GCM, with one key kept in a file outside the vault.
 
+## Install
+
+On a machine with Docker:
+
+```bash
+deploy/docker/install.sh
+```
+
+It asks where people will open Kaal (a domain of your own with HTTPS set up
+for you, Tailscale or another proxy, or just this machine), starts Kaal, and
+prints a link for choosing your password. [`docs/install.md`](docs/install.md)
+covers the key, updates and backups.
+
 ## Security model
 
 - Every note, attachment, piece of extracted or OCR text and the index is encrypted at rest, medical receipts included.
@@ -39,7 +52,8 @@ kaal-server serve                     # 127.0.0.1:8765; publish with `tailscale 
 ```
 
 [`deploy/kaal-server.service`](deploy/kaal-server.service) is a hardened systemd
-unit, and the [`Dockerfile`](Dockerfile) builds a container image.
+unit. With Docker, [`deploy/docker/install.sh`](deploy/docker/install.sh) does
+all of this in one command (see [`docs/install.md`](docs/install.md)).
 
 **Updating a server.** `deploy/deploy.sh --host USER@SERVER REF` tests and
 builds one commit, backs the vault up on the server, installs it, restarts

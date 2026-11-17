@@ -402,4 +402,6 @@ def test_every_route_works_on_the_servers_vault_and_never_on_the_default(tmp_pat
     for record in caplog.records:
         if record.name == "kaal.server" and isinstance(record.args, tuple) and len(record.args) == 5:
             reached.add((record.args[0], record.args[1]))
+    # A healthy answer to the health check is not logged (a container asks every 30 seconds); it was called above.
+    reached.add(("GET", "/v1/health"))
     assert every - reached == set(), f"routes not exercised: {sorted(every - reached)}"

@@ -1,0 +1,117 @@
+#!/bin/sh
+# Day-to-day commands for a Kaal set up with deploy/docker/install.sh.
+#
+#   kaalctl status                 is it running, which version, where
+#   kaalctl logs                   what the server has said (follow with -f)
+#   kaalctl update                 back up, then move to the version in this folder
+#   kaalctl setup-link LOGIN       a single-use link for someone to choose a password
+#   kaalctl key-backup FILE        write a copy of the key to FILE (keep it off this machine)
+#   kaalctl key-restore FILE       put a saved key back on an installation that has lost its key
+#   kaalctl backup-now             make a copy of everything now
+#   kaalctl run COMMAND...         run a kaal or kaal-server command inside the container,
+#                                  for example: kaalctl run kaal-server account list
+#   kaalctl stop | start           stop or start Kaal; nothing stored is touched
+set -eu
+cd "$(dirname "$0")"
+
+stop() { printf 'Stopped: %s\n' "$1" >&2; exit 1; }
+[ -f .env ] || stop "Kaal is not set up here yet. Run deploy/docker/install.sh first."
+
+command=${1:-help}
+[ $# -eq 0 ] || shift
+
+healthy() {
+    tries=0
+    until [ "$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose ps -q kaal)" 2> /dev/null)" = healthy ]; do
+        tries=$((tries + 1))
+        [ "$tries" -lt 60 ] || return 1
+        sleep 2
+    done
+}
+
+case "$command" in
+status)
+    docker compose ps --format 'table {{.Service}}\t{{.Status}}'
+    printf 'Address: %s\n' "$(sed -n 's/^KAAL_PUBLIC_URL=//p' .env)"
+    docker compose exec -T kaal kaal-server --version 2> /dev/null || true
+    ;;
+logs)
+    docker compose logs --tail 200 "$@" kaal
+    ;;
+update)
+    before=$(docker compose exec -T kaal kaal-server --version 2> /dev/null || echo unknown)
+    echo "==> Backing up first"
+    docker compose exec -T kaal kaal backup --keep "${KAAL_BACKUP_KEEP:-14}" > /dev/null || stop "the backup failed, so nothing was changed"
+    image=$(sed -n 's/^KAAL_IMAGE=//p' .env)
+    previous=""
+    if [ -n "$image" ]; then
+        echo "==> Fetching $image"
+        docker compose pull --quiet kaal
+    else
+        echo "==> Building the version in this folder"
+        # Keep the image that is running, to go back to if the new one does not come up.
+        if docker image inspect kaal:local > /dev/null 2>&1; then
+            docker tag kaal:local kaal:previous
+            previous=kaal:previous
+        fi
+        out=$(docker compose build --quiet kaal 2>&1) || { printf '%s\n' "$out" >&2; stop "the build failed"; }
+    fi
+    echo "==> Restarting"
+    # Whether it worked is decided by Kaal answering, just below.
+    docker compose up -d --remove-orphans > /dev/null 2>&1 || true
+    if healthy; then
+        echo "==> Updated: $before -> $(docker compose exec -T kaal kaal-server --version)"
+    elif [ -n "$previous" ]; then
+        echo "==> The new version did not come up; going back to the one before" >&2
+        docker tag kaal:previous kaal:local
+        docker compose up -d > /dev/null 2>&1 || true
+        healthy && stop "the update was undone; Kaal is running the version it had. See: kaalctl logs"
+        stop "Kaal is not running. See: kaalctl logs"
+    else
+        stop "the new version did not come up. See: kaalctl logs"
+    fi
+    ;;
+setup-link)
+    [ $# -eq 1 ] || stop "say whose: kaalctl setup-link LOGIN"
+    docker compose exec -T kaal kaal-server account setup-link "$1"
+    ;;
+key-backup)
+    [ $# -eq 1 ] || stop "say where: kaalctl key-backup FILE"
+    [ ! -e "$1" ] || stop "$1 already exists; choose another name"
+    (umask 077 && docker compose exec -T kaal cat /etc/kaal/master.key > "$1")
+    [ -s "$1" ] || { rm -f "$1"; stop "the key could not be read"; }
+    echo "The key is in $1 (readable only by you). Move it somewhere off this machine and keep it safe."
+    ;;
+key-restore)
+    [ $# -eq 1 ] || stop "say which: kaalctl key-restore FILE"
+    [ -s "$1" ] || stop "$1 is missing or empty"
+    # Looked at before anything is stopped, so a refusal leaves Kaal running as it was.
+    docker compose run --rm --no-deps -T --entrypoint sh kaal -c '[ ! -s "$KAAL_KEY_FILE" ]' > /dev/null 2>&1 \
+        || stop "this installation already has a key; it is not replaced"
+    docker compose stop kaal backup > /dev/null 2>&1 || true
+    docker compose run --rm --no-deps -T --entrypoint sh kaal -c 'umask 077; cat > "$KAAL_KEY_FILE"' < "$1" > /dev/null 2>&1 \
+        || stop "the key could not be put back"
+    docker compose up -d > /dev/null 2>&1 || true
+    healthy || stop "the key is in place but Kaal did not come up: it may be the wrong key. See: kaalctl logs"
+    echo "The key is back and Kaal is running."
+    ;;
+backup-now)
+    docker compose exec -T kaal kaal backup --keep "${KAAL_BACKUP_KEEP:-14}"
+    ;;
+run)
+    [ $# -ge 1 ] || stop "say what: kaalctl run kaal-server account list"
+    if [ -t 0 ]; then docker compose exec kaal "$@"; else docker compose exec -T kaal "$@"; fi
+    ;;
+stop)
+    docker compose stop > /dev/null 2>&1 && echo "Stopped. Nothing stored was touched."
+    ;;
+start)
+    docker compose up -d > /dev/null 2>&1 && healthy && echo "Running at $(sed -n 's/^KAAL_PUBLIC_URL=//p' .env)"
+    ;;
+help | -h | --help)
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+*)
+    stop "unknown command $command (see: kaalctl help)"
+    ;;
+esac
