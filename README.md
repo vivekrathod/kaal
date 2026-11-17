@@ -126,6 +126,12 @@ a password. Nothing is offered until whoever runs the installation sets it up:
 1. In the [Google Cloud console](https://console.cloud.google.com/apis/credentials),
    create an OAuth client ID of type "Web application". Under "Authorized
    redirect URIs" add `https://YOUR-KAAL-ADDRESS/v1/sign-in/with/google/callback`.
+   Use a Google Cloud project of its own: the name on Google's sign-in page
+   belongs to the project, not to the client. The project can stay in
+   "Testing": Kaal asks only for name and email, which Google allows for any
+   Google account without a warning or a list of test users. Until Google has
+   verified the project's branding, its page says "to continue to" your
+   server's domain instead of the app name.
 2. Give Kaal the client ID and client secret: as an administrator, in the web
    app under Settings → Sign-in services; or on the server, where the command
    asks for the secret without showing it, so that it is never part of a
