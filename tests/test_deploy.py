@@ -67,7 +67,7 @@ class Server:
     def pip_install(self, version: str) -> None:
         with tempfile.TemporaryDirectory() as directory:
             wheel = build_wheel(Path(directory), version)
-            subprocess.run([str(self.python), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--no-deps", str(wheel)], check=True, env=self.env)
+            subprocess.run([str(self.python), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--no-deps", str(wheel)], check=True, env=self.env, cwd=self.prefix)
 
     def stage(self, version: str) -> Path:
         # The script only accepts wheels staged where deploy.sh puts them.
@@ -76,11 +76,13 @@ class Server:
         return build_wheel(directory, version)
 
     def run(self, *args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["bash", str(SCRIPT), *args], env=self.env, text=True, capture_output=True)
+        # Run from the server's own folder, never the source tree: a build there leaves
+        # metadata that Python would find first and report as the installed version.
+        return subprocess.run(["bash", str(SCRIPT), *args], env=self.env, text=True, capture_output=True, cwd=self.prefix)
 
     def version(self) -> str:
         code = 'import importlib.metadata as m; print(m.version("kaal"))'
-        return subprocess.run([str(self.python), "-c", code], env=self.env, text=True, capture_output=True, check=True).stdout.strip()
+        return subprocess.run([str(self.python), "-c", code], env=self.env, text=True, capture_output=True, check=True, cwd=self.prefix).stdout.strip()
 
     def release(self) -> str:
         path = self.prefix / "RELEASE"

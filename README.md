@@ -597,3 +597,9 @@ Delete a note and its attachments:
 ```bash
 kaal delete NOTE_ID --yes
 ```
+
+## Licence
+
+Kaal is released under the [Apache License, Version 2.0](LICENSE). You may use,
+change and redistribute it, including commercially, under the terms of that
+licence. See [NOTICE](NOTICE) for the copyright line.

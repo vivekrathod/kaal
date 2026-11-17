@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: Server and web app (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Tools Kaal reads PDFs and scans with
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils tesseract-ocr
+      - run: pip install -e '.[dev]'
+      - run: python -m pytest -q
+
+  iphone:
+    name: iPhone app (build and unit tests)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+      - name: Pick a simulator
+        run: |
+          xcodebuild -version
+          device=$(xcrun simctl list devices available | sed -n 's/^ *iPhone [^(]*(\([0-9A-F-]\{36\}\)).*/\1/p' | head -1)
+          test -n "$device" || { echo "No iPhone simulator on this runner"; exit 1; }
+          echo "DEVICE=$device" >> "$GITHUB_ENV"
+      - name: Build and test
+        run: |
+          status=0
+          xcodebuild test -project ios/Kaal.xcodeproj -scheme Kaal -only-testing:KaalTests \
+            -destination "platform=iOS Simulator,id=$DEVICE" CODE_SIGNING_ALLOWED=NO > build.log 2>&1 || status=$?
+          grep -E " error: |Test Case .* failed|Executed [0-9]+ tests|TEST (SUCCEEDED|FAILED)|BUILD (SUCCEEDED|FAILED)" build.log | tail -60
+          exit $status
