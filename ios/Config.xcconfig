@@ -1,0 +1,13 @@
+// Settings every build of the app shares.
+//
+// To put the app on your own iPhone, create Local.xcconfig beside this file
+// (it is not committed) with your Apple developer team and an identifier of
+// your own:
+//
+//   DEVELOPMENT_TEAM = ABCDE12345
+//   PRODUCT_BUNDLE_IDENTIFIER = com.example.yourname.Kaal
+
+PRODUCT_BUNDLE_IDENTIFIER = app.kaal.Kaal
+DEVELOPMENT_TEAM =
+
+#include? "Local.xcconfig"
