@@ -325,13 +325,24 @@ def test_tokens_and_ended_sessions_keep_nobody_out_so_they_wait_for_the_reset(se
 
 
 def test_storage_that_is_nearly_full_calls_for_starting_again(tmp_path, monkeypatch):
-    usage = SimpleNamespace(total=256 * 1024 * 1024, used=0)
+    MiB = 1024 * 1024
+    # As compose.yaml sets them: Kaal stores nothing new under 32 MiB free, and takes files up to 10 MiB.
+    monkeypatch.setenv("KAAL_FREE_SPACE_MB", "32")
+    monkeypatch.setenv("KAAL_MAX_UPLOAD_BYTES", str(10 * MiB))
+    keep = demo.room_to_keep()
+    assert keep == 52 * MiB, "Kaal's floor, and twice a file of the largest size allowed"
+    usage = SimpleNamespace(total=256 * MiB, free=250 * MiB)
     monkeypatch.setattr(demo.shutil, "disk_usage", lambda folder: usage)
-    assert demo.nearly_full(tmp_path) is False
-    usage.used = 180 * 1024 * 1024
-    assert demo.nearly_full(tmp_path) is False
-    usage.used = 192 * 1024 * 1024       # room is left for a file of the largest size allowed, and the copy made while adding it
-    assert demo.nearly_full(tmp_path) is True
+    assert demo.nearly_full(tmp_path, keep) is False
+    usage.free = 53 * MiB
+    assert demo.nearly_full(tmp_path, keep) is False
+    usage.free = 51 * MiB
+    assert demo.nearly_full(tmp_path, keep) is True
+    # While it is not nearly full, Kaal itself still takes the largest file: the demo starts again first.
+    usage.free = 52 * MiB
+    settings = server.Settings.from_env()
+    monkeypatch.setattr(server.shutil, "disk_usage", lambda folder: usage)
+    assert server.disk_is_full(settings, 2 * settings.max_upload_bytes) is False
 
 
 def test_the_seed_refuses_passwords_that_could_not_be_typed_or_kept(kaal_server):
@@ -555,6 +566,9 @@ def test_the_demo_reuses_the_regular_setup_and_keeps_nothing_on_disk():
     assert re.search(r"- /srv/kaal:size=\$\{KAAL_DEMO_STORAGE:-256m\},uid=999,gid=999,mode=0700", text)
     assert re.search(r"- /etc/kaal:size=1m,uid=999,gid=999,mode=0700", text)
     assert 'KAAL_RECEIPT_AI: "off"' in text and 'KAAL_SIGNUPS_PER_HOUR: "0"' in text
+    # A regular installation's floor of free space is 1 GiB, more than the demo has at all:
+    # without a smaller one Kaal would refuse even the made-up data.
+    assert "KAAL_FREE_SPACE_MB: ${KAAL_DEMO_FREE_SPACE_MB:-32}" in text
 
 
 @pytest.mark.skipif(not shutil.which("docker"), reason="needs docker")
@@ -579,6 +593,9 @@ def test_compose_resolves_the_demo_with_the_regular_hardening(tmp_path):
     environment = kaal_service["environment"]
     assert environment["KAAL_RECEIPT_AI"] == "off" and environment["KAAL_SIGNUPS_PER_HOUR"] == "0"
     assert environment["KAAL_MAX_UPLOAD_BYTES"] == "10485760" and environment["KAAL_COOKIE_SECURE"] == "0"
+    storage = next(entry for entry in kaal_service["tmpfs"] if entry.startswith("/srv/kaal:"))
+    assert "size=256m" in storage and int(environment["KAAL_FREE_SPACE_MB"]) == 32, "the floor of free space fits the demo's storage"
+    assert int(environment["KAAL_DOWNLOAD_MEMORY_MB"]) + 3 * int(environment["KAAL_SEARCH_MEMORY_MB"]) + 256 < 1024, "what is held in memory fits the limit"
     # From the regular setup: limits apply per visitor behind the proxy, and logs cannot fill the disk.
     assert environment["KAAL_TRUSTED_PROXIES"] == "private"
     assert kaal_service["logging"] == {"driver": "json-file", "options": {"max-file": "3", "max-size": "10m"}}
@@ -781,6 +798,29 @@ def test_the_real_demo_shows_the_made_up_data_and_puts_it_back(tmp_path):
             jane.call("DELETE", f"/v1/vault/members/{john}")
         jane.call("DELETE", "/v1/account", {"password": REVIEW})
         starts_again("starting again after the account was deleted", before)
+        the_seed_is_there(sign_in("reviewer", REVIEW))
+
+        # Storage a visitor fills: Kaal refuses what would leave too little free (the demo's
+        # floor, not a regular installation's 1 GiB), and the demo starts again within a minute.
+        # Kaal refuses a large file before reading it, which a client still sending it sees as
+        # a closed connection; either way the loop stops well short of 40 files.
+        jane = sign_in("reviewer", REVIEW)
+        before = seeding()
+        house = by_title(jane.call("GET", "/v1/library/notes"))["Made-up house notes"]["id"]
+        stopped = ""
+        for number in range(40):        # 360 MiB, which is more than the demo can hold
+            try:
+                jane.call("POST", f"/v1/library/notes/{house}/attachments",
+                          files=[("file", f"made-up-{number}.bin", "application/octet-stream", os.urandom(9 * 1024 * 1024))])
+            except (demo.DemoError, OSError) as error:
+                stopped = str(error)
+                break
+        assert stopped and 12 <= number < 30, f"the demo took {number} files of 9 MiB and then: {stopped}"
+        starts_again("starting again once the storage was nearly full", before)
+        assert "the demo's storage was nearly full" in logs() and "too small" not in logs()
+        assert "Kaal stopped by itself" not in logs(), "Kaal refused the files; it did not fall over"
+        state = subprocess.run(["docker", "inspect", "--format", "{{.RestartCount}} {{.State.OOMKilled}}", f"{PROJECT}-kaal-1"], capture_output=True, text=True, timeout=60)
+        assert state.stdout.split() == ["0", "false"], "and the container was neither restarted nor out of memory"
         the_seed_is_there(sign_in("reviewer", REVIEW))
 
         # Stopped and started again, it comes back the same, with the same passwords.

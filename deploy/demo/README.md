@@ -134,8 +134,8 @@ can. None of it reaches past the demo, and none of it lasts:
 | Change the reviewer's password, with the password or with a recovery code | Put back within a minute, and everyone is signed out, whoever changed it included; the recovery codes are replaced |
 | Rename a vault, which removes the notice in its name | The name is put back within a minute |
 | Delete the reviewer's account or one of its vaults, or hand a vault to John | The whole reset happens within a minute instead of at night |
-| Fill the demo's storage with files | The whole reset happens within a minute of three quarters of it being used |
-| Make tokens (at most 50) | They work until the next reset, and reach only what the reviewer can see |
+| Fill the demo's storage with files | Kaal refuses a file it has too little room for, and the whole reset happens within a minute of less than 52 MB being free |
+| Make tokens (at most 50, and 20 in an hour) | They work until the next reset, and reach only what the reviewer can see |
 | See which browsers and apps are signed in as `reviewer` (the kind of device and when, nothing more) and sign them out | Signing in again; the nightly reset clears the list |
 | Download a copy of a vault | Nothing to put right: it holds only what is in the demo |
 | Type wrong passwords | Kaal slows guessing per address, so one visitor's wrong tries do not hold up another's |
@@ -145,10 +145,13 @@ anything outside the demo's container, or touch another Kaal on the machine.
 
 What is left: anything a visitor types can be read by every other visitor
 until the reset, so the notice asks people to put nothing real in. And someone
-who keeps at it can spoil the demo for others, by trashing the notes just
-before a reviewer looks or by deleting the account again and again so that the
-demo keeps starting over. If that happens during a review, give the reviewer
-account a new password and tell App Review:
+who keeps at it can spoil the demo for others: by trashing the notes just
+before a reviewer looks, by deleting the account again and again so that the
+demo keeps starting over, by signing in so often that earlier sign-ins are
+ended (an account keeps its newest 50), or by sending requests so fast that
+the account's allowance for the minute is used up and others are told to wait.
+If that happens during a review, give the reviewer account a new password and
+tell App Review:
 
 ```bash
 KAAL_DEMO_PASSWORD=a-new-one-for-app-review deploy/demo/run.sh
@@ -181,10 +184,17 @@ address, port and passwords chosen before and applies what is new.
   inside the container and are gone when it stops. The demo refuses to start
   unless those folders really are in memory, so it can never empty a volume
   that holds anyone's real data.
-- **Limits for strangers**: files up to 10 MiB, at most 256 MB stored in all,
-  at most 1 GB of memory and 256 processes. When three quarters of the
-  storage is used, or the memory runs out, it starts again with the made-up
-  data. Anything stored is gone by the next morning.
+- **Limits for strangers**: files up to 10 MiB, at most 256 MB stored in all
+  (a file takes about a third more room than its size once encrypted), at
+  most 1 GB of memory and 256 processes. Once less than 52 MB of that storage
+  is free (Kaal itself stores nothing new under 32 MB, and the rest is room
+  for two files of the largest size), the demo starts again with the made-up
+  data, as it does if the memory runs out. Anything stored is gone by the
+  next morning. What Kaal holds in memory is cut to fit: 128 MB of files on
+  their way to people, and 64 MB of text for searching in each vault.
+- **One account for everyone**: whoever looks at the demo shares the
+  reviewer's allowance of requests, so it is 1,800 a minute, three times a
+  regular installation's.
 - **No new accounts**: sign-up is closed, and the limit on new accounts is
   zero even if an administrator opened it. A person may own at most three
   vaults.
@@ -199,6 +209,7 @@ To change a limit, add a line to the demo's settings file,
 |---|---|
 | `KAAL_DEMO_MAX_UPLOAD_BYTES` | `10485760` (10 MiB) |
 | `KAAL_DEMO_STORAGE` | `256m` |
+| `KAAL_DEMO_FREE_SPACE_MB` | `32` (keep it at least twice the largest file) |
 | `KAAL_DEMO_MEMORY` | `1g` |
 
 That file also holds both passwords; it is readable only by you and is never

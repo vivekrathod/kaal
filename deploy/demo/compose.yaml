@@ -10,8 +10,9 @@
 #   - smaller limits on uploads, memory and processes, since strangers can reach it;
 #   - none of a regular installation's own settings (deploy/docker/kaal.env) apply;
 #   - there are no backups, since nothing in it is worth keeping.
-# KAAL_DEMO_STORAGE, KAAL_DEMO_MAX_UPLOAD_BYTES and KAAL_DEMO_MEMORY can be set
-# in the demo's settings file to change those limits (see README.md here).
+# KAAL_DEMO_STORAGE, KAAL_DEMO_FREE_SPACE_MB, KAAL_DEMO_MAX_UPLOAD_BYTES and
+# KAAL_DEMO_MEMORY can be set in the demo's settings file to change those
+# limits (see README.md here).
 name: kaal-demo
 
 services:
@@ -32,6 +33,17 @@ services:
       KAAL_MAX_UPLOAD_BYTES: ${KAAL_DEMO_MAX_UPLOAD_BYTES:-10485760}
       KAAL_SIGNUPS_PER_HOUR: "0"
       KAAL_VAULTS_PER_PERSON: "3"
+      # Kaal stores nothing new once less than this is free. A regular
+      # installation keeps 1 GiB back, which is more than the demo has at all;
+      # demo.py starts again some way before this is reached.
+      KAAL_FREE_SPACE_MB: ${KAAL_DEMO_FREE_SPACE_MB:-32}
+      # What Kaal may hold in memory, cut to fit the memory limit below: files
+      # on their way to people, and each vault's text for searching.
+      KAAL_DOWNLOAD_MEMORY_MB: "128"
+      KAAL_SEARCH_MEMORY_MB: "64"
+      # Everyone looking at the demo shares one account, so its allowance of
+      # requests a minute is three times a regular installation's.
+      KAAL_RATE_PER_MINUTE: "1800"
       KAAL_DEMO_PASSWORD: ${KAAL_DEMO_PASSWORD:?Run deploy/demo/run.sh first}
       KAAL_DEMO_ADMIN_PASSWORD: ${KAAL_DEMO_ADMIN_PASSWORD:?Run deploy/demo/run.sh first}
       KAAL_DEMO_RESET_AT: ${KAAL_DEMO_RESET_AT:-03:00}

@@ -14,7 +14,7 @@ While it runs, `kill -HUP` (deploy/demo/run.sh reset) puts the made-up data
 back at once. Everyone who looks at the demo signs in with the same published
 password, so every minute it also checks that the next visitor still can: a
 changed password or vault name is put back, and a deleted account or vault, or
-storage that strangers have mostly filled, brings the whole reset forward.
+storage that strangers have nearly filled, brings the whole reset forward.
 
 It needs the standard library, plus Pillow for the pictures, which the
 container image has.
@@ -55,10 +55,6 @@ NOTICE_TITLE = "Read me first: this is Kaal's demo"
 LOCAL = "http://127.0.0.1:8765"
 READY = Path("/tmp/kaal-demo-ready")
 CHECK_SECONDS = 60         # how often the reviewer's account is checked (see keep_reviewer)
-# How much of its storage may be used before the demo starts again. Well short of all of it:
-# a file being added needs room for more than its own size for a moment, so adding files
-# starts to fail some way before the storage is full.
-FULL = 0.75
 SESSION_COOKIES = {"kaal_session", "__Host-kaal_session"}   # over plain http, and over https
 RESET_AT = "03:00"         # UTC, unless KAAL_DEMO_RESET_AT says otherwise
 PASSWORD = re.compile(r"[A-Za-z0-9._-]{10,128}")
@@ -670,11 +666,20 @@ def keep_reviewer(connect: Callable[[], Kaal], run: Callable[[list[str]], str], 
     return found
 
 
-def nearly_full(folder: Path, limit: float = FULL) -> bool:
-    """Whether strangers have filled most of the demo's storage. Once it is full Kaal cannot add
-    a file, or even sign anyone in, so the demo starts again rather than wait for the night."""
-    usage = shutil.disk_usage(folder)
-    return usage.used >= usage.total * limit
+def room_to_keep() -> int:
+    """How many bytes of the demo's storage must stay free: Kaal's own floor (KAAL_FREE_SPACE_MB),
+    below which it stores nothing new, and twice the largest file it allows on top, so that
+    whoever comes next can add one (a file takes about a third more room once encrypted)."""
+    from kaal import server
+
+    settings = server.Settings.from_env()
+    return settings.free_space_bytes + 2 * settings.max_upload_bytes
+
+
+def nearly_full(folder: Path, keep: int) -> bool:
+    """Whether strangers have nearly filled the demo's storage. Kaal would soon refuse whatever
+    the next visitor adds, so the demo starts again rather than wait for the night."""
+    return shutil.disk_usage(folder).free < keep
 
 
 # --- the container's main process
@@ -743,6 +748,7 @@ def serve() -> int:
         return done.stdout
 
     connect = lambda: Kaal(http_sender(LOCAL))  # noqa: E731
+    keep = room_to_keep()
     wake = threading.Event()
     asked = {"reset": False}
 
@@ -772,6 +778,11 @@ def serve() -> int:
                 READY.write_text(secrets.token_hex(8) + "\n")
                 when = next_reset(datetime.now(timezone.utc), reset_at)
                 log.info("ready: %d notes and %d receipts, all made up; back to this at %s UTC", made["notes"], made["receipts"], f"{when:%Y-%m-%d %H:%M}")
+                # Starting again would not help a demo that is too small even when new.
+                too_small = nearly_full(home, keep)
+                if too_small:
+                    log.error("the demo's storage is too small for its made-up data and a file of the largest size allowed; "
+                              "give it more with KAAL_DEMO_STORAGE (see deploy/demo/README.md)")
                 check_at = time.monotonic() + CHECK_SECONDS
                 while not asked["reset"]:
                     if kaal_server.poll() is not None:
@@ -789,8 +800,8 @@ def serve() -> int:
                         if "gone" in found:
                             log.warning("the reviewer's account or one of its vaults had been deleted; putting the made-up data back now")
                             break
-                        if nearly_full(home):
-                            log.warning("the demo's storage was three quarters full; putting the made-up data back now")
+                        if not too_small and nearly_full(home, keep):
+                            log.warning("the demo's storage was nearly full; putting the made-up data back now")
                             break
                         if "password" in found:
                             log.warning("the reviewer's password had been changed; it is back to the one App Review was given")
