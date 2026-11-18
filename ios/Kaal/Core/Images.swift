@@ -1,19 +1,5 @@
 import SwiftUI
 
-#if canImport(UIKit)
-import UIKit
-typealias PlatformImage = UIImage
-extension Image {
-    init(platform image: PlatformImage) { self.init(uiImage: image) }
-}
-#else
-import AppKit
-typealias PlatformImage = NSImage
-extension Image {
-    init(platform image: PlatformImage) { self.init(nsImage: image) }
-}
-#endif
-
 /// Pictures of Kaal's files, kept in memory only while the app is open.
 final class ImageStore: @unchecked Sendable {
     static let shared = ImageStore()

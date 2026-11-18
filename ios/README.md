@@ -13,6 +13,13 @@ Trash and settings) and adds what a phone is good at:
 - **Works without a connection.** What you add from the Add screen is kept on
   the phone and sent when Kaal can be reached. It is left out of backups of
   the phone, and removed once Kaal has it.
+- **Save from other apps.** Kaal is in the share menu of Photos, Safari,
+  Files, Mail and other apps. It saves up to ten pictures, PDFs and other
+  files, a web page or some text as a note, and pictures or a PDF as a medical
+  receipt (several pictures become one PDF, a page each). A web page becomes a
+  note with its title and a link to it. It shows what it is about to save, and
+  you can give it a title. It needs a connection: if Kaal can't be reached, it
+  says so and stays open so you can try again.
 
 ## Signing in
 
@@ -24,7 +31,17 @@ server needs Kaal 0.24.0 or newer. How the hand-over is protected is described
 in the [main README](../README.md).
 
 The app keeps one secret, the session it was given, in the iPhone's keychain
-(this device only). It never sees your password.
+(this device only, and not in backups). It never sees your password.
+
+"Save to Kaal" in other apps' share menus is the app's share extension, and
+is signed in whenever the app is: the app keeps the session and the address
+of your Kaal in a keychain group that only the two of them can read (Keychain
+Sharing, named in [`Kaal.entitlements`](Kaal.entitlements) after the app's
+own identifier). A phone signed in before the extension existed stays signed
+in: the next time it is opened, the app puts what the extension needs there. Signing
+out of the app signs the extension out too. A build that is not signed, as in
+CI, has no such group; the app then works on its own as before, and the share
+extension says "Open Kaal and sign in first".
 
 ## Building it
 
@@ -51,6 +68,13 @@ on Developer Mode on it (Settings → Privacy & Security), choose it as the
 destination and press Run. With a free Apple ID the app has to be installed
 again from the Mac every seven days; with a paid developer account it lasts a
 year.
+
+The share extension is built and installed with the app, under the app's
+identifier with `.share` added (`com.example.yourname.Kaal.share`), so there
+is nothing else to set. Xcode registers both identifiers for you. A free Apple
+ID is enough: Keychain Sharing between an app and its own extension needs no
+paid account, and the app uses no App Groups. A free Apple ID may register
+only ten identifiers a week, and this takes two.
 
 [`install-on-iphone.sh`](install-on-iphone.sh) does the build and the install
 in one step once the Apple ID and the phone are set up, and is what to run
@@ -91,10 +115,21 @@ the app says so; dictation and the camera scanner need a real iPhone to try.
 
 ## How it is put together
 
-- `Kaal/Core/` has no screens: the API client (`API.swift`, `Endpoints.swift`),
-  signing in (`AppModel.swift`), the offline queue (`Outbox.swift`), dictation,
-  capture from camera, photos and files, and the Markdown reader.
+- `Shared/` is the code the app and its share extension both use: the API
+  client (`API.swift`, `Endpoints.swift`), the keychain, sending a note with
+  its files (`Sending.swift`), making pictures and PDFs ready to send
+  (`Pictures.swift`), the Markdown reader, and deciding what something shared
+  from another app is and what note or receipt it becomes (`Sharing.swift`,
+  `ShareReading.swift`). It has no screens.
+- `Kaal/Core/` is the rest of the app without screens: signing in
+  (`AppModel.swift`), the offline queue (`Outbox.swift`), dictation, and the
+  camera, photo and file pickers.
 - `Kaal/Views/` has one file per screen.
+- `KaalShare/` is the share extension: one sheet, in SwiftUI. Safari runs
+  `PageDetails.js` in the page being shared, which reads only its title and
+  address. Pictures are made small as they are read and other files wait on
+  disk, since iOS closes a share extension that uses much memory; it takes
+  files of up to 25 MB.
 - Answers from the server are read by field name (`JSON.swift`), as the web
   app reads them, so a server that gains a field does not break the app.
 - Files open in the app's own viewer (pictures and PDFs with zoom, text as

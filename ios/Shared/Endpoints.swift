@@ -71,7 +71,10 @@ extension KaalAPI {
         ])
     }
     func receipt(_ id: String) async throws -> JSON { try await result("GET", "/v1/medical/receipts/\(pathPart(id))") }
-    func captureReceipt(_ file: Upload) async throws -> JSON { try await result("POST", "/v1/medical/receipts", file: file) }
+    /// `title` is what to call the receipt; without one Kaal names it after its file.
+    func captureReceipt(_ file: Upload, title: String = "") async throws -> JSON {
+        try await result("POST", "/v1/medical/receipts", file: file, fields: title.isEmpty ? [:] : ["title": title])
+    }
     func updateReceipt(_ id: String, fields: [String: String]) async throws {
         try await result("PATCH", "/v1/medical/receipts/\(pathPart(id))/fields", json: ["fields": fields])
     }

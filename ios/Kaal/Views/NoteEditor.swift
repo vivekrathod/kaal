@@ -208,7 +208,7 @@ struct NoteEditor: View {
         dictation.stop()
         saving = true
         defer { saving = false }
-        let tagList = QuickNote.tags(from: tags)
+        let tagList = NoteText.tags(from: tags)
         let done = await status.run(model) {
             if let noteID {
                 try await api.updateNote(noteID, title: name, tags: tagList, body: text)

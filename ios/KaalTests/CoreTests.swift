@@ -231,18 +231,19 @@ final class MarkdownTests: XCTestCase {
     }
 }
 
-final class QuickNoteTests: XCTestCase {
+final class NoteTextTests: XCTestCase {
     func testTheFirstLineBecomesTheTitle() {
-        XCTAssertEqual(QuickNote.split("  Milk and eggs\nfor Saturday  ").title, "Milk and eggs")
-        XCTAssertEqual(QuickNote.split("Milk and eggs\nfor Saturday").body, "Milk and eggs\nfor Saturday")
-        XCTAssertEqual(QuickNote.split("# Heading\ntext").title, "Heading")
-        let long = QuickNote.split(String(repeating: "word ", count: 40)).title
+        XCTAssertEqual(NoteText.split("  Milk and eggs\nfor Saturday  ").title, "Milk and eggs")
+        XCTAssertEqual(NoteText.split("Milk and eggs\nfor Saturday").body, "Milk and eggs\nfor Saturday")
+        XCTAssertEqual(NoteText.split("# Heading\ntext").title, "Heading")
+        XCTAssertEqual(NoteText.split("  \n ").title, "Note")
+        let long = NoteText.split(String(repeating: "word ", count: 40)).title
         XCTAssertLessThanOrEqual(long.count, 81)
         XCTAssertTrue(long.hasSuffix("…"))
     }
 
     func testTags() {
-        XCTAssertEqual(QuickNote.tags(from: " home, #taxes ,home,, "), ["home", "taxes"])
+        XCTAssertEqual(NoteText.tags(from: " home, #taxes ,home,, "), ["home", "taxes"])
     }
 }
 
