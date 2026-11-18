@@ -97,7 +97,9 @@ final class ScenarioTests: XCTestCase {
             secret.tap()
             secret.typeText(password)
             shot("02-kaal-sign-in-page")
-            page.buttons["Sign in"].tap()
+            // Return sends the form, as the keyboard's Go key does. The bar above the
+            // keyboard can cover the page's Sign in button, so a tap there can miss.
+            secret.typeText("\n")
         }
 
         // The browser may offer to remember the password first.
@@ -160,7 +162,12 @@ final class ScenarioTests: XCTestCase {
         shot("10-note-in-trash")
         remove.tap()
         confirm("Delete forever")
-        appears(app.staticTexts["The Trash is empty."], "an empty Trash", timeout: 30)
+        // Gone from the Trash. Other things may be in it, as in Kaal's demo (deploy/demo).
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: trashed)
+        if XCTWaiter().wait(for: [gone], timeout: 30) != .completed {
+            shot("failed-note-still-in-trash")
+            XCTFail("the note was not deleted for good")
+        }
     }
 
     func test03ANoteShowsItsMarkdownAndFiles() {

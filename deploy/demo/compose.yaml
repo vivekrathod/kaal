@@ -1,0 +1,67 @@
+# Kaal's demo with Docker Compose. Run deploy/demo/run.sh instead of using
+# this file directly: it writes the settings file these values come from.
+#
+# This is the regular setup in deploy/docker/compose.yaml, with the same image
+# and the same hardening (read-only, no capabilities, no new privileges,
+# reachable directly only from this machine), and these differences:
+#   - everything it stores is held in memory, capped in size, and gone when it
+#     restarts or is put back, so it never shares or keeps anything on disk;
+#   - demo.py starts Kaal, fills it with made-up data and puts that back nightly;
+#   - smaller limits on uploads, memory and processes, since strangers can reach it;
+#   - none of a regular installation's own settings (deploy/docker/kaal.env) apply;
+#   - there are no backups, since nothing in it is worth keeping.
+# KAAL_DEMO_STORAGE, KAAL_DEMO_MAX_UPLOAD_BYTES and KAAL_DEMO_MEMORY can be set
+# in the demo's settings file to change those limits (see README.md here).
+name: kaal-demo
+
+services:
+  kaal:
+    extends:
+      file: ../docker/compose.yaml
+      service: kaal
+    image: ${KAAL_IMAGE:?Run deploy/demo/run.sh first}
+    command: ["python", "/opt/kaal-demo/demo.py", "serve"]
+    env_file: !reset []
+    environment:
+      KAAL_PUBLIC_URL: ${KAAL_PUBLIC_URL:?Run deploy/demo/run.sh first}
+      KAAL_COOKIE_SECURE: ${KAAL_COOKIE_SECURE:-1}
+      # Receipts are read by Kaal's own rules; nothing is sent to a model.
+      KAAL_RECEIPT_AI: "off"
+      # Limits for a server strangers can reach: small files only, no new
+      # accounts even if sign-up were opened, and few vaults per person.
+      KAAL_MAX_UPLOAD_BYTES: ${KAAL_DEMO_MAX_UPLOAD_BYTES:-10485760}
+      KAAL_SIGNUPS_PER_HOUR: "0"
+      KAAL_VAULTS_PER_PERSON: "3"
+      KAAL_DEMO_PASSWORD: ${KAAL_DEMO_PASSWORD:?Run deploy/demo/run.sh first}
+      KAAL_DEMO_ADMIN_PASSWORD: ${KAAL_DEMO_ADMIN_PASSWORD:?Run deploy/demo/run.sh first}
+      KAAL_DEMO_RESET_AT: ${KAAL_DEMO_RESET_AT:-03:00}
+    # In place of the regular data and key volumes: only the demo's own script.
+    volumes: !override
+      - ./demo.py:/opt/kaal-demo/demo.py:ro
+    # The whole demo, key included, lives here. The size cap is what keeps
+    # strangers from filling the machine; the nightly reset empties it.
+    tmpfs:
+      - /srv/kaal:size=${KAAL_DEMO_STORAGE:-256m},uid=999,gid=999,mode=0700
+      - /etc/kaal:size=1m,uid=999,gid=999,mode=0700
+    # What is held in memory above counts here too. Reading a large photo by
+    # OCR is what needs the rest; if it ever runs out, the demo starts again
+    # with the made-up data instead of taking the machine down with it.
+    mem_limit: ${KAAL_DEMO_MEMORY:-1g}
+    pids_limit: 256
+    # Healthy only once the made-up data is in, so run.sh knows when to say so.
+    healthcheck:
+      test: ["CMD", "python", "/opt/kaal-demo/demo.py", "health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 3m
+      retries: 3
+
+  # HTTPS for the demo's own domain, exactly as for a regular installation.
+  caddy:
+    extends:
+      file: ../docker/compose.yaml
+      service: caddy
+
+volumes:
+  caddy-data:
+  caddy-config:
