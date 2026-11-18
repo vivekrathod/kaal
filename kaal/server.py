@@ -834,18 +834,44 @@ def flow_cookie_name(settings: "Settings") -> str:
     return HOST_FLOW_COOKIE if settings.cookie_secure else FLOW_COOKIE
 
 
+HOST_COOKIE_SINCE = "host_cookie_since"
+
+
+def _older_than_the_host_cookie(state: Any, presented: str) -> bool:
+    """Whether a session or token was made before this server began tying its cookie to the host.
+
+    Only those may still arrive in the old cookie from a browser: someone on a neighbouring host
+    who plants a cookie can plant only a session of their own, and after the change a new one is
+    never accepted under the old name."""
+    since = state.accounts.get(HOST_COOKIE_SINCE)
+    if not since:
+        return False
+    found = state.accounts.session(presented) or state.tokens.authenticate(presented)
+    return bool(found) and str(found.get("created") or "9") < since
+
+
 def presented_session(request: Request) -> str:
     """The session (or, from older sign-ins, the token) a request carries: the app's header, or the
-    browser's cookie. The un-prefixed cookie is believed over https only from a client that is not a
-    browser (one sending no Sec-Fetch-Site), which is what an app installed before the change sends."""
-    settings = request.app.state.kaal.settings
+    browser's cookie. Over https the un-prefixed cookie is believed only from a client that is not a
+    browser (one sending no Sec-Fetch-Site), which is what an app installed before the change sends,
+    or for a sign-in older than the change, which is then moved to the new cookie."""
+    state = request.app.state.kaal
+    settings = state.settings
     header = request.headers.get(SESSION_HEADER, "").strip()
     if header:
         return header
     cookie = request.cookies.get(session_cookie_name(settings), "").strip()
     if cookie or not settings.cookie_secure:
         return cookie
-    return request.cookies.get(SESSION_COOKIE, "").strip() if not request.headers.get("sec-fetch-site") else ""
+    legacy = request.cookies.get(SESSION_COOKIE, "").strip()
+    if not legacy:
+        return ""
+    if not request.headers.get("sec-fetch-site"):
+        return legacy
+    if _older_than_the_host_cookie(state, legacy):
+        request.state.move_cookie = legacy
+        return legacy
+    return ""
 
 
 def set_session_cookie(response: Response, settings: "Settings", value: str) -> None:
@@ -1437,6 +1463,9 @@ def create_app(settings: Settings) -> FastAPI:
     app.state.kaal.services = oidc.Services()
     app.state.kaal.strangers = RateLimiter(settings.strangers_per_minute)
     app.state.kaal.usage = Usage()
+    if store.get(HOST_COOKIE_SINCE) is None:
+        # From now on a browser's sign-in is accepted only in the cookie tied to this host.
+        store.put(HOST_COOKIE_SINCE, accounts._now())
     app.state.kaal.downloads = Downloads(settings.download_memory_bytes)
     # Adding someone to a vault says whether that sign-in name exists; nobody needs to try many a minute.
     app.state.kaal.invites = RateLimiter(10)
@@ -1477,6 +1506,11 @@ def create_app(settings: Settings) -> FastAPI:
         route = request.scope.get("route")
         template = getattr(route, "path", "(unmatched)")
         token_name = getattr(request.state, "token_name", "-")
+        moved = getattr(request.state, "move_cookie", None)
+        if moved and response.status_code < 400 and "set-cookie" not in response.headers:
+            # A browser signed in before the cookie was tied to the host: hand it the same sign-in under the new name.
+            set_session_cookie(response, settings, moved)
+            response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=True, samesite="strict")
         needed, held = getattr(request.state, "needed", ()), getattr(request.state, "scopes", None)
         if (held is not None and "reveal" not in held and ("write" in needed or "delete" in needed) and response.status_code == 200
                 and response.headers.get("content-type", "").startswith("application/json")):

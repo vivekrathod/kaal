@@ -215,6 +215,26 @@ def test_over_https_the_session_cookie_is_host_only_and_a_planted_one_is_ignored
     assert plain.get("/v1/session", headers={"X-Kaal-Session": session}).status_code == 200
 
 
+def test_a_browser_signed_in_before_the_change_is_moved_to_the_new_cookie_once(house):
+    sam = house.signed_in("sam")
+    session = sam.cookies.get("__Host-kaal_session")
+    browser = {"Cookie": f"kaal_session={session}", "Sec-Fetch-Site": "same-origin"}
+    plain = house.visitor("192.0.2.9")
+    assert plain.get("/v1/session", headers=browser).status_code == 401              # made after the change: the old name is refused
+    # The same sign-in, had it been made before this server tied its cookie to the host.
+    house.store.put(server.HOST_COOKIE_SINCE, "2999-01-01T00:00:00+00:00")
+    moved = plain.get("/v1/session", headers=browser)
+    assert moved.status_code == 200
+    told = moved.headers.get_list("set-cookie")
+    assert any(line.startswith(f"__Host-kaal_session={session};") and "Secure" in line and "HttpOnly" in line for line in told)
+    assert any(line.startswith('kaal_session="";') and "Max-Age=0" in line for line in told)
+    # A token used as a browser's sign-in (from before there were accounts) is treated the same way.
+    secret = tokens.TokenStore(house.home / "tokens.json").create("made-up", ["read"])[1]
+    assert plain.get("/v1/session", headers={"Cookie": f"kaal_session={secret}", "Sec-Fetch-Site": "same-origin"}).status_code == 200
+    house.store.put(server.HOST_COOKIE_SINCE, "2000-01-01T00:00:00+00:00")
+    assert plain.get("/v1/session", headers={"Cookie": f"kaal_session={secret}", "Sec-Fetch-Site": "same-origin"}).status_code == 401
+
+
 def test_https_answers_tell_browsers_to_stay_on_https(house, tmp_path):
     assert house.visitor().get("/v1/health").headers["Strict-Transport-Security"] == "max-age=31536000"
     insecure = house.build(cookie_secure=False)

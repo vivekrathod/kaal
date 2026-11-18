@@ -180,8 +180,8 @@ def stage(tmp_path, request):
         core.configure_vault(saved)
 
 
-def drive(stage, script):
-    env = {**os.environ, "E2E_KAAL": stage.kaal, "E2E_SITE": stage.site, "E2E_TOKEN": stage.token, "E2E_DEBUG_PORT": str(stage.debug_port), "E2E_EXTENSION_ID": extension_id()}
+def drive(stage, script, **more):
+    env = {**os.environ, "E2E_KAAL": stage.kaal, "E2E_SITE": stage.site, "E2E_TOKEN": stage.token, "E2E_DEBUG_PORT": str(stage.debug_port), "E2E_EXTENSION_ID": extension_id(), **more}
     done = subprocess.run(["node", str(DRIVER.with_name(script))], env=env, capture_output=True, text=True, timeout=300)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-2000:]
     return json.loads(done.stdout)
@@ -267,3 +267,30 @@ def test_connect_save_review_and_close_in_a_real_browser(stage):
     assert locked["stage"] == "error" and locked["site"] == stage.site and "403" in locked["message"]
     assert locked["offer"] == f"Let Kaal fetch from {stage.site.removeprefix('http://')}" and locked["retry"] == "Try again"
     assert locked["accessHeld"] is False and locked["receiptsAdded"] == 0 and out["hostAccessAtTheEnd"] == []
+
+
+def test_connecting_by_signing_in_hands_the_extension_a_token_of_its_own(stage, tmp_path):
+    # A made-up person with a vault of their own and a made-up password, as the installer and a setup link would leave them.
+    store = server.open_store(server.Settings(home=tmp_path, vault=tmp_path / "data", tokens_file=tmp_path / "tokens.json", tmp_dir=tmp_path / "tmp"))
+    person = store.add_account("sam")
+    server.create_vault(store, "Made-up notes", person["id"])
+    password = "a made-up password for the test"
+    setup = urllib.request.Request(f"{stage.kaal}/v1/setup", data=json.dumps({"code": store.new_setup_code("sam"), "password": password}).encode(),
+                                   headers={"Content-Type": "application/json", "X-Kaal-Request": "1"})
+    assert urllib.request.urlopen(setup, timeout=10).status == 200
+
+    out = drive(stage, "connect.mjs", E2E_LOGIN="sam", E2E_PASSWORD=password)
+
+    assert out["noAddress"].startswith("Enter Kaal's address first")
+    # Kaal's own page, in a window of its own, asked for this extension by its id.
+    assert out["opened"] == f"{stage.kaal}/#/app-sign-in/CHALLENGE?for=extension&id={extension_id()}"
+    assert out["waiting"].startswith("Waiting for you to sign in")
+    assert out["question"] == "Connect the Kaal extension?" and out["cancelOffered"] is True
+    # Cancelling saves nothing.
+    assert "cancelled" in out["cancelled"] and out["afterCancel"] == []
+    # Allowing hands the extension a token of its own, for that person's vault, and closes the window.
+    assert out["connected"] == "Connected as “sam”, saving into “Made-up notes”."
+    assert out["storedServer"] == stage.kaal and out["tokenShape"] is True and out["tokenFieldEmpty"] is True and out["windowsLeft"] == 0
+    assert out["session"] == {"name": "Chrome extension", "scopes": ["read", "reveal", "write"]}
+    made = [record for record in tokens.TokenStore(tmp_path / "tokens.json").list() if record["name"] == "Chrome extension"]
+    assert len(made) == 1 and made[0].get("account") == person["id"] and not made[0].get("revoked_at")
