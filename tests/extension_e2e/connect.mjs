@@ -7,9 +7,12 @@ const { E2E_KAAL: KAAL, E2E_DEBUG_PORT: debugPort, E2E_EXTENSION_ID: extensionId
 const browser = new Browser(Number(debugPort));
 const out = {};
 process.on("unhandledRejection", (error) => { throw error; });
-process.on("uncaughtException", (error) => {
+let win = null;
+process.on("uncaughtException", async (error) => {
   console.log(JSON.stringify(out, null, 2));
   console.log("FAILED:", error.message);
+  // What the sign-in window was showing, which is usually the answer.
+  try { console.log("window:", await win.run("location.href + ' | ' + document.body.innerText.slice(0, 400)")); } catch {}
   process.exit(1);
 });
 
@@ -31,7 +34,7 @@ await page.click("#signin");
 let flow = await signInWindow();
 out.opened = flow.url.replace(/app-sign-in\/[^?]+/, "app-sign-in/CHALLENGE");
 out.waiting = await status();
-let win = await new Page(flow.webSocketDebuggerUrl).open();
+win = await new Page(flow.webSocketDebuggerUrl).open();
 await until(() => win.run("Boolean(document.getElementById('password'))"), "the sign-in form");
 await win.run(`document.getElementById('login').value = ${JSON.stringify(login)}; document.getElementById('password').value = ${JSON.stringify(password)}; document.querySelector('form').requestSubmit(); 1`);
 await offered(win, "Allow");

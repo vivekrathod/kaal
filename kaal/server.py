@@ -12,9 +12,11 @@ strings, file contents or tokens.
 from __future__ import annotations
 
 import argparse
+import asyncio
 from datetime import datetime, timezone
 import contextlib
 import functools
+import gc
 import hashlib
 import ipaddress
 import json
@@ -225,7 +227,7 @@ def client_address(request: Request) -> str:
 
 def log_safe(text: str, limit: int = 80) -> str:
     """Text from outside (a token's name, a method, a provider's message) made safe for one log line."""
-    return re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]", "?", str(text))[:limit]
+    return re.sub(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]", "?", str(text))[:limit]
 
 
 class ExtractionWorker:
@@ -476,12 +478,26 @@ class ExtensionCorsMiddleware:
         await self.app(scope, receive, named_send)
 
 
+UPLOAD_ROUTE = re.compile(r"/v1/(?:captures|medical/receipts|notes/[^/]+/attachments|library/notes/[^/]+/attachments)")
+ONCE_ONLY = (b"content-type", b"content-length", b"authorization", b"transfer-encoding", b"x-kaal-session")
+BODY_IDLE_SECONDS = 60.0
+
+
+class _TooSlow(Exception):
+    pass
+
+
 class BodyLimitMiddleware:
     """Reject request bodies over a byte limit, declared or streamed.
 
-    Only an upload from someone signed in may be large. Anything else (a JSON body, or any body
-    from a request that carries no valid credential) is held to a small limit, checked before
-    the body is read, so strangers cannot make the server read or store large bodies."""
+    Only a file sent to one of the upload routes by someone signed in may be large. Everything
+    else (any other route, or any body from a request that carries no valid credential) is held
+    to a small limit, checked before the body is read, so that nobody can make the server read,
+    parse or store a large body it has no use for. The limit is chosen by where the request is
+    going, not by what it says it carries. A request that is not clear about its size or about
+    who sends it (a header that matters given twice, or a length together with chunked encoding)
+    is refused, since this layer and the one that reads the body could each believe a different one.
+    """
 
     UPLOADS_AT_ONCE = 4
 
@@ -495,13 +511,14 @@ class BodyLimitMiddleware:
         self._uploading: dict[str, int] = {}
         self._lock = threading.Lock()
 
-    def _limit_for(self, headers: dict[bytes, bytes], declared: int | None) -> tuple[int, str]:
-        """The most this request may send, and whose upload it is when it may be large."""
-        limit = self.limit
-        if not headers.get(b"content-type", b"").lower().startswith(b"multipart/"):
-            limit = min(limit, JSON_BODY_BYTES)
+    def _limit_for(self, scope: dict, headers: dict[bytes, bytes], declared: int | None) -> tuple[int, str]:
+        """The most this request may send, and whose it is when it may be more than a stranger's."""
+        upload = scope.get("method") == "POST" and UPLOAD_ROUTE.fullmatch(scope.get("path", "")) is not None
+        limit = self.limit if upload else min(self.limit, JSON_BODY_BYTES)
         who = ""
-        if (declared is None or declared > STRANGER_BODY_BYTES) and self.credentials is not None:
+        # A request with neither a length nor chunked encoding has no body at all: nothing to ask about.
+        sized_or_streamed = declared is not None or b"transfer-encoding" in headers
+        if sized_or_streamed and (declared is None or declared > STRANGER_BODY_BYTES) and self.credentials is not None:
             who = self.credentials(headers)
             if not who:
                 limit = min(limit, STRANGER_BODY_BYTES)
@@ -511,39 +528,55 @@ class BodyLimitMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        headers = dict(scope.get("headers") or [])
+        listed = scope.get("headers") or []
+        headers = dict(listed)
+        names = [name for name, _value in listed]
+        # Cookies may arrive as several headers; they are read as one.
+        headers[b"cookie"] = b"; ".join(value for name, value in listed if name == b"cookie")
         raw = headers.get(b"content-length")
-        declared = int(raw) if raw and raw.isdigit() else None
-        limit, who = self._limit_for(headers, declared)
+        if any(names.count(name) > 1 for name in ONCE_ONLY) or (raw is not None and b"transfer-encoding" in headers) or (raw is not None and not raw.isdigit()):
+            await _send_json(send, 400, {"error": "The request is not clear about its size or who sends it.", "kind": "invalid"})
+            return
+        declared = int(raw) if raw is not None else None
+        limit, who = self._limit_for(scope, headers, declared)
         if declared is not None and declared > limit:
             await _send_json(send, 413, {"error": "Request is too large.", "kind": "too_large"})
             return
-        # A large body is written to disk as it arrives, before anything else looks at the request:
-        # so the disk's floor, and how many one person sends at once, are checked here.
-        large = bool(who) and scope.get("method") in ("POST", "PUT", "PATCH") and limit > STRANGER_BODY_BYTES
-        if large and self.full is not None and self.full(declared or 0):
+        # A large body is written to disk or held in memory as it arrives, before anything else looks
+        # at the request: so the disk's floor, and how many one person sends at once, are checked here.
+        large = bool(who) and limit > STRANGER_BODY_BYTES
+        if large and limit > JSON_BODY_BYTES and self.full is not None and self.full(declared or 0):
             await _send_json(send, 507, {"error": FULL_DISK, "kind": "full"})
             return
         if large:
             with self._lock:
-                if self._uploading.get(who, 0) >= self.UPLOADS_AT_ONCE:
-                    busy = True
-                else:
-                    busy = False
+                busy = self._uploading.get(who, 0) >= self.UPLOADS_AT_ONCE
+                if not busy:
                     self._uploading[who] = self._uploading.get(who, 0) + 1
             if busy:
-                await _send_json(send, 429, {"error": "You are sending several large files at once. Wait for one to finish.", "kind": "rate_limited"})
+                await _send_json(send, 429, {"error": "You are sending several large requests at once. Wait for one to finish.", "kind": "rate_limited"})
                 return
         received = 0
         started = False
+        finished = False
+        body_done = False
 
         async def limited_receive() -> dict:
-            nonlocal received
-            message = await receive()
+            nonlocal received, body_done
+            if body_done:
+                return await receive()      # nothing more to read: this only waits to hear that the client has gone
+            try:
+                # A body that stops arriving is given up on, so a connection cannot be parked half-sent.
+                message = await asyncio.wait_for(receive(), BODY_IDLE_SECONDS)
+            except asyncio.TimeoutError:
+                raise _TooSlow() from None
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > limit:
                     raise _TooLarge()
+                body_done = not message.get("more_body", False)
+            else:
+                body_done = True
             return message
 
         async def tracking_send(message: dict) -> None:
@@ -554,9 +587,13 @@ class BodyLimitMiddleware:
 
         try:
             await self.app(scope, limited_receive, tracking_send)
+            finished = True
         except _TooLarge:
             if not started:
                 await _send_json(send, 413, {"error": "Request is too large.", "kind": "too_large"})
+        except _TooSlow:
+            if not started:
+                await _send_json(send, 408, {"error": "The request stopped arriving.", "kind": "timeout"})
         finally:
             if large:
                 with self._lock:
@@ -565,6 +602,10 @@ class BodyLimitMiddleware:
                         self._uploading[who] = left
                     else:
                         self._uploading.pop(who, None)
+                if not (finished and body_done):
+                    # An upload cut off part-way leaves its temporary file open until the objects
+                    # holding it are collected; do that now rather than whenever it next happens.
+                    gc.collect()
 
 
 async def _send_json(send: Callable, status: int, payload: dict) -> None:
@@ -905,7 +946,7 @@ def cookie_named(header: str, name: str) -> str:
 
 
 def exact_cookie(request: Request, name: str) -> str:
-    return cookie_named(request.headers.get("cookie", ""), name)
+    return cookie_named("; ".join(request.headers.getlist("cookie")), name)
 
 
 HOST_COOKIE_SINCE = "host_cookie_since"
@@ -1390,7 +1431,7 @@ class ExtractRun(BaseModel):
 
 
 class ReceiptFields(BaseModel):
-    fields: dict[str, str]
+    fields: dict[str, str] = Field(max_length=50)
 
 
 class ReportFilter(BaseModel):
@@ -1666,8 +1707,8 @@ def create_app(settings: Settings) -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
         # Name the fields only: FastAPI's default response echoes the submitted values.
-        fields = sorted({".".join(str(part) for part in err.get("loc", ())) for err in exc.errors()})
-        return _error(400, "The request is not valid.", "invalid", {"fields": fields})
+        fields = sorted({".".join(str(part) for part in err.get("loc", ()))[:200] for err in exc.errors()})
+        return _error(400, "The request is not valid.", "invalid", {"fields": fields[:20], **({"more": len(fields) - 20} if len(fields) > 20 else {})})
 
     @app.exception_handler(Exception)
     async def unexpected_error(_request: Request, exc: Exception) -> JSONResponse:
