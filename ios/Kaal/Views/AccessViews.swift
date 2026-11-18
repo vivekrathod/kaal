@@ -160,6 +160,12 @@ struct TokensView: View {
     @State private var name = ""
     @State private var vault = ""
     @State private var chosen: Set<String> = ["read", "reveal"]
+    /// The password, or the sign-in name of someone who has no password, typed to make a token.
+    @State private var proof = ""
+
+    /// Someone who signs in only through a service has no password to give; their sign-in name,
+    /// typed out, stands in for it. A server that does not say is taken to mean there is one.
+    private var hasPassword: Bool { model.account.has_password != .bool(false) }
 
     private static let scopes: [(String, String)] = [
         ("read", "See titles, lists and search results"),
@@ -202,7 +208,7 @@ struct TokensView: View {
             } footer: {
                 Text("A token lets a script, the command-line tool or the browser extension use a vault as you, within the limits you give it. It can never change your password or make other tokens.")
             }
-            Section("Make a token") {
+            Section {
                 TextField("What is it for? For example: backup script", text: $name)
                 if model.vaults.count > 1 {
                     Picker("Which vault", selection: $vault) {
@@ -217,18 +223,36 @@ struct TokensView: View {
                         }
                     }
                 }
+                if hasPassword {
+                    SecureField("Your password", text: $proof).textContentType(.password)
+                } else {
+                    TextField("Type your sign-in name to confirm", text: $proof).typedExactly()
+                }
                 AsyncButton("Make token") {
                     let label = name.trimmingCharacters(in: .whitespaces)
                     guard !label.isEmpty, !chosen.isEmpty else {
                         status.say("Give it a name and at least one thing it may do.", .error)
                         return
                     }
+                    let typed = hasPassword ? proof : proof.trimmingCharacters(in: .whitespaces)
+                    guard !typed.isEmpty else {
+                        status.say(hasPassword ? "Enter your password to make a token." : "Type your sign-in name to make a token.", .error)
+                        return
+                    }
                     await run {
-                        made = try await $0.createToken(name: label, scopes: Self.scopes.map(\.0).filter(chosen.contains), vault: vault.isEmpty ? model.vault.id.text : vault)
+                        made = try await $0.createToken(name: label, scopes: Self.scopes.map(\.0).filter(chosen.contains), vault: vault.isEmpty ? model.vault.id.text : vault,
+                                                        password: hasPassword ? typed : "", confirm: hasPassword ? "" : typed)
                         tokens = try await $0.tokens()
                         name = ""
+                        proof = ""
                     }
                 }
+            } header: {
+                Text("Make a token")
+            } footer: {
+                // A token outlasts this sign-in, so Kaal wants to know it is really you asking.
+                Text(hasPassword ? "Kaal asks for your password, so that someone holding your phone cannot leave themselves a way in."
+                     : "You have no password here, so Kaal asks for your sign-in name (\(model.account.login.text)) instead.")
             }
         }
         .navigationTitle("Tokens")
@@ -271,11 +295,16 @@ struct PeopleView: View {
                         Text(person.name.text).bold()
                         Text(describe(person)).font(.footnote).foregroundStyle(.secondary)
                         HStack {
-                            AsyncButton(person.has_password.isTrue ? "Reset link" : "Setup link") {
-                                await run {
-                                    let path = try await $0.newSetupLink(account: person.id.text)
-                                    all = try await $0.everyone()
-                                    link = (person.login.text, path)
+                            // Only for someone who has never signed in. Whoever uses a setup link signs in as
+                            // that person, so Kaal gives an administrator none for an account already in use;
+                            // whoever runs the server can make one (kaal-server account setup-link).
+                            if Self.maySetUp(person) {
+                                AsyncButton("New setup link") {
+                                    await run {
+                                        let path = try await $0.newSetupLink(account: person.id.text)
+                                        all = try await $0.everyone()
+                                        link = (person.login.text, path)
+                                    }
                                 }
                             }
                             if person.id.text != all.you.text {
@@ -308,7 +337,7 @@ struct PeopleView: View {
             } header: {
                 Text("People")
             } footer: {
-                Text("Switching someone off signs them out and stops their tokens. Their notes are kept.")
+                Text("Switching someone off signs them out and stops their tokens. Their notes are kept. A new setup link can be made here only for someone who has not signed in yet; for anyone else, whoever runs this Kaal can make one, or they can use one of their recovery codes.")
             }
             Section {
                 TextField("Sign-in name: a first name or an email address", text: $login).typedExactly()
@@ -352,6 +381,11 @@ struct PeopleView: View {
         .navigationTitle("People")
         .inlineTitle()
         .task { await run { all = try await $0.everyone() } }
+    }
+
+    /// Whether an administrator may make this person a setup link: only someone with no way in yet.
+    static func maySetUp(_ person: JSON) -> Bool {
+        !person.has_password.isTrue && person.services.list.isEmpty
     }
 
     private func describe(_ person: JSON) -> String {

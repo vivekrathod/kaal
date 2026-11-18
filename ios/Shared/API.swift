@@ -23,8 +23,10 @@ struct Upload: Equatable {
 /// Every request the app makes goes through here.
 ///
 /// The app is signed in as a person. It holds the session it was given and
-/// sends it the way a browser would, as the `kaal_session` cookie, with the
-/// header the server asks of anything that changes data.
+/// sends it in the `X-Kaal-Session` header, with the header the server asks of
+/// anything that changes data. It is never sent as a cookie: over https the
+/// server only takes a browser's cookie under a name an app has no reason to
+/// know, and a header cannot be planted by another site the way a cookie can.
 final class KaalAPI: @unchecked Sendable {
     let server: URL
     let session: String
@@ -82,7 +84,7 @@ final class KaalAPI: @unchecked Sendable {
         request.httpMethod = method
         request.setValue("1", forHTTPHeaderField: "X-Kaal-Request")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if !session.isEmpty { request.setValue("kaal_session=\(session)", forHTTPHeaderField: "Cookie") }
+        if !session.isEmpty { request.setValue(session, forHTTPHeaderField: "X-Kaal-Session") }
         return request
     }
 

@@ -45,11 +45,35 @@ final class APITests: XCTestCase {
         let api = StubServer.api(session: "ks_abc_secret")
         _ = try await api.result("POST", "/v1/library/notes", json: ["title": "T"])
         let asked = try XCTUnwrap(StubServer.asked.first)
-        XCTAssertEqual(asked.headers["Cookie"], "kaal_session=ks_abc_secret")
+        // In a header of its own, never a cookie, which a server reached over https would not take.
+        XCTAssertEqual(asked.headers["X-Kaal-Session"], "ks_abc_secret")
+        XCTAssertNil(asked.headers["Cookie"])
         XCTAssertEqual(asked.headers["X-Kaal-Request"], "1")
         XCTAssertNil(asked.headers["Authorization"])
         XCTAssertEqual(asked.json.title.text, "T")
         XCTAssertEqual(api.serverVersion, "0.24.0")
+    }
+
+    func testATokenIsAskedForWithThePasswordOrTheSignInNameOfSomeoneWhoHasNone() async throws {
+        StubServer.reset { _ in (200, ["result": ["token": ["name": "backup"], "secret": "kaal_made_up"]]) }
+        let api = StubServer.api()
+        _ = try await api.createToken(name: "backup", scopes: ["read"], vault: "v1", password: "made-up password")
+        _ = try await api.createToken(name: "backup", scopes: ["read"], vault: "v1", confirm: "jane")
+        let asked = StubServer.asked
+        XCTAssertEqual(asked.map(\.path), ["/v1/account/tokens", "/v1/account/tokens"])
+        XCTAssertEqual(asked[0].json.password.text, "made-up password")
+        XCTAssertTrue(asked[0].json.confirm.isNull)
+        XCTAssertEqual(asked[1].json.confirm.text, "jane")
+        XCTAssertTrue(asked[1].json.password.isNull)
+        XCTAssertEqual(asked[1].json.scopes.strings, ["read"])
+    }
+
+    func testASetupLinkIsOfferedOnlyForSomeoneWhoHasNeverSignedIn() {
+        func person(_ text: String) -> JSON { JSON.parse(Data(text.utf8)) }
+        XCTAssertTrue(PeopleView.maySetUp(person(#"{"has_password": false, "services": []}"#)))
+        XCTAssertTrue(PeopleView.maySetUp(person(#"{"has_password": false, "link_waiting": true}"#)))
+        XCTAssertFalse(PeopleView.maySetUp(person(#"{"has_password": true, "services": []}"#)))
+        XCTAssertFalse(PeopleView.maySetUp(person(#"{"has_password": false, "services": ["google"]}"#)))
     }
 
     func testSearchWordsGoInTheBodyNeverTheAddress() async throws {

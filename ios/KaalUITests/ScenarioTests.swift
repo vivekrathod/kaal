@@ -10,9 +10,12 @@ import XCTest
 ///
 /// The person needs a vault with at least one receipt waiting for review and a note
 /// called "Made-up house notes". `KAAL_UI_SHOTS` names a folder to keep pictures of each screen in.
+///
+/// The tests run in the order of their names, and each relies on the ones before it: the first
+/// signs in and the last ones sign out. Those that save from other apps are in ShareScenarioTests.swift.
 final class ScenarioTests: XCTestCase {
-    private let environment = ProcessInfo.processInfo.environment
-    private var app: XCUIApplication!
+    let environment = ProcessInfo.processInfo.environment
+    var app: XCUIApplication!
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -22,17 +25,17 @@ final class ScenarioTests: XCTestCase {
 
     // MARK: Helpers
 
-    private func launch(fresh: Bool = false) {
+    func launch(fresh: Bool = false) {
         app.launchArguments = fresh ? ["-kaal-start-fresh"] : []
         app.launch()
     }
 
-    private func shot(_ name: String) {
+    func shot(_ name: String) {
         guard let folder = environment["KAAL_UI_SHOTS"] else { return }
         try? XCUIScreen.main.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: folder).appendingPathComponent(name + ".png"))
     }
 
-    private func appears(_ element: XCUIElement, _ what: String, timeout: TimeInterval = 20, file: StaticString = #filePath, line: UInt = #line) {
+    func appears(_ element: XCUIElement, _ what: String, timeout: TimeInterval = 20, file: StaticString = #filePath, line: UInt = #line) {
         if !element.waitForExistence(timeout: timeout) {
             shot("failed-\(what.replacingOccurrences(of: " ", with: "-"))")
             if let folder = environment["KAAL_UI_SHOTS"] {
@@ -42,18 +45,18 @@ final class ScenarioTests: XCTestCase {
         }
     }
 
-    private func labelled(_ kind: XCUIElementQuery, containing text: String) -> XCUIElement {
+    func labelled(_ kind: XCUIElementQuery, containing text: String) -> XCUIElement {
         kind.matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
     }
 
-    private func tab(_ name: String) {
+    func tab(_ name: String) {
         let button = app.tabBars.buttons[name]
         appears(button, "the \(name) tab")
         button.tap()
     }
 
     /// Press the destructive choice in the question a "cannot be undone" button asks.
-    private func confirm(_ label: String) {
+    func confirm(_ label: String) {
         let choices = app.buttons.matching(NSPredicate(format: "label == %@", label))
         let asked = expectation(for: NSPredicate(format: "count >= 1"), evaluatedWith: app.sheets.buttons.matching(NSPredicate(format: "label == %@", label)), handler: nil)
         if XCTWaiter().wait(for: [asked], timeout: 5) == .completed {
@@ -258,6 +261,16 @@ final class ScenarioTests: XCTestCase {
         people.tap()
         appears(app.buttons["Add and make a setup link"], "the People page", timeout: 30)
         shot("22a-people")
+        // A setup link is offered only for someone who has never signed in, which the person
+        // signed in here is not. Where the server has such a person, the link is made.
+        let link = app.buttons["New setup link"].firstMatch
+        if link.exists {
+            link.tap()
+            let made = labelled(app.staticTexts, containing: "Send them this link")
+            for _ in 0..<4 where !made.exists { app.swipeDown() }
+            appears(made, "the new setup link", timeout: 30)
+            shot("22a-setup-link")
+        }
         app.navigationBars.buttons.firstMatch.tap()
         let services = app.staticTexts["Sign-in services"]
         appears(services, "Sign-in services")
@@ -364,6 +377,47 @@ final class ScenarioTests: XCTestCase {
         if listening.exists { listening.tap() }
         app.buttons["Cancel"].tap()
         appears(speak, "the Add screen again")
+    }
+
+    func test09aATokenIsMadeOnlyWithThePassword() throws {
+        let password = try XCTUnwrap(environment["KAAL_UI_PASSWORD"])
+        launch()
+        tab("Settings")
+        let tokens = app.staticTexts["Tokens"]
+        for _ in 0..<6 where !tokens.exists { app.swipeUp() }
+        appears(tokens, "Tokens")
+        tokens.tap()
+        let name = app.textFields.firstMatch
+        appears(name, "the token's name", timeout: 30)
+        name.tap()
+        name.typeText("Made-up token from the UI test")
+        let make = app.buttons["Make token"]
+        let secret = app.secureTextFields["Your password"]
+        for _ in 0..<6 where !(make.exists && make.isHittable) { app.swipeUp() }
+        appears(secret, "the password field")
+
+        // Without the password Kaal is not even asked.
+        make.tap()
+        for _ in 0..<6 where !labelled(app.staticTexts, containing: "Enter your password").exists { app.swipeDown() }
+        appears(labelled(app.staticTexts, containing: "Enter your password to make a token."), "being asked for the password")
+
+        for _ in 0..<6 where !(secret.exists && secret.isHittable) { app.swipeUp() }
+        secret.tap()
+        secret.typeText(password)
+        for _ in 0..<6 where !(make.exists && make.isHittable) { app.swipeUp() }
+        make.tap()
+        let made = labelled(app.staticTexts, containing: "Copy it now")
+        for _ in 0..<6 where !made.exists { app.swipeDown() }
+        appears(made, "the new token, shown once", timeout: 30)
+        shot("30-token-made")
+
+        let revoke = app.buttons["Revoke"].firstMatch
+        appears(revoke, "the token in the list")
+        revoke.tap()
+        confirm("Revoke")
+        let none = app.staticTexts["No tokens."]
+        for _ in 0..<4 where !none.waitForExistence(timeout: 5) { app.swipeDown() }
+        appears(none, "the token gone", timeout: 30)
     }
 
     func test10SigningOutReturnsToTheFirstScreen() {

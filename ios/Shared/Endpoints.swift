@@ -31,8 +31,14 @@ extension KaalAPI {
     func disconnect(service: String) async throws { try await result("DELETE", "/v1/account/connections/\(pathPart(service))") }
 
     func tokens() async throws -> [JSON] { try await result("GET", "/v1/account/tokens").tokens.list }
-    func createToken(name: String, scopes: [String], vault: String) async throws -> JSON {
-        try await result("POST", "/v1/account/tokens", json: ["name": name, "scopes": scopes, "vault": vault])
+    /// A token outlasts the sign-in that made it, so Kaal asks who is asking: `password`, or,
+    /// for an account that has none (one that signs in only through a service), `confirm`,
+    /// the person's sign-in name typed out.
+    func createToken(name: String, scopes: [String], vault: String, password: String = "", confirm: String = "") async throws -> JSON {
+        var asked: [String: Any] = ["name": name, "scopes": scopes, "vault": vault]
+        if !password.isEmpty { asked["password"] = password }
+        if !confirm.isEmpty { asked["confirm"] = confirm }
+        return try await result("POST", "/v1/account/tokens", json: asked)
     }
     func revokeToken(_ id: String) async throws { try await result("DELETE", "/v1/account/tokens/\(pathPart(id))") }
 
@@ -52,6 +58,7 @@ extension KaalAPI {
     func addPerson(login: String, name: String) async throws -> JSON {
         try await result("POST", "/v1/admin/people", json: ["login": login, "name": name])
     }
+    /// Kaal makes one only for someone who has never signed in; for anyone else it says who can.
     func newSetupLink(account: String) async throws -> String {
         try await result("POST", "/v1/admin/people/\(pathPart(account))/setup-link").setup_path.text
     }
