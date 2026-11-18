@@ -51,7 +51,7 @@ final class APITests: XCTestCase {
         XCTAssertEqual(asked.headers["X-Kaal-Request"], "1")
         XCTAssertNil(asked.headers["Authorization"])
         XCTAssertEqual(asked.json.title.text, "T")
-        XCTAssertEqual(api.serverVersion, "0.24.0")
+        XCTAssertEqual(api.serverVersion, "0.25.0")
     }
 
     func testATokenIsAskedForWithThePasswordOrTheSignInNameOfSomeoneWhoHasNone() async throws {
@@ -146,6 +146,9 @@ final class SignInTests: XCTestCase {
         XCTAssertTrue(AppModel.isAtLeast("1.0", [0, 24, 0]))
         XCTAssertFalse(AppModel.isAtLeast("0.23.9", [0, 24, 0]))
         XCTAssertTrue(AppModel.isAtLeast("0.24.0-dev", [0, 24, 0]))
+        // The app sends its session in a header, which Kaal takes from 0.25.0.
+        XCTAssertFalse(AppModel.isAtLeast("0.24.0", AppModel.neededVersion))
+        XCTAssertTrue(AppModel.isAtLeast("0.25.0", AppModel.neededVersion))
     }
 }
 

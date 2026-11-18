@@ -201,6 +201,8 @@ struct TokensView: View {
                             }
                         }
                         .buttonStyle(.bordered).font(.footnote)
+                        // Read aloud with the token's name, as each row has a button of its own.
+                        .accessibilityLabel("Revoke \(token.name.text)")
                     }
                 }
             } header: {

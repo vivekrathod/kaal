@@ -142,6 +142,7 @@ struct Sharing: Equatable, Sendable {
         switch error.status {
         case 0: return "Kaal can't be reached. Check your connection, or that Kaal is running, and try again."
         case 401: return "Kaal has signed this iPhone out. Open Kaal and sign in again, then try again."
+        case _ where error.isFull: return error.message
         case 413: return "This is too large for Kaal to take. Try fewer files, or smaller ones."
         case 429: return "Kaal is busy. Wait a moment and try again."
         case 500...: return "Something went wrong in Kaal (\(error.status)). Try again in a moment."

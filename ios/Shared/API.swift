@@ -9,6 +9,9 @@ struct APIError: LocalizedError, Equatable {
     var errorDescription: String? { message }
     var isOffline: Bool { status == 0 }
     var isSignedOut: Bool { status == 401 }
+    /// Kaal has no room left: its disk is nearly full, or the vault is (which it says with the
+    /// status it gives a file that is too large). Its own words say which, and who can make room.
+    var isFull: Bool { status == 507 || (status == 413 && message.localizedCaseInsensitiveContains("is full")) }
 
     static let unreachable = APIError(status: 0, message: "Can't reach Kaal. Check your connection and try again.", kind: "unavailable")
 }

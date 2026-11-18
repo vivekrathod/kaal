@@ -130,8 +130,8 @@ final class Outbox {
                     return
                 }
                 // Busy or broken for now: try again later. Anything else is a refusal the person has to see.
-                if error.status == 429 || error.status >= 500 { return }
-                update(item.id) { $0.refused = error.status == 413 ? "It is too large for Kaal to take." : error.message }
+                if error.status == 429 || (error.status >= 500 && !error.isFull) { return }
+                update(item.id) { $0.refused = error.status == 413 && !error.isFull ? "It is too large for Kaal to take." : error.message }
             } catch {
                 return
             }

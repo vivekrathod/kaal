@@ -69,7 +69,8 @@ enum Keychain {
         return String(data: data, encoding: .utf8)
     }
 
-    private static func groups(holding account: String) -> [String] {
+    /// The groups that hold a copy of the item, of those this program may read.
+    static func groups(holding account: String) -> [String] {
         var query = query(account)
         query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitAll

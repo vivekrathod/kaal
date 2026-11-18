@@ -189,7 +189,7 @@ struct NoteEditor: View {
                 status.say("Adding \(file.name) (\(index + 1) of \(chosen.count))…")
                 do {
                     attachments.append(try await api.attach(to: noteID, file))
-                } catch let error as APIError where error.status == 413 {
+                } catch let error as APIError where error.status == 413 && !error.isFull {
                     throw APIError(status: 413, message: "\(file.name) is too large to add.")
                 }
             }
@@ -226,7 +226,7 @@ struct NoteEditor: View {
                     body = body.replacingOccurrences(of: "(attachment:\(next.key))", with: "(attachment:\(stored.id.text))")
                     attachments.append(stored)
                     waiting.removeFirst()
-                } catch let error as APIError where error.status == 413 {
+                } catch let error as APIError where error.status == 413 && !error.isFull {
                     failure = APIError(status: 413, message: "\(next.file.name) is too large to add.")
                     break
                 } catch {

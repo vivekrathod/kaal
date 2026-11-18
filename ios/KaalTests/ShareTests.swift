@@ -117,6 +117,12 @@ final class SharingTests: XCTestCase {
         XCTAssertTrue(Sharing.problem(APIError.unreachable).hasPrefix("Kaal can't be reached."))
         XCTAssertTrue(Sharing.problem(APIError(status: 401, message: "A valid bearer token is required.")).contains("Open Kaal and sign in again"))
         XCTAssertTrue(Sharing.problem(APIError(status: 413, message: "File is larger than the 100 MiB limit.")).hasPrefix("This is too large for Kaal"))
+        // A vault or a disk with no room left is not the fault of what was shared: Kaal's own words say what to do.
+        let fullVault = "This vault is full: it may hold 10240 MiB. Delete what you no longer need from the Trash, or ask whoever runs this Kaal for more room."
+        XCTAssertEqual(Sharing.problem(APIError(status: 413, message: fullVault, kind: "too_large")), fullVault)
+        let fullDisk = "This Kaal's disk is nearly full, so nothing new can be stored. Whoever runs it needs to make room."
+        XCTAssertEqual(Sharing.problem(APIError(status: 507, message: fullDisk, kind: "full")), fullDisk)
+        XCTAssertTrue(Sharing.problem(APIError(status: 502, message: "Bad gateway")).hasPrefix("Something went wrong in Kaal (502)"))
         XCTAssertEqual(Sharing.problem(APIError(status: 403, message: "Your role in this vault does not allow that.")), "Your role in this vault does not allow that.")
         XCTAssertEqual(Sharing.problem(CocoaError(.fileReadUnknown)), "Kaal could not save this. Try again.")
     }

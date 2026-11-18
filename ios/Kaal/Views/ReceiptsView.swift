@@ -141,7 +141,7 @@ struct ReceiptsView: View {
             model.outbox.addReceipt(receipt)
             status.say("Kaal can't be reached, so the receipt is kept on this phone and will be sent later.", .warn)
         } catch let error as APIError {
-            if error.isSignedOut { model.expired() } else { status.say(error.status == 413 ? "That file is too large to save." : error.message, .error) }
+            if error.isSignedOut { model.expired() } else { status.say(error.status == 413 && !error.isFull ? "That file is too large to save." : error.message, .error) }
         } catch {
             status.say(error.localizedDescription, .error)
         }

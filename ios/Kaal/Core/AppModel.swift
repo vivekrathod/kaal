@@ -27,8 +27,8 @@ final class AppModel {
     private let defaults: UserDefaults
     nonisolated private static let addressKey = "kaal.server"
     nonisolated private static let whoKey = "kaal.who"
-    /// The oldest Kaal that can sign an app in.
-    static let neededVersion = [0, 24, 0]
+    /// The oldest Kaal the app can use: the first that takes an app's session in a header.
+    static let neededVersion = [0, 25, 0]
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -132,8 +132,14 @@ final class AppModel {
     /// The server no longer knows this session: it ran out, or was signed out from another device.
     func expired() {
         guard phase == .signedIn else { return }
+        // An older Kaal does not know the session as this app sends it, and so takes it for nobody's.
+        let old = api?.serverVersion.flatMap { Self.isAtLeast($0, Self.neededVersion) ? nil : $0 }
         forget()
-        notice = "You were signed out. Sign in again to carry on; anything waiting to be sent is kept."
+        if let old {
+            notice = "That Kaal is version \(old). The app needs \(Self.neededVersion.map(String.init).joined(separator: ".")) or newer: update the server, then sign in again. Anything waiting to be sent is kept."
+        } else {
+            notice = "You were signed out. Sign in again to carry on; anything waiting to be sent is kept."
+        }
     }
 
     private func forget() {

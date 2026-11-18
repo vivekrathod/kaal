@@ -27,7 +27,7 @@ The app asks for the address of your Kaal and opens its sign-in page in a
 browser sheet. Sign in there as you usually do (password, Google) and press
 Allow. The app is then signed in as you; it appears under Settings, with your
 signed-in browsers, as "Kaal app on iPhone", and can be signed out there. The
-server needs Kaal 0.24.0 or newer. How the hand-over is protected is described
+server needs Kaal 0.25.0 or newer. How the hand-over is protected is described
 in the [main README](../README.md).
 
 The app keeps one secret, the session it was given, in the iPhone's keychain

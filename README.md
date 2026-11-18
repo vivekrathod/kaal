@@ -189,7 +189,9 @@ exchanges that code for a session (`POST /v1/app-sign-ins`); the code works
 once, for five minutes, and only together with a secret that never left the
 app, so a code seen by anything else is worthless. The session lasts a year,
 is listed with the person's signed-in browsers under Settings, and can be
-signed out there.
+signed out there. The app sends it in the `X-Kaal-Session` header, never as a
+cookie. "Save to Kaal" in other apps' share menus is part of the app and uses
+the same session, which the two share through the iPhone's keychain.
 
 In the web app, Settings has more pages for people signed in as
 themselves. **Vaults and sharing**: rename your vault, open another, create one,

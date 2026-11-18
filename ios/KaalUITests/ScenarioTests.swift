@@ -59,11 +59,14 @@ final class ScenarioTests: XCTestCase {
     func confirm(_ label: String) {
         let choices = app.buttons.matching(NSPredicate(format: "label == %@", label))
         let asked = expectation(for: NSPredicate(format: "count >= 1"), evaluatedWith: app.sheets.buttons.matching(NSPredicate(format: "label == %@", label)), handler: nil)
-        if XCTWaiter().wait(for: [asked], timeout: 5) == .completed {
-            app.sheets.buttons[label].firstMatch.tap()
-        } else {
-            choices.element(boundBy: choices.count - 1).tap()
+        let choice = XCTWaiter().wait(for: [asked], timeout: 5) == .completed ? app.sheets.buttons[label].firstMatch : choices.element(boundBy: choices.count - 1)
+        // The question slides or pops into place, and a press before it has settled is lost.
+        var place = CGRect.null
+        for _ in 0..<10 where choice.exists && choice.frame != place {
+            place = choice.frame
+            usleep(300_000)
         }
+        choice.tap()
     }
 
     // MARK: The scenario, in order
@@ -96,6 +99,11 @@ final class ScenarioTests: XCTestCase {
         if !allow.exists {
             name.tap()
             name.typeText(login)
+            // A simulator typing into a web page for the first time can lose letters; type it again if so.
+            for _ in 0..<2 {
+                guard let typed = name.value as? String, typed != login else { break }
+                name.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: typed.count) + login)
+            }
             let secret = page.secureTextFields["Password"]
             secret.tap()
             secret.typeText(password)
@@ -112,7 +120,28 @@ final class ScenarioTests: XCTestCase {
         shot("03-allow-the-app")
         allow.tap()
 
-        appears(app.tabBars.buttons["Receipts"], "the app's tabs", timeout: 30)
+        // A browser that signed in more than ten minutes ago is asked for the password again
+        // before it may let an app in, since what the app is given outlasts the browser's sign-in.
+        let tabs = app.tabBars.buttons["Receipts"]
+        let again = page.secureTextFields["Your password"]
+        let answered = expectation(for: NSPredicate { _, _ in tabs.exists || again.exists }, evaluatedWith: nil)
+        _ = XCTWaiter().wait(for: [answered], timeout: 30)
+        if !tabs.exists, again.exists {
+            again.tap()
+            again.typeText(password)
+            shot("03a-password-again")
+            // Put the keyboard away first: its bar lies over the button and would take the press.
+            let done = app.toolbars.buttons["Done"].firstMatch
+            if done.exists { done.tap() }
+            allow.tap()
+            // The browser may offer to remember that password before it lets the page go on.
+            let notNow = app.buttons["Not Now"]
+            let moved = expectation(for: NSPredicate { _, _ in tabs.exists || notNow.exists }, evaluatedWith: nil)
+            _ = XCTWaiter().wait(for: [moved], timeout: 15)
+            if !tabs.exists, notNow.exists { notNow.tap() }
+        }
+
+        appears(tabs, "the app's tabs", timeout: 30)
         shot("04-add")
     }
 
@@ -387,10 +416,12 @@ final class ScenarioTests: XCTestCase {
         for _ in 0..<6 where !tokens.exists { app.swipeUp() }
         appears(tokens, "Tokens")
         tokens.tap()
+        // A name of its own, so that a token an earlier run left behind is not taken for this one.
+        let label = "Made-up token \(Int(Date().timeIntervalSince1970) % 100_000)"
         let name = app.textFields.firstMatch
         appears(name, "the token's name", timeout: 30)
         name.tap()
-        name.typeText("Made-up token from the UI test")
+        name.typeText(label)
         let make = app.buttons["Make token"]
         let secret = app.secureTextFields["Your password"]
         for _ in 0..<6 where !(make.exists && make.isHittable) { app.swipeUp() }
@@ -411,13 +442,13 @@ final class ScenarioTests: XCTestCase {
         appears(made, "the new token, shown once", timeout: 30)
         shot("30-token-made")
 
-        let revoke = app.buttons["Revoke"].firstMatch
+        let revoke = app.buttons["Revoke \(label)"]
+        for _ in 0..<6 where !(revoke.exists && revoke.isHittable) { app.swipeUp() }
         appears(revoke, "the token in the list")
         revoke.tap()
         confirm("Revoke")
-        let none = app.staticTexts["No tokens."]
-        for _ in 0..<4 where !none.waitForExistence(timeout: 5) { app.swipeDown() }
-        appears(none, "the token gone", timeout: 30)
+        XCTAssertTrue(revoke.waitForNonExistence(timeout: 30), "the token should be gone from the list once it is revoked")
+        XCTAssertTrue(app.staticTexts[label].waitForNonExistence(timeout: 10), "the token's name should be gone with it")
     }
 
     func test10SigningOutReturnsToTheFirstScreen() {
