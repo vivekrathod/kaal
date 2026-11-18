@@ -625,12 +625,21 @@ def _free_port():
 
 
 def _project_things(project):
-    """The containers, volumes and networks Docker holds for one compose project."""
+    """The containers (with when each was started), volumes and networks Docker holds for one compose project."""
     label = f"label=com.docker.compose.project={project}"
     found = []
-    for kind in (["ps", "-a"], ["volume", "ls"], ["network", "ls"]):
+    # Only the containers Compose made for the project's services: one that anyone runs from
+    # the project's image carries the image's label for the project too, and comes and goes.
+    for kind in (["ps", "-a", "--filter", "label=com.docker.compose.oneoff=False"], ["volume", "ls"], ["network", "ls"]):
         listed = subprocess.run(["docker", *kind, "-q", "--filter", label], capture_output=True, text=True, timeout=60)
-        found += [f"{kind[0]} {line}" for line in listed.stdout.split()]
+        for line in listed.stdout.split():
+            if kind[0] == "ps":
+                # A container that was stopped, restarted or made again does not keep its id and start time.
+                started = subprocess.run(["docker", "inspect", "--format", "{{.State.StartedAt}}", line], capture_output=True, text=True, timeout=60)
+                if started.returncode != 0:
+                    continue        # it went between the two commands: not one that stays
+                line = f"{line} started {started.stdout.strip()}"
+            found.append(f"{kind[0]} {line}")
     return sorted(found)
 
 
@@ -848,4 +857,5 @@ def test_the_real_demo_shows_the_made_up_data_and_puts_it_back(tmp_path):
         subprocess.run(["sh", str(run_sh), "remove"], env=env, capture_output=True, text=True, timeout=300)
     assert _project_things(PROJECT) == [], "nothing of the demo is left: no containers, volumes or networks"
     assert subprocess.run(["docker", "image", "inspect", f"{PROJECT}:local"], capture_output=True).returncode != 0
-    assert _project_things("kaal") == regular, "a regular installation on this machine is left alone"
+    # Everything a regular installation had is still there, and its containers were never stopped.
+    assert set(regular) <= set(_project_things("kaal")), "a regular installation on this machine is left alone"

@@ -73,7 +73,8 @@ deploy/demo/run.sh --local                                # http://localhost:877
 Add `--port N` to choose where it listens on the machine (default 8770, on
 127.0.0.1 only), `--reset-at HH:MM` to choose the time of the nightly reset
 (UTC, default 03:00), and `--image REF` to use a ready-made image instead of
-building one.
+building one. It must be an image with Kaal's `ai` extra, as the regular one
+is: the demo draws its pictures with Pillow, which comes with it.
 
 The demo can run beside a regular Kaal on the same machine. It is a separate
 Docker Compose project (`kaal-demo`) with its own image name
@@ -138,7 +139,7 @@ can. None of it reaches past the demo, and none of it lasts:
 | Make tokens (at most 50, and 20 in an hour) | They work until the next reset, and reach only what the reviewer can see |
 | See which browsers and apps are signed in as `reviewer` (the kind of device and when, nothing more) and sign them out | Signing in again; the nightly reset clears the list |
 | Download a copy of a vault | Nothing to put right: it holds only what is in the demo |
-| Type wrong passwords | Kaal slows guessing per address, so one visitor's wrong tries do not hold up another's |
+| Type wrong passwords | Kaal slows guessing per address, so one visitor's wrong tries do not hold up another's. Fifty wrong tries from many addresses together make everyone wait, a minute at most, and the next right password clears the count |
 
 A visitor cannot open the administrator's pages, make an account, read
 anything outside the demo's container, or touch another Kaal on the machine.
