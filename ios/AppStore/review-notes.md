@@ -144,7 +144,7 @@ next reviewer signs in with. (If it is deleted, we make it again.)
 ## The share extension
 
 Sign in to the app first. Then, in Safari, Files or Photos, tap the share
-button and choose **Save to Kaal** (under "More" the first time, as for any
+button and choose **Kaal** (under "More" the first time, as for any
 app). The sheet shows what is being saved; choose Note or Medical receipt
 (a receipt is offered for pictures and PDFs; several pictures become one
 receipt of several pages), give it a title if you like, and tap Save. It

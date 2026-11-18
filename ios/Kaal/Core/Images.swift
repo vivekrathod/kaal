@@ -13,13 +13,45 @@ final class ImageStore: @unchecked Sendable {
 
     func empty() { cache.removeAllObjects() }
 
-    /// The picture at `path`, fetched as the signed-in person.
+    /// The picture at `path`, fetched as the signed-in person. Kaal draws a few pictures at a
+    /// time and says "busy" to the rest, so only a few are asked for at once, and one it was too
+    /// busy for is asked for again a little later before the note shows a plain file row instead.
     func load(_ path: String, with api: KaalAPI) async throws -> PlatformImage {
         if let kept = image(path) { return kept }
-        let (data, _) = try await api.file(path)
-        guard let image = PlatformImage(data: data) else { throw APIError(status: 415, message: "No picture for this file.") }
-        keep(image, for: path, cost: data.count)
-        return image
+        await turns.wait()
+        defer { Task { await turns.done() } }
+        var tries = 0
+        while true {
+            do {
+                let (data, _) = try await api.file(path)
+                guard let image = PlatformImage(data: data) else { throw APIError(status: 415, message: "No picture for this file.") }
+                keep(image, for: path, cost: data.count)
+                return image
+            } catch let error as APIError where (error.status == 503 || error.status == 429) && tries < Self.tries - 1 {
+                tries += 1
+                try await Task.sleep(for: .milliseconds(1200 * tries))
+            }
+        }
+    }
+
+    static let tries = 4
+    private let turns = Turns(3)
+}
+
+/// So many at a time; the rest wait their turn in the order they came.
+actor Turns {
+    private var free: Int
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    init(_ count: Int) { free = count }
+
+    func wait() async {
+        if free > 0 { free -= 1; return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    func done() {
+        if waiting.isEmpty { free += 1 } else { waiting.removeFirst().resume() }
     }
 }
 

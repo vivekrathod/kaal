@@ -1,7 +1,8 @@
 # App Store privacy answers
 
 What to answer under App Store Connect → App Privacy for Kaal for iPhone, and
-why. The answers follow from the code in `ios/Kaal/` and match
+why. The answers follow from the code in `ios/Kaal/`, its share extension
+`ios/KaalShare/` and what the two share in `ios/Shared/`, and match
 [the privacy policy](../../docs/privacy.md) and the app's privacy manifest,
 [`Kaal/PrivacyInfo.xcprivacy`](../Kaal/PrivacyInfo.xcprivacy).
 
@@ -37,8 +38,9 @@ collected by the publisher, and the answers below apply instead.
 | Photos and files the person picks, pages they scan | The person's own Kaal server | No |
 | Speech while dictating | Turned into text on the iPhone where it can do that; otherwise by Apple's speech recognition service, as keyboard dictation is. Only the text goes into the note. | No: the audio never reaches the publisher, and Apple's processing is covered by Apple's own policy |
 | Sign-in name and password | To sign in, typed into the server's own page in Apple's sign-in sheet, where the app does not see them. In Settings the app has fields of its own for the password, to change it, make new recovery codes or a token, or delete the account (and, for an account without a password, the sign-in name to confirm deleting it); what is typed there is sent only to that server, for that one request, and is not kept | No |
-| The session the server gives the app | The iPhone's keychain, this device only; sent back only to that server | No |
-| The server's address, the account's name, vaults and role | Kept in the app's own settings on the phone (UserDefaults) | No |
+| The session the server gives the app | The iPhone's keychain, this device only, where the app's own share extension can read it too; sent back only to that server | No |
+| The server's address, the account's name, vaults and role | Kept in the app's own settings on the phone (UserDefaults); the address also in the keychain, for the share extension | No |
+| What is shared to "Save to Kaal" from another app | The person's own Kaal server; a copy is held on the phone only while the sheet is open | No |
 | Device | The server shows the sign-in as "Kaal app on iPhone"; the device's name is never sent | No |
 
 Nothing is used for tracking, nothing is shared with data brokers or

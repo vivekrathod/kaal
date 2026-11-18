@@ -117,8 +117,8 @@ xcodebuild test -project ios/Kaal.xcodeproj -scheme Kaal -only-testing:KaalUITes
 
 `bin/demo-data.py serve` starts such a Kaal, with the made-up notes and
 receipts the tests look for, and prints its address, sign-in name and
-password. Its account is not an administrator, so the tests skip the People
-and Sign-in services pages there.
+password. Its account is an administrator, so the tests go through the People
+and Sign-in services pages too.
 
 They also save from other apps (`ShareScenarioTests.swift`): a web page shared
 from Safari becomes a note, two of the simulator's sample photos shared from

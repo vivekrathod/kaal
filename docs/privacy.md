@@ -158,11 +158,19 @@ app.
 Signing out deletes the session and what the app knew about your account.
 Anything still waiting to be sent stays on the phone (the app says so before
 you sign out) and is sent when you next sign in. Deleting the app removes
-everything it kept.
+what it kept, with one exception that is the iPhone's doing: the session in
+the keychain stays until the app is next installed and opened, when the app
+removes it. Deleting the app does not end the session at your Kaal either;
+sign out first, or end it under Settings → Signed-in browsers and apps.
+
+While "Save to Kaal" is open it holds a copy of what you shared in a folder of
+its own, protected like the rest of the phone's files, and removes it when the
+sheet closes.
 
 **Safari stays signed in.** Apple's sign-in sheet shares Safari's cookies, so
-that someone already signed in to their Kaal in Safari need not type the
-password again. Signing in there therefore also leaves Safari on the phone
+that someone who signed in to their Kaal in Safari in the last ten minutes
+need not type the password again (after that, Kaal asks for it once more
+before letting the app in). Signing in there therefore also leaves Safari on the phone
 signed in to your Kaal, for up to 30 days, listed with your other browsers as
 "Safari on iPhone". Signing out of the app, or deleting it, does not end
 that: sign it out under Settings → Signed-in browsers and apps, or open your

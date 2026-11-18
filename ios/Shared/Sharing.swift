@@ -125,7 +125,7 @@ struct Sharing: Equatable, Sendable {
     /// request once it is done. Returns the id of the note or receipt.
     func save(as kind: ShareKind, title typed: String, with api: KaalAPI, from progress: NoteProgress,
               step: @MainActor (NoteProgress) -> Void = { _ in }) async throws -> String {
-        let title = Self.oneLine(typed)
+        let title = String(Self.oneLine(typed).prefix(500))   // as long as Kaal takes a title
         switch kind {
         case .receipt:
             guard let file = try receipt() else { throw APIError(status: 400, message: "Only pictures, or one PDF, can be saved as a receipt.") }
@@ -145,6 +145,8 @@ struct Sharing: Equatable, Sendable {
         case _ where error.isFull: return error.message
         case 413: return "This is too large for Kaal to take. Try fewer files, or smaller ones."
         case 429: return "Kaal is busy. Wait a moment and try again."
+        // Kaal says in its own words when it is only busy (reading other files, or another change to the vault).
+        case 503 where !error.message.isEmpty && error.kind == "busy": return error.message
         case 500...: return "Something went wrong in Kaal (\(error.status)). Try again in a moment."
         default: return error.message
         }

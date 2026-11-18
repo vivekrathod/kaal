@@ -46,6 +46,23 @@ export function fromTree(node) {
   return h(node.tag, attributes, (node.children || []).map(fromTree));
 }
 
+// A picture Kaal was too busy to draw (it draws a few at a time) is asked for again, a little
+// later, before anything is told that it has no picture. Listeners on the picture itself hear
+// of the failure only once the last try has failed.
+const PICTURE_TRIES = 4;
+if (typeof document !== "undefined") {
+  document.addEventListener("error", (event) => {
+    const image = event.target;
+    if (!(image instanceof HTMLImageElement) || !/\/preview(\?|$)/.test(image.getAttribute("src") || "")) return;
+    const tried = Number(image.dataset.tried || 0);
+    if (tried >= PICTURE_TRIES - 1) return;
+    event.stopImmediatePropagation();
+    image.dataset.tried = String(tried + 1);
+    const address = image.getAttribute("src");
+    setTimeout(() => { if (image.isConnected) image.src = address; }, 1200 * (tried + 1));
+  }, true);
+}
+
 // A picture of one of Kaal's files. It fires "error" if the file has no picture.
 export function picture(path, attributes = {}) {
   const image = h("img", attributes);

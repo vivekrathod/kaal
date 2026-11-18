@@ -99,10 +99,22 @@ final class ShareModel {
 
     func cancel() {
         tidy()
-        close(false)
+        // A note is made first and given its files after. One that was made and then given up on
+        // would stay in Kaal with some of its files and text pointing at the rest: it goes to
+        // the Trash instead, where it can be found if it was wanted after all.
+        if let note = progress.note, phase != .saved, let api {
+            progress = NoteProgress(files: sharing.files.count)
+            Task {
+                try? await api.trashNote(note)
+                close(false)
+            }
+        } else {
+            close(false)
+        }
     }
 
-    private func tidy() { try? FileManager.default.removeItem(at: folder) }
+    /// Remove the copies of what was shared. Also called when the sheet goes away by itself.
+    func tidy() { try? FileManager.default.removeItem(at: folder) }
 
     private func makeThumbnails() {
         for (index, item) in sharing.items.enumerated() {

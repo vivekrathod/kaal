@@ -48,6 +48,14 @@ final class AppModel {
     func start() async {
         guard phase == .starting else { return }
         guard let url = URL(string: serverAddress), !serverAddress.isEmpty, let session = Keychain.read(Keychain.session) else {
+            if serverAddress.isEmpty {
+                // The app knows of no Kaal, so it is new here. iOS keeps what an app put in the
+                // keychain after the app is deleted: a sign-in from an earlier installation would
+                // still be there, and "Save to Kaal" would go on using it while the app says it
+                // is signed out.
+                Keychain.remove(Keychain.session)
+                Keychain.remove(Keychain.server)
+            }
             phase = .signedOut
             return
         }
@@ -227,7 +235,7 @@ final class WebSignIn: NSObject, ASWebAuthenticationPresentationContextProviding
                 }
             }
             session.presentationContextProvider = self
-            // Shares the browser's own sign-in, so someone already signed in to Kaal in Safari only has to press Allow.
+            // Shares the browser's own sign-in, so someone who signed in to Kaal in Safari in the last few minutes only has to press Allow (Kaal asks for the password again after ten).
             session.prefersEphemeralWebBrowserSession = false
             current = session
             if !session.start() {

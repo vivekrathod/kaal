@@ -29,4 +29,10 @@ final class ShareViewController: UIViewController {
         let items = extensionContext?.inputItems.compactMap { $0 as? NSExtensionItem } ?? []
         Task { await model.start(with: items) }
     }
+
+    /// The sheet can be swiped away without Cancel: the copies of what was shared go then too.
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        model.tidy()
+    }
 }

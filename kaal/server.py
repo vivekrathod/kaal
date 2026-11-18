@@ -1764,7 +1764,9 @@ def create_app(settings: Settings) -> FastAPI:
     # A whole vault written out for download sits on disk until its client has it: one at a time each.
     app.state.kaal.exports = Downloads(1 << 62, per_caller=20 if crowd else 1)
     # Pictures of files being drawn for one person at a time.
-    app.state.kaal.previews = Downloads(1 << 62, per_caller=10_000 if crowd else 3)
+    # A note may show a dozen pictures at once, so that many may wait their turn; what one person
+    # can keep busy is still bounded, and the drawing itself takes a turn in a pool of two.
+    app.state.kaal.previews = Downloads(1 << 62, per_caller=10_000 if crowd else 12)
     # Adding someone to a vault says whether that sign-in name exists; nobody needs to try many a minute.
     app.state.kaal.invites = RateLimiter(10)
     # Tokens, and apps signed in, per person: each leaves a record behind, and nobody makes many.

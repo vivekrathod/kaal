@@ -30,7 +30,7 @@ MAX_OUTPUT_BYTES = 32 * 1024 * 1024
 # How long a request waits for its turn before it is told the server is busy. The background
 # reader of receipts waits longer (see ``patient``): nobody is waiting on it.
 DEFAULT_WAIT_SECONDS = 20.0
-PREVIEW_WAIT_SECONDS = 2.0
+PREVIEW_WAIT_SECONDS = 6.0
 
 _pools: dict[str, threading.BoundedSemaphore] = {}
 _pools_lock = threading.Lock()

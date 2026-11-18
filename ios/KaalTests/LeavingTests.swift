@@ -41,6 +41,12 @@ final class LeavingTests: XCTestCase {
 
     @MainActor
     func testAfterDeletingTheAppIsSignedOutAndSaysWhy() {
+        // Signing out removes the sign-in this build keeps on the simulator: put it back after.
+        let kept = (Keychain.read(Keychain.session), Keychain.read(Keychain.server))
+        defer {
+            if let session = kept.0 { Keychain.write(session, for: Keychain.session) }
+            if let server = kept.1 { Keychain.write(server, for: Keychain.server) }
+        }
         let model = AppModel(defaults: UserDefaults(suiteName: "kaal-leaving-tests")!)
         model.accountDeleted()
         XCTAssertEqual(model.notice, "Your account was deleted.")

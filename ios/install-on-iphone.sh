@@ -23,11 +23,15 @@ if [ -z "$team" ]; then
     say "Using the developer team Xcode knows; noted in Local.xcconfig"
 fi
 bundle=$(sed -n 's/^PRODUCT_BUNDLE_IDENTIFIER *= *\([A-Za-z0-9.-]*\).*/\1/p' Local.xcconfig | head -1)
-[ -n "$bundle" ] || bundle=app.kaal.Kaal
+if [ -z "$bundle" ]; then
+    # An identifier of your own: the plain one can be registered by one developer team only.
+    bundle="app.kaal.Kaal.dev$(openssl rand -hex 4)"
+    printf 'PRODUCT_BUNDLE_IDENTIFIER = %s\n' "$bundle" >> Local.xcconfig
+fi
 
 # The first real iPhone or iPad Xcode can see.
 phone=$(xcodebuild -project Kaal.xcodeproj -scheme Kaal -showdestinations 2>/dev/null \
-    | sed -n 's/.*{ platform:iOS, arch:[^,]*, id:\([0-9A-Fa-f-]*\), name:.*/\1/p' | head -1)
+    | grep -v 'error:' | sed -n 's/.*{ platform:iOS, arch:[^,]*, id:\([0-9A-Fa-f-]*\), name:.*/\1/p' | head -1)
 [ -n "$phone" ] || stop "no iPhone found. Plug it in, unlock it, tap Trust, and turn on Developer Mode (Settings > Privacy & Security)."
 
 # The app and its share extension are built and signed together, both for the
@@ -36,7 +40,7 @@ phone=$(xcodebuild -project Kaal.xcodeproj -scheme Kaal -showdestinations 2>/dev
 say "Building for the iPhone"
 build="${TMPDIR:-/tmp}/kaal-ios-build"
 xcodebuild -project Kaal.xcodeproj -scheme Kaal -configuration Debug -destination "id=$phone" \
-    -derivedDataPath "$build" -allowProvisioningUpdates -quiet build
+    -derivedDataPath "$build" -allowProvisioningUpdates -allowProvisioningDeviceRegistration -quiet build
 app="$build/Build/Products/Debug-iphoneos/Kaal.app"
 [ -d "$app/PlugIns/KaalShare.appex" ] || stop "the build has no share extension in it. Build the Kaal scheme of ios/Kaal.xcodeproj as it is in the repository."
 

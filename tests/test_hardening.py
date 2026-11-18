@@ -983,7 +983,9 @@ def test_a_picture_of_a_file_is_answered_busy_rather_than_queued(house, monkeypa
     assert busy.status_code == 503 and busy.json()["kind"] == "busy" and busy.headers["retry-after"]
     # And one person has only a few being drawn at a time.
     caller = f"account:{house.store.account('sam')['id']}"
-    held = [house.state.previews.take(caller, 0) for _ in range(3)]
+    monkeypatch.undo()
+    assert house.state.previews.per_caller == 12                                    # a note may show a dozen pictures at once
+    held = [house.state.previews.take(caller, 0) for _ in range(12)]
     assert all(held) and sam.get(path).status_code == 503
     for ticket in held:
         house.state.previews.give(ticket)
@@ -1254,3 +1256,25 @@ def test_a_request_that_only_declares_a_large_body_does_not_make_the_server_coll
         asyncio.run(ask())
     time.sleep(0.2)
     assert collected == []
+
+
+def test_a_note_with_many_pictures_shows_them_all_when_they_are_asked_for_at_once(house):
+    image_module = pytest.importorskip("PIL.Image")
+    from concurrent.futures import ThreadPoolExecutor
+
+    sam = house.signed_in("sam")
+    note = sam.post("/v1/library/notes", json={"title": "Made-up pictures", "body": "x"}).json()["result"]
+    note_id = note.get("id") or note["note"]["id"]
+    for index in range(10):
+        made = io.BytesIO()
+        image_module.new("RGB", (800, 600), (index * 20, 120, 200)).save(made, format="PNG")
+        assert sam.post(f"/v1/library/notes/{note_id}/attachments", files={"file": (f"made-up-{index}.png", made.getvalue(), "image/png")}).status_code == 200
+    shown = sam.get(f"/v1/library/notes/{note_id}").json()["result"]
+    files = [entry["id"] for entry in (shown.get("note") or shown)["attachments"]]
+    session = sam.cookies.get("__Host-kaal_session")
+
+    def ask(attachment):
+        return house.visitor(**{"X-Kaal-Session": session}).get(f"/v1/notes/{note_id}/attachments/{attachment}/preview").status_code
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        assert list(pool.map(ask, files)) == [200] * 10                              # each waits its turn; none is turned away

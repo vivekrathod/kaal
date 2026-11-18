@@ -41,7 +41,15 @@ extension ScenarioTests {
             shot("failed-kaal-in-the-share-menu")
             return XCTFail("Kaal is not in the share menu")
         }
-        (inHost.exists ? inHost : inService).tap()
+        // The menu slides in: a tap made the moment the cell exists can land before it has settled.
+        let cell = inHost.exists ? inHost : inService
+        var last = CGRect.null
+        for _ in 0..<20 {
+            if cell.isHittable && cell.frame == last { break }
+            last = cell.frame
+            usleep(250_000)
+        }
+        cell.tap()
     }
 
     /// Open `address` in Safari and its share menu.
