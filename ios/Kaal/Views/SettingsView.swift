@@ -13,6 +13,9 @@ struct SettingsView: View {
     @State private var newPassword = ""
     @State private var codesPassword = ""
     @State private var codes: [String] = []
+    /// What deleting the account would delete, once the person has asked.
+    @State private var leaving: JSON = .null
+    @State private var leavingProof = ""
 
     var body: some View {
         Form {
@@ -26,6 +29,7 @@ struct SettingsView: View {
                     password
                     devices
                     if account.has_password.isTrue { recoveryCodes }
+                    deleteAccount
                 }
             } else if status.message == nil {
                 ProgressView().frame(maxWidth: .infinity)
@@ -253,6 +257,50 @@ struct SettingsView: View {
             let left = account.recovery_codes_left.int
             Text(left > 0 ? "You have \(left) unused. One of them lets you choose a new password if you forget yours."
                  : "You have none left. Make new ones so a forgotten password does not lock you out.")
+        }
+    }
+
+    /// Deleting the account, as the web app offers it: what would go is shown first, and nothing
+    /// is deleted without the password (or, for someone who has none, their sign-in name typed out).
+    private var deleteAccount: some View {
+        Section {
+            let hasPassword = account.has_password.isTrue
+            if leaving.isNull {
+                AsyncButton("What would be deleted?") { await run { leaving = try await $0.removalPlan() } }
+            } else if !leaving.blocked.strings.isEmpty {
+                ForEach(leaving.blocked.strings, id: \.self) { Notice(text: $0, tone: .warn) }
+            } else {
+                let mine = leaving.vaults_to_delete.strings
+                let shared = leaving.vaults_to_leave.strings
+                Text(mine.isEmpty ? "No vault is only yours, so no notes are deleted."
+                     : "These vaults are only yours and are deleted with everything in them: \(mine.joined(separator: ", ")).")
+                if !shared.isEmpty { Text("You leave: \(shared.joined(separator: ", ")); the people who share them keep them.") }
+                // Named for the tests: the recovery codes above have a "Your password" field too.
+                if hasPassword {
+                    SecureField("Your password", text: $leavingProof).textContentType(.password).accessibilityIdentifier("delete-account-proof")
+                } else {
+                    TextField("Type your sign-in name to confirm", text: $leavingProof).typedExactly().accessibilityIdentifier("delete-account-proof")
+                }
+                ConfirmButton(title: "Delete my account",
+                              question: "Delete your account for good? This cannot be undone.\(model.outbox.items.isEmpty ? "" : " What is waiting to be sent stays on this phone.")",
+                              confirm: "Delete it for good") {
+                    guard !leavingProof.isEmpty else {
+                        status.say(hasPassword ? "Enter your password to delete your account." : "Type your sign-in name to delete your account.", .error)
+                        return
+                    }
+                    guard let api = model.api else { return }
+                    // Kaal's own words are shown when it refuses: a wrong password, or something that changed since the list above.
+                    let deleted = await status.run(model) {
+                        try await api.deleteAccount(password: hasPassword ? leavingProof : "", confirm: hasPassword ? "" : leavingProof)
+                    }
+                    leavingProof = ""
+                    if deleted { model.accountDeleted() }
+                }
+            }
+        } header: {
+            Text("Delete my account")
+        } footer: {
+            Text("Your sign-in, your tokens and every vault that is only yours are deleted for good. Download a copy of your vaults first: open Kaal in the browser, then Settings, Vaults and sharing.")
         }
     }
 

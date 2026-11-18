@@ -128,6 +128,8 @@ until [ "$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose 
     [ "$tries" -lt 60 ] || stop "Kaal did not come up. See what it says with: deploy/docker/kaalctl logs"
     sleep 2
 done
+# Caddy reads its Caddyfile only when it starts; on a second run it is already running, perhaps with an older one.
+[ "$(sed -n 's/^COMPOSE_PROFILES=//p' .env)" != https ] || [ "$first_time" -eq 1 ] || docker compose restart caddy > /dev/null 2>&1 || true
 
 say "Kaal is running at $address"
 # A link only for an administrator who has never signed in. A second run (another checkout over

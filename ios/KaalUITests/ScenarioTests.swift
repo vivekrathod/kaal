@@ -343,6 +343,23 @@ final class ScenarioTests: XCTestCase {
         appears(app.buttons["Trash"], "the notes list")
     }
 
+    func test07aWhatDeletingTheAccountWouldDeleteIsShownAndNothingIsDeleted() {
+        launch()
+        tab("Settings")
+        appears(app.staticTexts["Family"], "Settings", timeout: 30)
+        let ask = app.buttons["What would be deleted?"]
+        for _ in 0..<8 where !ask.exists { app.swipeUp() }
+        appears(ask, "What would be deleted?")
+        ask.tap()
+        // Kaal either says what stops it (a server's only account, or its only administrator,
+        // cannot go) or lists what would go and offers the button. Nothing is deleted here.
+        let delete = app.buttons["Delete my account"]
+        let stopped = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'only account' OR label CONTAINS 'only administrator' OR label CONTAINS 'only owner' OR label CONTAINS 'first vault'")).firstMatch
+        let told = expectation(for: NSPredicate { _, _ in delete.exists || stopped.exists }, evaluatedWith: nil)
+        wait(for: [told], timeout: 30)
+        shot("28a-delete-my-account")
+    }
+
     func test08SpeakingANoteStartsListeningOrSaysWhyNot() {
         launch()
         let speak = labelled(app.buttons, containing: "Speak a note")

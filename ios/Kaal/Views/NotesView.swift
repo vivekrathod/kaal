@@ -84,13 +84,37 @@ struct NotesView: View {
     /// Where a note was found, with the words around it. Found by title or tag, the title says enough.
     static func snippet(_ match: JSON) -> AttributedString? {
         guard !match.isNull, match["where"].text != "title" else { return nil }
-        var text = AttributedString(match["where"].text == "file" ? "In \(match.file.text): " : "")
-        text += AttributedString(match.before.text)
+        // A note's own text is Markdown, and its marks say nothing in one line of a list. The text
+        // read from a file is not Markdown, so it is shown as it is.
+        let inFile = match["where"].text == "file"
+        var text = AttributedString(inFile ? "In \(match.file.text): " : "")
+        text += AttributedString(inFile ? match.before.text : withoutMarks(match.before.text))
         var found = AttributedString(match.found.text)
         found.font = .footnote.bold()
         found.foregroundColor = .primary
         text += found
-        text += AttributedString(match.after.text)
+        text += AttributedString(inFile ? match.after.text : withoutMarks(match.after.text))
+        return text
+    }
+
+    private static let marks: [(NSRegularExpression, String)] = [
+        (#"!?\[([^\]]*)\]\([^)]*\)"#, "$1"),                         // a link or a picture: its words
+        (#"\*\*|__|~~|`"#, ""),                                        // bold, struck through, code
+        (#"(?<![^\s])#{1,6}\s+"#, ""),                                 // a heading's marks
+        (#"\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|"#, " "),        // the line under a table's headings
+        (#"\s*\|\s*"#, " "),                                          // a table's bars
+        (#" {2,}"#, " "),                                             // and the gaps all that leaves
+    ].map { (try! NSRegularExpression(pattern: $0.0), $0.1) }
+
+    /// Part of a line of a note without its Markdown marks. The server has already made the
+    /// words around a match into one line, so a heading or a table can start anywhere in it,
+    /// and a pair of marks can be cut in two by the match; each mark is taken out on its own.
+    /// Spaces at either end stay: they are what separates this part from the word found.
+    static func withoutMarks(_ part: String) -> String {
+        var text = part
+        for (pattern, with) in marks {
+            text = pattern.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: with)
+        }
         return text
     }
 

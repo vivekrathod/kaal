@@ -1,3 +1,15 @@
+{
+	# Caddy keeps no record of requests. It writes no access log as it is, but it
+	# would log each request that fails (while Kaal restarts, say) or is cut off
+	# half way, with the visitor's address, the address asked for (search words
+	# included) and its headers, among them an app's session. Leaving out these
+	# two kinds of message leaves what Caddy says about starting up and about
+	# its certificate. docs/privacy.md says so; a test keeps the two in step.
+	log {
+		exclude http.log http.handlers
+	}
+}
+
 # Caddy gets a certificate for the domain by itself and renews it.
 {$KAAL_DOMAIN} {
 	encode zstd gzip

@@ -324,10 +324,11 @@ restores into an empty vault and verifies it.
   for everyone who shares it, and tokens made for it stop working. The
   installation's first vault cannot be deleted; backups and older tokens rely
   on it. On the server: `kaal-server vault remove VAULT_ID --yes`.
-- **Deleting an account.** Settings → Delete my account shows what would go
-  first: the account, its tokens, and every vault only it belongs to. Vaults
-  shared with others stay with them, but the only owner of a shared vault must
-  make someone else an owner first, and the only administrator cannot leave.
+- **Deleting an account.** Settings → Delete my account, in the web app or
+  the iPhone app, shows what would go first: the account, its tokens, and
+  every vault only it belongs to. Vaults shared with others stay with them,
+  but the only owner of a shared vault must make someone else an owner first,
+  and the only administrator cannot leave.
   Administrators remove someone else under Settings → People. On the server:
   `kaal-server account remove LOGIN` says what would go, and `--yes` does it.
 
@@ -372,6 +373,10 @@ anything but loopback, and refuses token or config files that others can read.
 status, token name and duration only, never bodies, query strings, file
 contents or tokens. Validation errors name the bad fields without echoing the
 values. Uploads go to a private folder that is removed after each request.
+A proxy in front of Kaal logs what it is set to: the Docker install's Caddy is
+set to keep no record of requests (`deploy/docker/Caddyfile` says why: left
+alone, it logs each request that fails, with the visitor's address, the
+address asked for and its headers).
 
 **What leaves the server.** Nothing, unless `KAAL_RECEIPT_AI` is set. With it
 set, each captured or re-extracted medical receipt's text and page images are
@@ -728,6 +733,70 @@ Delete a note and its attachments:
 ```bash
 kaal delete NOTE_ID --yes
 ```
+
+## Publishing
+
+What the App Store and the Chrome Web Store ask for, apart from the accounts,
+is in the repository:
+
+- [`docs/`](docs/index.md): a small website for GitHub Pages, with the
+  [privacy policy](docs/privacy.md) and [where to get help](docs/support.md)
+  that both stores link to.
+- [`ios/AppStore/`](ios/AppStore/listing.md): the
+  [listing](ios/AppStore/listing.md) (and what the App Store search showed
+  about the name), the [privacy answers](ios/AppStore/privacy-labels.md),
+  [notes for App Review](ios/AppStore/review-notes.md), why the app needs no
+  [export documents](ios/AppStore/export-compliance.md), and the screenshots
+  (`make-screenshots.sh` takes them again). The app's privacy manifest is
+  `ios/Kaal/PrivacyInfo.xcprivacy`.
+- [`chrome-extension/store/`](chrome-extension/store/listing.md): the listing,
+  why each permission is needed, the data disclosures, and the screenshots and
+  promo tile (`make-screenshots.sh`). `bin/package-extension.py` builds the
+  zip to upload, and checks it.
+- `bin/demo-data.py`: a Kaal holding only made-up notes and receipts, for the
+  screenshots and for the reviewers' demo account.
+
+`tests/test_store_material.py` checks the text against each store's limits,
+the pictures against its sizes, the zip against the extension, the privacy
+manifest against the code, and those statements in the privacy policy and
+the listings that can be checked mechanically (the app's password fields,
+the debugger commands the extension sends, what the Docker install's proxy
+logs). The rest of the policy is prose: read it again whenever what the
+apps store, send or ask for changes.
+
+Only the owner can do the rest:
+
+1. Turn on GitHub Pages for `docs/` (Settings → Pages, "Deploy from a
+   branch", folder `/docs`), check that the three pages open (the site has
+   not been built anywhere yet), and use their real addresses wherever the
+   listings say `OWNER.github.io/REPO`. Turn on private vulnerability
+   reporting (Security tab), which the help page points to.
+2. Run a demo server on a domain, with an `appreview` account filled with
+   made-up data (`bin/demo-data.py fill`), and keep it running
+   ([`review-notes.md`](ios/AppStore/review-notes.md)).
+3. For the App Store: join the Apple Developer Program, register the bundle
+   identifier under that team, create the app in App Store Connect (which is
+   when the name is really tested), sign and upload a build from Xcode, fill
+   in the listing, privacy and age-rating answers, add contact details, and
+   submit. Before that, decide whether the app is offered on iPad (which
+   needs iPad screenshots too). **Do not upload a build that sends its
+   session as a cookie.** A server reached over https takes an app's session
+   only in the `X-Kaal-Session` header; a build whose `API.swift` still sets
+   `Cookie: kaal_session=…` signs in and is signed out again on its next
+   request, which is the first thing App Review would see. Build from a tree
+   in which the app sends the header, and sign in to the https demo server
+   with that very build first (step 4 of "Before submitting" in the review
+   notes). If the build has a share extension, go through the review notes'
+   steps for it as well, and check that
+   [`export-compliance.md`](ios/AppStore/export-compliance.md) and the privacy
+   answers still describe every target.
+4. For the Chrome Web Store: register as a developer (a one-time fee), upload
+   the zip as a draft, allow the id the store gives it on the demo server, fill
+   in the listing and privacy tabs, and submit. Then put the store's public
+   key and id into the extension and the server, as
+   [`chrome-extension/store/listing.md`](chrome-extension/store/listing.md)
+   describes, and release the server; until a server has that release, its
+   operator has to allow the store's copy by hand (`KAAL_EXTENSION_IDS`).
 
 ## Licence
 
