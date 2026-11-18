@@ -99,4 +99,6 @@ deploy/deploy.sh --host USER@SERVER --rollback
 
 Deploying or rolling back changes a live vault's server: do it only when the user has approved that specific release, and pass `--yes` only after they have. `--status` and `--dry-run` change nothing on the server. The script does not install systemd unit files.
 
+`deploy/demo/run.sh` runs a separate demo installation that holds only made-up data, made through Kaal's API by `deploy/demo/demo.py`, and resets it every night (see `deploy/demo/README.md`). It is its own Compose project and keeps everything in memory; never point it, or its reset, at a real installation. Its reviewer password is published, so between resets `demo.py` puts back what a visitor can do to that account (`keep_reviewer`); when the server gains something a signed-in person can do to their own account, decide there what puts it right. Its tests are in `tests/test_demo.py`; the Docker one runs only with `KAAL_DEMO_DOCKER=1`.
+
 The root `README.md` is end-user documentation. Update this file when agent behavior, safety rules, or stable command locations change.

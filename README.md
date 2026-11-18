@@ -24,6 +24,10 @@ for you, Tailscale or another proxy, or just this machine), starts Kaal, and
 prints a link for choosing your password. [`docs/install.md`](docs/install.md)
 covers the key, updates and backups.
 
+To look around first, `deploy/demo/run.sh --local` runs a separate Kaal that
+holds only made-up notes and receipts
+([`deploy/demo/README.md`](deploy/demo/README.md)).
+
 ## Security model
 
 - Every note, attachment, piece of extracted or OCR text and the index is encrypted at rest, medical receipts included.
@@ -771,8 +775,8 @@ Only the owner can do the rest:
    not been built anywhere yet), and use their real addresses wherever the
    listings say `OWNER.github.io/REPO`. Turn on private vulnerability
    reporting (Security tab), which the help page points to.
-2. Run a demo server on a domain, with an `appreview` account filled with
-   made-up data (`bin/demo-data.py fill`), and keep it running
+2. Run the demo on a domain (`deploy/demo/run.sh --domain …`, which makes the
+   `reviewer` account and fills it with made-up data), and keep it running
    ([`review-notes.md`](ios/AppStore/review-notes.md)).
 3. For the App Store: join the Apple Developer Program, register the bundle
    identifier under that team, create the app in App Store Connect (which is

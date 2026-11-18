@@ -1,0 +1,916 @@
+"""deploy/demo: the made-up data, put in through Kaal's own API, and the files around it.
+
+The seed runs against a real Kaal (a TestClient server with a throwaway home),
+and kaal-server's own command makes the setup links, as in the container.
+run.sh runs with a stand-in for docker that only records what it is asked.
+
+The last test builds and runs the real demo with Docker, which takes a few
+minutes, so it is off unless KAAL_DEMO_DOCKER=1 is set.
+"""
+import base64
+import contextlib
+import hashlib
+import importlib.util
+import io
+import json
+import os
+import re
+import secrets
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import time
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from fastapi.testclient import TestClient
+
+import kaal.core as kaal
+from kaal import server
+
+ROOT = Path(__file__).resolve().parents[1]
+DEMO = ROOT / "deploy" / "demo"
+TODAY = date(2026, 11, 17)
+REVIEWER_PASSWORD = "made-up-reviewer-1"
+ADMIN_PASSWORD = "made-up-admin-1"
+
+
+def _load():
+    spec = importlib.util.spec_from_file_location("kaal_demo", DEMO / "demo.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["kaal_demo"] = module     # dataclasses look their module up while it loads
+    spec.loader.exec_module(module)
+    return module
+
+
+demo = _load()
+needs_pdftotext = pytest.mark.skipif(not shutil.which("pdftotext"), reason="needs pdftotext")
+
+
+@pytest.fixture()
+def kaal_server(tmp_path, monkeypatch):
+    """A new installation, as the container starts it: a key, an empty vault, and kaal-server."""
+    saved = kaal.VAULT
+    kaal.configure_vault(tmp_path / "data")
+    kaal.call_captured(kaal.init_vault, SimpleNamespace())
+    monkeypatch.setenv("KAAL_HOME", str(tmp_path))
+    monkeypatch.setenv("KAAL_VAULT", str(tmp_path / "data"))
+    monkeypatch.setenv("KAAL_PUBLIC_URL", "https://demo.example.org")
+    settings = server.Settings(home=tmp_path, vault=tmp_path / "data", tokens_file=tmp_path / "tokens.json", tmp_dir=tmp_path / "tmp", rate_per_minute=100_000)
+    app = server.create_app(settings)
+    # The vault's clock, which records seconds, moves on two seconds at each of the
+    # seed's pauses instead of the seed sleeping: the order of each list is then
+    # exactly what it is in the container, without the wait.
+    ahead = {"seconds": 0}
+    monkeypatch.setattr(kaal, "now_iso", lambda: (datetime.now(timezone.utc) + timedelta(seconds=ahead["seconds"])).isoformat(timespec="seconds"))
+
+    def pause():
+        ahead["seconds"] += 2
+
+    def connect():
+        client = TestClient(app, base_url="https://testserver")
+
+        def send(method, path, headers, data):
+            client.cookies.clear()       # the session travels only as demo.Kaal sends it
+            answer = client.request(method, path, headers=headers, content=data)
+            return answer.status_code, answer.headers.get_list("set-cookie"), answer.content
+
+        return demo.Kaal(send)
+
+    def run(args):
+        printed = io.StringIO()
+        monkeypatch.setattr(sys, "argv", ["kaal-server", *args])
+        with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(io.StringIO()):
+            server.main()
+        return printed.getvalue()
+
+    def signed_in(login, password):
+        person = connect()
+        person.call("POST", "/v1/sign-in", {"login": login, "password": password})
+        return person
+
+    yield SimpleNamespace(app=app, connect=connect, run=run, signed_in=signed_in, home=tmp_path, pause=pause)
+    kaal.configure_vault(saved)
+
+
+@pytest.fixture()
+def seeded(kaal_server):
+    kaal_server.made = demo.seed(kaal_server.connect, kaal_server.run, reviewer_password=REVIEWER_PASSWORD,
+                                 admin_password=ADMIN_PASSWORD, today=TODAY, reset_at="03:00", pause=kaal_server.pause)
+    return kaal_server
+
+
+def by_title(listing):
+    return {note["title"]: note for note in listing}
+
+
+def test_the_made_up_notes_are_in_with_their_picture_and_pdfs(seeded):
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    listing = jane.call("GET", "/v1/library/notes")
+    assert listing[0]["title"] == demo.NOTICE_TITLE, "the demo notice is at the top"
+    expected = {note.title for note in demo.notes(TODAY) if not note.trash} | {demo.NOTICE_TITLE}
+    assert {note["title"] for note in listing} == expected
+    assert all(note["title"].startswith(("Made-up", "Read me")) for note in listing)
+    assert [note["title"] for note in jane.call("GET", "/v1/library/notes?trash=true")] == ["Made-up packing list (old)"]
+    notes = by_title(listing)
+
+    # The note the iPhone app's screen-by-screen tests open.
+    house = jane.call("GET", f"/v1/library/notes/{notes['Made-up house notes']['id']}")["note"]
+    for shown in ("## Boiler", "**Pressure should be 1.5 bar**", "| Hall |", "radiators"):
+        assert shown in house["body"]
+    assert [file["name"] for file in house["attachments"]] == ["northside.pdf"]
+    assert "attachment:" not in house["body"], "the PDF is listed under the note, not placed in it"
+    found = jane.call("POST", "/v1/library/search", {"query": "radiators"})
+    assert "Made-up house notes" in {note["title"] for note in found} and "Made-up shopping list" not in {note["title"] for note in found}
+
+    garden = jane.call("GET", f"/v1/library/notes/{notes['Made-up garden plan']['id']}")["note"]
+    (picture,) = garden["attachments"]
+    assert f"![Garden plan](attachment:{picture['id']})" in garden["body"]
+    client = TestClient(seeded.app, base_url="https://testserver", headers={"X-Kaal-Request": "1", "X-Kaal-Session": jane.session})
+    shown = client.get(f"/v1/notes/{garden['id']}/attachments/{picture['id']}/view")
+    assert shown.status_code == 200 and shown.headers["content-type"] == "image/png"
+
+    insurance = jane.call("GET", f"/v1/library/notes/{notes['Made-up home insurance summary']['id']}")["note"]
+    (summary,) = insurance["attachments"]
+    assert f"\n[insurance-summary.pdf](attachment:{summary['id']})\n" in insurance["body"], "a PDF on a line of its own shows as a card"
+    pdf = client.get(f"/v1/notes/{insurance['id']}/attachments/{summary['id']}/view")
+    assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF-")
+
+    notice = jane.call("GET", f"/v1/library/notes/{notes[demo.NOTICE_TITLE]['id']}")["note"]
+    assert "Anything you add is removed every night" in notice["body"] and "03:00 UTC" in notice["body"]
+
+
+def test_the_made_up_receipts_are_waiting_reviewed_and_reimbursed(seeded):
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    assert jane.call("GET", "/v1/medical/people")["people"] == demo.FAMILY
+    waiting = jane.call("GET", "/v1/medical/receipts?inbox=true&sort=updated")
+    reviewed = jane.call("GET", "/v1/medical/receipts?status=reviewed&sort=date")
+    assert len(waiting) == 4 and {receipt["receipt"]["status"] for receipt in waiting} == {"needs_review"}
+    assert len(reviewed) == 4
+    assert [receipt["title"] for receipt in jane.call("GET", "/v1/medical/receipts?trash=true")] == ["Example Dental Group: cleaning (saved twice)"]
+    assert waiting[0]["title"] == "Example Family Clinic: office visit", "the last one captured is at the top"
+
+    paid_back = [receipt for receipt in reviewed if receipt["receipt"].get("reimbursed_at")]
+    assert [receipt["receipt"]["fields"]["amount"] for receipt in paid_back] == ["25.00"]
+    assert paid_back[0]["receipt"]["reimbursement_note"] == "HSA withdrawal (made up)"
+    values = {receipt["title"]: receipt["receipt"] for receipt in reviewed}
+    assert values["Physical therapy copay"]["fields"]["provider"] == "Example Physical Therapy"
+    assert values["Physical therapy copay"]["field_sources"]["provider"] == "manual", "what Kaal could not read was typed in"
+    assert values["Example Dental Group: cleaning"]["person"] == "John Madeup", "MADEUP, JOHN is matched to the family"
+    assert values["Example Dental Group: cleaning"]["field_sources"]["amount"] == "confirmed"
+
+    report = jane.call("POST", "/v1/medical/report", {})
+    assert report["reimbursed_amount"] == "25.00"
+    assert [group["year"] for group in report["by_year"]] == ["2025", "2026"]
+    assert {group["person"] for group in report["by_person"]} >= {"Jane Madeup", "John Madeup", "Robin Madeup"}
+    hosts = jane.call("GET", "/v1/medical/sources")["hosts"]
+    assert hosts and all(re.fullmatch(r"[a-z.]+\.example\.(org|com|net)", host) for host in hosts)
+
+
+@needs_pdftotext
+def test_the_receipts_waiting_show_what_kaal_read_from_them(seeded):
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    waiting = {receipt["title"]: receipt["receipt"] for receipt in jane.call("GET", "/v1/medical/receipts?inbox=true")}
+    clinic = waiting["Example Family Clinic: office visit"]
+    # The iPhone app's screen-by-screen tests look for a $45.00 receipt to check.
+    assert clinic["fields"]["amount"] == "45.00" and clinic["field_sources"]["amount"] == "labelled-text"
+    assert clinic["person"] == "Jane Madeup" and clinic["fields"]["service_date"] == "2026-11-08"
+    card = waiting["Example Street Pharmacy"]
+    assert card["fields"]["amount"] == "12.80" and card["fields"]["paid_date"] == "2026-11-01" and not card["fields"]["patient_name"]
+    assert not waiting["Example Imaging Center: statement"]["fields"]["amount"], "a bill with nothing paid has no amount to count"
+    every = jane.call("GET", "/v1/medical/receipts") + jane.call("GET", "/v1/medical/receipts?trash=true")
+    assert sum(receipt["receipt"]["fields"].get("amount") == "45.00" for receipt in every) == 1
+
+
+@needs_pdftotext
+def test_kaals_rules_read_each_made_up_pdf_as_intended(tmp_path):
+    for receipt in demo.receipts(TODAY):
+        media, content = receipt.content()
+        if media != "application/pdf":
+            continue
+        path = tmp_path / receipt.file
+        path.write_bytes(content)
+        fields, method = kaal.extract_receipt_fields(path)
+        assert method == "pdftotext-layout", receipt.file
+        for name, value in receipt.expected.items():
+            # The physical therapist prints no provider label, so the seed types it in.
+            assert fields[name] == ("" if receipt.file == "example-pt-copay.pdf" and name == "provider" else value), (receipt.file, name)
+
+
+def test_people_vaults_and_sign_up_are_as_app_review_needs(seeded):
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    account = jane.call("GET", "/v1/account")
+    assert account["account"] == {"login": "reviewer", "name": "Jane Madeup", "admin": False, "has_password": True}
+    assert account["vault"] == {"id": account["vault"]["id"], "name": demo.VAULT_NAME, "role": "owner"}
+    assert [vault["name"] for vault in account["vaults"]] == [demo.VAULT_NAME, demo.HOUSEHOLD]
+    assert [session["current"] for session in account["sessions"]] == [True], "the seed signed itself out"
+    assert account["has_password"] and account["recovery_codes_left"] == 8
+    assert {(member["login"], member["role"]) for member in jane.call("GET", "/v1/vault/members")["members"]} == {("reviewer", "owner"), ("john", "viewer")}
+    assert [token["name"] for token in jane.call("GET", "/v1/account/tokens")["tokens"]] == ["Kaal for Chrome"]
+
+    jane.call("POST", "/v1/session/vault", {"vault": account["vaults"][1]["id"]})
+    assert {note["title"] for note in jane.call("GET", "/v1/library/notes")} == {note.title for note in demo.household_notes(TODAY)}
+    assert ("john", "editor") in {(member["login"], member["role"]) for member in jane.call("GET", "/v1/vault/members")["members"]}
+
+    admin = seeded.signed_in("owner", ADMIN_PASSWORD)
+    people = admin.call("GET", "/v1/admin/people")
+    assert people["signup"] == "invitation"
+    assert {person["login"]: person["admin"] for person in people["people"]} == {"owner": True, "reviewer": False, "john": False}
+    assert seeded.connect().call("GET", "/v1/sign-in/options")["signup"] == "invitation"
+    with pytest.raises(demo.DemoError, match="401"):
+        seeded.signed_in("john", "anything-at-all")
+
+
+# --- what anyone holding the published password can do, and what puts it right
+
+
+def keep(seeded):
+    return demo.keep_reviewer(seeded.connect, seeded.run, REVIEWER_PASSWORD, seeded.made["vaults"])
+
+
+def test_a_changed_reviewer_password_is_put_back(seeded):
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    assert keep(seeded) == [], "nothing is wrong, so nothing is done and nobody is signed out"
+    main = jane.call("GET", "/v1/account")["vault"]["id"]
+    theirs = jane.call("POST", "/v1/account/tokens", {"name": "Made-up visitor token", "scopes": ["read"], "vault": main, "password": REVIEWER_PASSWORD})["secret"]
+    with_token = TestClient(seeded.app, base_url="https://testserver", headers={"Authorization": f"Bearer {theirs}"})
+    assert with_token.get("/v1/library/notes").status_code == 200
+    jane.call("POST", "/v1/account/password", {"current": REVIEWER_PASSWORD, "new": "someone-else-chose-this"})
+    assert demo.what_is_wrong(REVIEWER_PASSWORD, seeded.made["vaults"]) == ["password"]
+
+    assert keep(seeded) == ["password"]
+    assert keep(seeded) == []
+    again = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    # Putting it back ends every token made with the old password, the visitor's included,
+    # and the one the Tokens page shows is made again, for the same vault.
+    assert with_token.get("/v1/library/notes").status_code == 401
+    assert [(token["name"], token["vault"], token["scopes"]) for token in again.call("GET", "/v1/account/tokens")["tokens"]] == [("Kaal for Chrome", main, ["read", "write"])]
+    with pytest.raises(demo.DemoError, match="401"):
+        seeded.signed_in("reviewer", "someone-else-chose-this")
+    with pytest.raises(demo.DemoError, match="401"):
+        jane.call("GET", "/v1/account")     # putting it back signed everyone out, whoever changed it included
+    assert len(seeded.signed_in("reviewer", REVIEWER_PASSWORD).call("GET", "/v1/library/notes")) == 8, "the notes stay until the nightly reset"
+
+
+def test_the_password_is_put_back_even_when_the_token_cannot_be_made_again(seeded):
+    """Everyone shares how often the account may give its password, so a visitor can use that up."""
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    jane.call("POST", "/v1/account/password", {"current": REVIEWER_PASSWORD, "new": "someone-else-chose-this"})
+    refused = []
+
+    def connect():
+        person = seeded.connect()
+        call = person.call
+
+        def but_no_tokens(method, path, *args, **kwargs):
+            if (method, path) == ("POST", "/v1/account/tokens"):
+                refused.append(path)
+                raise demo.DemoError("POST /v1/account/tokens was refused (429): made up")
+            return call(method, path, *args, **kwargs)
+
+        person.call = but_no_tokens
+        return person
+
+    assert demo.keep_reviewer(connect, seeded.run, REVIEWER_PASSWORD, seeded.made["vaults"]) == ["password"]
+    assert refused == ["/v1/account/tokens"]
+    again = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    assert again.call("GET", "/v1/account/tokens")["tokens"] == [], "it waits for the reset"
+    assert keep(seeded) == []
+
+
+def test_a_password_changed_with_a_recovery_code_is_put_back_and_the_codes_are_replaced(seeded):
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    codes = jane.call("POST", "/v1/account/recovery-codes", {"password": REVIEWER_PASSWORD})["recovery_codes"]
+    seeded.connect().call("POST", "/v1/sign-in/recover", {"login": "reviewer", "code": codes[0], "password": "someone-else-chose-this"})
+    assert keep(seeded) == ["password"]
+    seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    with pytest.raises(demo.DemoError, match="401"):
+        seeded.connect().call("POST", "/v1/sign-in/recover", {"login": "reviewer", "code": codes[1], "password": "someone-else-chose-again"})
+    assert keep(seeded) == [], "the codes a visitor wrote down no longer work"
+
+
+def test_a_renamed_vault_gets_its_name_and_so_its_notice_back(seeded):
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    jane.call("POST", "/v1/vault/name", {"name": "Made-up name a visitor chose"})
+    assert keep(seeded) == ["names"]
+    account = jane.call("GET", "/v1/account")       # only a changed password signs people out
+    assert [vault["name"] for vault in account["vaults"]] == [demo.VAULT_NAME, demo.HOUSEHOLD]
+    assert [session["current"] for session in account["sessions"]] == [True], "the check signed itself out again"
+
+    jane.call("POST", "/v1/account/password", {"current": REVIEWER_PASSWORD, "new": "someone-else-chose-this"})
+    jane.call("POST", "/v1/session/vault", {"vault": account["vaults"][1]["id"]})
+    jane.call("POST", "/v1/vault/name", {"name": "Another made-up name"})
+    assert keep(seeded) == ["password", "names"]
+    assert [vault["name"] for vault in seeded.signed_in("reviewer", REVIEWER_PASSWORD).call("GET", "/v1/account")["vaults"]] == [demo.VAULT_NAME, demo.HOUSEHOLD]
+    assert keep(seeded) == []
+
+
+def test_a_deleted_vault_or_account_calls_for_starting_again(seeded):
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    household = jane.call("GET", "/v1/account")["vaults"][1]["id"]
+    jane.call("POST", "/v1/session/vault", {"vault": household})
+    jane.call("DELETE", "/v1/vault", {"password": REVIEWER_PASSWORD})
+    assert keep(seeded) == ["gone"]
+    assert [vault["name"] for vault in jane.call("GET", "/v1/account")["vaults"]] == [demo.VAULT_NAME], "nothing is put right piecemeal"
+
+    # The account cannot go while John shares its vault; a visitor can see him out first.
+    with pytest.raises(demo.DemoError, match="409"):
+        jane.call("DELETE", "/v1/account", {"password": REVIEWER_PASSWORD})
+    john = next(member["account"] for member in jane.call("GET", "/v1/vault/members")["members"] if member["login"] == "john")
+    jane.call("DELETE", f"/v1/vault/members/{john}")
+    jane.call("DELETE", "/v1/account", {"password": REVIEWER_PASSWORD})
+    with pytest.raises(demo.DemoError, match="401"):
+        seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    assert keep(seeded) == ["gone"]
+    assert seeded.signed_in("owner", ADMIN_PASSWORD).call("GET", "/v1/account")["account"]["admin"] is True, "the administrator is untouched"
+
+
+def test_a_vault_given_away_calls_for_starting_again(seeded):
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    admin = seeded.signed_in("owner", ADMIN_PASSWORD)
+    reviewer = next(person["id"] for person in admin.call("GET", "/v1/admin/people")["people"] if person["login"] == "reviewer")
+    jane.call("POST", "/v1/vault/members", {"login": "john", "role": "owner"})
+    try:
+        jane.call("DELETE", f"/v1/vault/members/{reviewer}")
+    except demo.DemoError:
+        pytest.skip("Kaal does not let an owner leave their own vault")
+    assert keep(seeded) == ["gone"]
+
+
+def test_tokens_and_ended_sessions_keep_nobody_out_so_they_wait_for_the_reset(seeded):
+    """A visitor can make tokens and sign others out. Neither is put right piecemeal: the reset starts from nothing."""
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    main = jane.call("GET", "/v1/account")["vault"]["id"]
+    made = jane.call("POST", "/v1/account/tokens", {"name": "Made-up visitor token", "scopes": ["read"], "vault": main, "password": REVIEWER_PASSWORD})
+    with pytest.raises(demo.DemoError, match="403"):
+        jane.call("POST", "/v1/account/tokens", {"name": "Made-up token without the password", "scopes": ["read"], "vault": main})
+    other = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    assert jane.call("POST", "/v1/account/sessions/sign-out-others")["count"] == 1
+    with pytest.raises(demo.DemoError, match="401"):
+        other.call("GET", "/v1/account")
+    seeded.signed_in("reviewer", REVIEWER_PASSWORD)      # signing in again is all it takes
+    assert keep(seeded) == [], "neither keeps anyone out, so both wait for the reset"
+    assert made["secret"] and len(jane.call("GET", "/v1/account/tokens")["tokens"]) == 2
+
+
+def test_storage_that_is_nearly_full_calls_for_starting_again(tmp_path, monkeypatch):
+    MiB = 1024 * 1024
+    # As compose.yaml sets them: Kaal stores nothing new under 32 MiB free, and takes files up to 10 MiB.
+    monkeypatch.setenv("KAAL_FREE_SPACE_MB", "32")
+    monkeypatch.setenv("KAAL_MAX_UPLOAD_BYTES", str(10 * MiB))
+    keep = demo.room_to_keep()
+    assert keep == 52 * MiB, "Kaal's floor, and twice a file of the largest size allowed"
+    usage = SimpleNamespace(total=256 * MiB, free=250 * MiB)
+    monkeypatch.setattr(demo.shutil, "disk_usage", lambda folder: usage)
+    assert demo.nearly_full(tmp_path, keep) is False
+    usage.free = 53 * MiB
+    assert demo.nearly_full(tmp_path, keep) is False
+    usage.free = 51 * MiB
+    assert demo.nearly_full(tmp_path, keep) is True
+    # While it is not nearly full, Kaal itself still takes the largest file: the demo starts again first.
+    usage.free = 52 * MiB
+    settings = server.Settings.from_env()
+    monkeypatch.setattr(server.shutil, "disk_usage", lambda folder: usage)
+    assert server.disk_is_full(settings, 2 * settings.max_upload_bytes) is False
+
+
+def test_the_seed_refuses_passwords_that_could_not_be_typed_or_kept(kaal_server):
+    for weak in ("short", "has spaces in it", "dollar$signs-here", ""):
+        with pytest.raises(demo.DemoError, match="password"):
+            demo.seed(kaal_server.connect, kaal_server.run, reviewer_password=weak, admin_password=ADMIN_PASSWORD, today=TODAY, pause=kaal_server.pause)
+    assert kaal_server.connect().call("GET", "/v1/sign-in/options")["signup"] == "invitation"
+
+
+def test_the_demo_writes_none_of_kaals_files_and_logs_no_password():
+    source = (DEMO / "demo.py").read_text()
+    assert "index.json" not in source and "accounts.db" not in source
+    assert "print(" not in source.replace("print(__doc__", ""), "nothing is printed but the help"
+    for line in source.splitlines():
+        if "log." in line:
+            assert "_password" not in line and "run(" not in line, line
+
+
+def test_the_next_reset_is_the_next_time_the_clock_reads_it():
+    at = lambda text: datetime.fromisoformat(text).replace(tzinfo=timezone.utc)  # noqa: E731
+    assert demo.next_reset(at("2026-11-17T01:00:00"), "03:00") == at("2026-11-17T03:00:00")
+    assert demo.next_reset(at("2026-11-17T03:00:00"), "03:00") == at("2026-11-18T03:00:00")
+    assert demo.next_reset(at("2026-12-31T23:30:00"), "0:15") == at("2027-01-01T00:15:00")
+    for bad in ("3am", "24:00", "03:60", ""):
+        with pytest.raises(demo.DemoError):
+            demo.next_reset(at("2026-11-17T01:00:00"), bad)
+
+
+def test_only_folders_held_in_memory_are_ever_emptied(tmp_path):
+    mounts = "tmpfs /srv/kaal tmpfs rw,nosuid,nodev,noexec,size=262144k,mode=700,uid=999,gid=999 0 0\n" \
+             "tmpfs /etc/kaal tmpfs rw,size=1024k,mode=700 0 0\n/dev/vda1 /srv/other ext4 rw 0 0\n"
+    demo.refuse_unless_in_memory([Path("/srv/kaal"), Path("/etc/kaal")], mounts)
+    for lasting in (Path("/srv/other"), Path("/srv/elsewhere")):
+        with pytest.raises(demo.DemoError, match="must be in memory"):
+            demo.refuse_unless_in_memory([Path("/srv/kaal"), lasting], mounts)
+    (tmp_path / "data" / "notes").mkdir(parents=True)
+    (tmp_path / "data" / "notes" / "a.json").write_text("{}")
+    (tmp_path / "master.key").write_text("made-up")
+    demo.empty(tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_the_health_check_waits_for_the_made_up_data(tmp_path, monkeypatch):
+    monkeypatch.setattr(demo, "READY", tmp_path / "ready")
+    monkeypatch.setattr(demo, "_answers", lambda: True)
+    assert demo.main(["demo.py", "health"]) == 1
+    (tmp_path / "ready").write_text("made-up\n")
+    assert demo.main(["demo.py", "health"]) == 0
+    monkeypatch.setattr(demo, "_answers", lambda: False)
+    assert demo.main(["demo.py", "health"]) == 1
+
+
+def test_the_setup_link_code_is_read_from_what_kaal_server_prints():
+    assert demo.setup_code("https://demo.example.org/#/setup/AbC_12-x\n") == "AbC_12-x"
+    with pytest.raises(demo.DemoError):
+        demo.setup_code("ERROR: No account 'nobody'.")
+
+
+# --- run.sh, with a docker that only records what it is asked
+
+DOCKER = r"""#!/bin/sh
+printf '%s\n' "$*" >> "$DOCKER_CALLS"
+case "$*" in "compose -p "*) env | grep -E '^(KAAL_|COMPOSE_)' >> "$DOCKER_CALLS.env" ;; esac
+case "$*" in
+info) exit 0 ;;
+"compose version --short") echo "${COMPOSE_VERSION:-2.29.1}" ;;
+*" ps -q kaal") echo made-up-container ;;
+"inspect --format {{.State.Health.Status}} made-up-container") echo healthy ;;
+*"exec -T kaal cat /tmp/kaal-demo-ready")
+    count=$(cat "$DOCKER_CALLS.marker" 2>/dev/null || echo 0); count=$((count + 1)); echo "$count" > "$DOCKER_CALLS.marker"
+    echo "made-up-marker-$((count / 2))" ;;
+esac
+exit 0
+"""
+
+
+@pytest.fixture()
+def demo_folder(tmp_path):
+    """A copy of deploy/demo to run, so that settings files land in a throwaway folder."""
+    folder = tmp_path / "deploy" / "demo"
+    shutil.copytree(DEMO, folder, ignore=shutil.ignore_patterns("*.env", "__pycache__"))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text(DOCKER)
+    (bin_dir / "docker").chmod(0o755)
+    calls = tmp_path / "docker-calls"
+
+    def run_sh(*args, **env):
+        environment = {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER_CALLS": str(calls), "HOME": str(tmp_path), **env}
+        calls.write_text("")
+        Path(f"{calls}.env").write_text("")
+        done = subprocess.run(["sh", str(folder / "run.sh"), *args], env=environment, text=True, capture_output=True, timeout=60)
+        return done, calls.read_text().splitlines()
+
+    return SimpleNamespace(folder=folder, run=run_sh, settings=lambda project="kaal-demo": folder / f"{project}.env",
+                           docker_saw=lambda: Path(f"{calls}.env").read_text())
+
+
+def read_settings(path):
+    return dict(line.split("=", 1) for line in path.read_text().splitlines() if line and not line.startswith("#"))
+
+
+def test_run_sh_starts_a_local_demo_with_its_own_names_and_prints_the_password_once(demo_folder):
+    done, calls = demo_folder.run("--local", "--port", "8797")
+    assert done.returncode == 0, done.stderr
+    stored = read_settings(demo_folder.settings())
+    assert stat.S_IMODE(demo_folder.settings().stat().st_mode) == 0o600
+    assert stored["KAAL_PUBLIC_URL"] == "http://localhost:8797" and stored["KAAL_LISTEN"] == "127.0.0.1:8797"
+    assert stored["KAAL_COOKIE_SECURE"] == "0" and stored["COMPOSE_PROFILES"] == "" and stored["KAAL_DEMO_RESET_AT"] == "03:00"
+    assert stored["KAAL_HSTS"] == "0", "plain http on this machine: browsers are not told to use https only"
+    assert stored["KAAL_IMAGE"] == "kaal-demo:local", "never kaal:local, which a regular installation runs"
+    for password in (stored["KAAL_DEMO_PASSWORD"], stored["KAAL_DEMO_ADMIN_PASSWORD"]):
+        assert re.fullmatch(r"[a-z2-9]{4}(-[a-z2-9]{4}){3}", password)
+        assert password in done.stdout
+    assert stored["KAAL_DEMO_PASSWORD"] != stored["KAAL_DEMO_ADMIN_PASSWORD"]
+    composed = [call for call in calls if call.startswith("compose -p")]
+    assert composed and all(call.startswith("compose -p kaal-demo --env-file kaal-demo.env -f compose.yaml ") for call in composed)
+    assert any(call.endswith(" build --quiet kaal") for call in composed) and any(" up -d " in call for call in composed)
+
+    again, _calls = demo_folder.run()
+    assert again.returncode == 0, again.stderr
+    assert read_settings(demo_folder.settings()) == stored, "the passwords and the address stay as they were"
+    assert stored["KAAL_DEMO_PASSWORD"] not in again.stdout and stored["KAAL_DEMO_ADMIN_PASSWORD"] not in again.stdout
+    assert "unchanged" in again.stdout
+
+
+def test_run_sh_keeps_settings_it_does_not_write(demo_folder):
+    demo_folder.run("--local")
+    settings = demo_folder.settings()
+    settings.write_text(settings.read_text() + "KAAL_DEMO_STORAGE=512m\n")
+    done, _calls = demo_folder.run("--port", "8798")
+    assert done.returncode == 0, done.stderr
+    stored = read_settings(settings)
+    assert stored["KAAL_DEMO_STORAGE"] == "512m" and stored["KAAL_LISTEN"] == "127.0.0.1:8798"
+    assert stored["KAAL_PUBLIC_URL"] == "http://localhost:8798", "still the local demo, now on the new port"
+    assert settings.read_text().count("KAAL_LISTEN=") == 1 and settings.read_text().count("# Written by") == 1
+
+
+def test_run_sh_lets_only_its_settings_file_decide(demo_folder):
+    done, _calls = demo_folder.run("--local", KAAL_PUBLIC_URL="https://elsewhere.example.org", KAAL_IMAGE="someone-else:latest",
+                                   KAAL_DEMO_ADMIN_PASSWORD="made-up-other-1", COMPOSE_PROFILES="https", KAAL_HSTS="1")
+    assert done.returncode == 0, done.stderr
+    stored = read_settings(demo_folder.settings())
+    assert stored["KAAL_PUBLIC_URL"] == "http://localhost:8770" and stored["KAAL_IMAGE"] == "kaal-demo:local"
+    assert stored["KAAL_DEMO_ADMIN_PASSWORD"] != "made-up-other-1" and stored["COMPOSE_PROFILES"] == ""
+    seen = demo_folder.docker_saw()
+    for elsewhere in ("elsewhere.example.org", "someone-else", "made-up-other-1", "COMPOSE_PROFILES=https", "KAAL_HSTS=1"):
+        assert elsewhere not in seen, "Docker Compose would have preferred it to the settings file"
+
+
+def test_the_demo_settings_are_never_committed():
+    assert "/deploy/demo/*.env" in (ROOT / ".gitignore").read_text().splitlines()
+
+
+def test_run_sh_takes_the_reviewer_password_from_the_environment(demo_folder):
+    done, _calls = demo_folder.run("--local", KAAL_DEMO_PASSWORD="App-Review-2026")
+    assert done.returncode == 0, done.stderr
+    assert read_settings(demo_folder.settings())["KAAL_DEMO_PASSWORD"] == "App-Review-2026"
+    assert "App-Review-2026" not in done.stdout
+    for bad in ("short", "has a space in it", "dollar$sign-in-it"):
+        refused, _calls = demo_folder.run(KAAL_DEMO_PASSWORD=bad)
+        assert refused.returncode == 1 and "KAAL_DEMO_PASSWORD must be" in refused.stderr
+    assert read_settings(demo_folder.settings())["KAAL_DEMO_PASSWORD"] == "App-Review-2026"
+
+
+def test_run_sh_sets_up_https_for_a_domain_of_its_own(demo_folder):
+    done, _calls = demo_folder.run("--domain", "HTTPS://Demo.Example.org/", "--reset-at", "04:30")
+    assert done.returncode == 0, done.stderr
+    stored = read_settings(demo_folder.settings())
+    assert stored["KAAL_PUBLIC_URL"] == "https://demo.example.org" and stored["KAAL_DOMAIN"] == "demo.example.org"
+    assert stored["COMPOSE_PROFILES"] == "https" and stored["KAAL_COOKIE_SECURE"] == "1" and stored["KAAL_DEMO_RESET_AT"] == "04:30"
+    assert stored["KAAL_HSTS"] == "1", "as deploy/docker/install.sh sets it for a domain of Kaal's own"
+    assert "X-Forwarded-For" not in done.stdout, "Caddy passes on who is asking"
+
+
+def test_run_sh_behind_a_proxy_says_what_the_proxy_must_pass_on(demo_folder):
+    done, _calls = demo_folder.run("--behind", "https://demo.example.ts.net/", "--port", "8796")
+    assert done.returncode == 0, done.stderr
+    stored = read_settings(demo_folder.settings())
+    assert stored["KAAL_PUBLIC_URL"] == "https://demo.example.ts.net" and stored["KAAL_COOKIE_SECURE"] == "1"
+    # The host name may serve other things over plain http on other ports, so no HSTS for it.
+    assert stored["KAAL_HSTS"] == "0" and stored["COMPOSE_PROFILES"] == ""
+    assert "127.0.0.1:8796" in done.stdout and "tailscale serve --bg 8796" in done.stdout
+    assert "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;" in done.stdout
+
+
+@pytest.mark.parametrize(("args", "env", "says"), [
+    ((), {}, "say where people will open the demo"),
+    (("--local",), {"KAAL_DEMO_PROJECT": "kaal"}, "regular installation"),
+    (("--local",), {"KAAL_DEMO_PROJECT": "Bad Name"}, "KAAL_DEMO_PROJECT may hold only"),
+    (("--local", "--port", "80"), {}, "--port must be"),
+    (("--local", "--reset-at", "25:00"), {}, "--reset-at must be"),
+    (("--domain", "not a domain"), {}, "does not look like a domain"),
+    (("--behind", "http://plain.example.org"), {}, "should look like https://"),
+    (("--local",), {"COMPOSE_VERSION": "2.20.0"}, "too old"),
+    (("reset",), {}, "not set up here yet"),
+])
+def test_run_sh_refuses_what_it_cannot_do_safely(demo_folder, args, env, says):
+    done, calls = demo_folder.run(*args, **env)
+    assert done.returncode == 1 and says in done.stderr
+    assert not any(" up " in call or " build " in call for call in calls)
+
+
+def test_run_sh_resets_and_removes_only_its_own_project(demo_folder):
+    demo_folder.run("--local", KAAL_DEMO_PROJECT="kaal-test-made-up")
+    done, calls = demo_folder.run("reset", KAAL_DEMO_PROJECT="kaal-test-made-up")
+    assert done.returncode == 0, done.stderr
+    assert "compose -p kaal-test-made-up --env-file kaal-test-made-up.env -f compose.yaml kill -s HUP kaal" in calls
+    assert "made-up data is back" in done.stdout
+
+    done, calls = demo_folder.run("remove", KAAL_DEMO_PROJECT="kaal-test-made-up")
+    assert done.returncode == 0, done.stderr
+    assert "compose -p kaal-test-made-up --env-file kaal-test-made-up.env -f compose.yaml --profile https down --volumes --remove-orphans" in calls
+    assert "image rm kaal-test-made-up:local" in calls
+    assert not any("kaal:local" in call or "compose -p kaal " in call for call in calls)
+
+
+def test_run_sh_is_plain_sh():
+    text = (DEMO / "run.sh").read_text()
+    assert text.startswith("#!/bin/sh\n") and os.access(DEMO / "run.sh", os.X_OK)
+    assert subprocess.run(["sh", "-n", str(DEMO / "run.sh")], capture_output=True).returncode == 0
+    for bashism in ("[[", "function ", "<<<", "echo -e", "pipefail"):
+        assert bashism not in text, f"run.sh uses {bashism!r}, which plain sh does not have"
+    assert not any(line.strip().startswith("local ") for line in text.splitlines())
+
+
+# --- compose.yaml: the regular setup's hardening, with nothing kept on disk
+
+
+def test_the_demo_reuses_the_regular_setup_and_keeps_nothing_on_disk():
+    text = (DEMO / "compose.yaml").read_text()
+    assert text.count("file: ../docker/compose.yaml") == 2
+    assert "env_file: !reset []" in text and "volumes: !override" in text
+    assert "kaal-data" not in text and "kaal-key" not in text and "backup" not in text.split("services:")[1]
+    assert re.search(r"- /srv/kaal:size=\$\{KAAL_DEMO_STORAGE:-256m\},uid=999,gid=999,mode=0700", text)
+    assert re.search(r"- /etc/kaal:size=1m,uid=999,gid=999,mode=0700", text)
+    assert 'KAAL_RECEIPT_AI: "off"' in text and 'KAAL_SIGNUPS_PER_HOUR: "0"' in text
+    # A regular installation's floor of free space is 1 GiB, more than the demo has at all:
+    # without a smaller one Kaal would refuse even the made-up data.
+    assert "KAAL_FREE_SPACE_MB: ${KAAL_DEMO_FREE_SPACE_MB:-32}" in text
+
+
+@pytest.mark.skipif(not shutil.which("docker"), reason="needs docker")
+def test_compose_resolves_the_demo_with_the_regular_hardening(tmp_path):
+    settings = tmp_path / "made-up.env"
+    settings.write_text("KAAL_IMAGE=kaal-test-config:local\nKAAL_PUBLIC_URL=http://localhost:8797\nKAAL_LISTEN=127.0.0.1:8797\n"
+                        "KAAL_COOKIE_SECURE=0\nKAAL_DEMO_PASSWORD=made-up-pass-1\nKAAL_DEMO_ADMIN_PASSWORD=made-up-pass-2\n")
+    done = subprocess.run(["docker", "compose", "-p", "kaal-test-config", "--env-file", str(settings), "-f", str(DEMO / "compose.yaml"),
+                           "config", "--format", "json"], capture_output=True, text=True, timeout=60)
+    if done.returncode != 0 and "unknown" in done.stderr.lower():
+        pytest.skip("this Docker has no compose plugin")
+    assert done.returncode == 0, done.stderr
+    resolved = json.loads(done.stdout)
+    assert set(resolved["services"]) == {"kaal"}, "no HTTPS proxy and no backups unless asked for"
+    kaal_service = resolved["services"]["kaal"]
+    assert kaal_service["image"] == "kaal-test-config:local" and kaal_service["read_only"] is True
+    assert kaal_service["cap_drop"] == ["ALL"] and kaal_service["security_opt"] == ["no-new-privileges:true"]
+    assert [(mount["type"], mount["target"]) for mount in kaal_service["volumes"]] == [("bind", "/opt/kaal-demo/demo.py")]
+    assert all(mount["read_only"] for mount in kaal_service["volumes"])
+    assert {entry.split(":")[0] for entry in kaal_service["tmpfs"]} == {"/tmp", "/srv/kaal", "/etc/kaal"}
+    assert [(port["host_ip"], port["published"]) for port in kaal_service["ports"]] == [("127.0.0.1", "8797")]
+    environment = kaal_service["environment"]
+    assert environment["KAAL_RECEIPT_AI"] == "off" and environment["KAAL_SIGNUPS_PER_HOUR"] == "0"
+    assert environment["KAAL_MAX_UPLOAD_BYTES"] == "10485760" and environment["KAAL_COOKIE_SECURE"] == "0"
+    storage = next(entry for entry in kaal_service["tmpfs"] if entry.startswith("/srv/kaal:"))
+    assert "size=256m" in storage and int(environment["KAAL_FREE_SPACE_MB"]) == 32, "the floor of free space fits the demo's storage"
+    assert int(environment["KAAL_DOWNLOAD_MEMORY_MB"]) + 3 * int(environment["KAAL_SEARCH_MEMORY_MB"]) + 256 < 1024, "what is held in memory fits the limit"
+    assert 2 * int(environment["KAAL_FILE_OUTPUT_MB"]) + 52 < 256, "two files being read at once cannot fill the storage by themselves"
+    assert environment["KAAL_HSTS"] == "0", "only a domain of the demo's own tells browsers to stay on https"
+    # From the regular setup: limits apply per visitor behind the proxy, and logs cannot fill the disk.
+    assert environment["KAAL_TRUSTED_PROXIES"] == "private"
+    assert kaal_service["logging"] == {"driver": "json-file", "options": {"max-file": "3", "max-size": "10m"}}
+    assert kaal_service["restart"] == "unless-stopped"
+    assert kaal_service["command"] == ["python", "/opt/kaal-demo/demo.py", "serve"]
+    assert kaal_service["healthcheck"]["test"] == ["CMD", "python", "/opt/kaal-demo/demo.py", "health"]
+    assert kaal_service["healthcheck"]["retries"] * 10 >= 120, "a reset, which takes under a minute, never shows as unhealthy"
+    assert int(kaal_service["mem_limit"]) == 1024 ** 3 and kaal_service["pids_limit"] == 256
+    assert "kaal.env" not in json.dumps(kaal_service), "a regular installation's own settings never apply"
+
+
+# --- the real demo, built and run with Docker (KAAL_DEMO_DOCKER=1)
+
+PROJECT = "kaal-test-demo"
+REVIEW = "made-up-review-pass-1"
+# What the image is built from, copied so that the demo's settings file lands in a throwaway folder.
+BUILD_INPUTS = ["Dockerfile", ".dockerignore", "pyproject.toml", "README.md", "LICENSE", "NOTICE", "kaal", "deploy/docker", "deploy/demo"]
+
+
+def _free_port():
+    while True:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        if port not in {8765, 8791, 8792}:
+            return port
+
+
+def _project_things(project):
+    """The containers (with when each was started), volumes and networks Docker holds for one compose project."""
+    label = f"label=com.docker.compose.project={project}"
+    found = []
+    # Only the containers Compose made for the project's services: one that anyone runs from
+    # the project's image carries the image's label for the project too, and comes and goes.
+    for kind in (["ps", "-a", "--filter", "label=com.docker.compose.oneoff=False"], ["volume", "ls"], ["network", "ls"]):
+        listed = subprocess.run(["docker", *kind, "-q", "--filter", label], capture_output=True, text=True, timeout=60)
+        for line in listed.stdout.split():
+            if kind[0] == "ps":
+                # A container that was stopped, restarted or made again does not keep its id and start time.
+                started = subprocess.run(["docker", "inspect", "--format", "{{.State.StartedAt}}", line], capture_output=True, text=True, timeout=60)
+                if started.returncode != 0:
+                    continue        # it went between the two commands: not one that stays
+                line = f"{line} started {started.stdout.strip()}"
+            found.append(f"{kind[0]} {line}")
+    return sorted(found)
+
+
+@pytest.mark.skipif(os.environ.get("KAAL_DEMO_DOCKER") != "1", reason="builds and runs the demo with Docker; set KAAL_DEMO_DOCKER=1")
+def test_the_real_demo_shows_the_made_up_data_and_puts_it_back(tmp_path):
+    copy = tmp_path / "kaal"
+    for name in BUILD_INPUTS:
+        if (ROOT / name).is_dir():
+            shutil.copytree(ROOT / name, copy / name, ignore=shutil.ignore_patterns("__pycache__", "*.env", ".env"))
+        else:
+            (copy / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / name, copy / name)
+    run_sh = copy / "deploy" / "demo" / "run.sh"
+    port = _free_port()
+    env = {**os.environ, "KAAL_DEMO_PROJECT": PROJECT, "KAAL_DEMO_PASSWORD": REVIEW}
+
+    def run_demo(*args, timeout=600):
+        done = subprocess.run(["sh", str(run_sh), *args], env=env, capture_output=True, text=True, timeout=timeout)
+        assert done.returncode == 0, done.stdout + done.stderr
+        return done.stdout
+
+    send = demo.http_sender(f"http://127.0.0.1:{port}")
+
+    def sign_in(login, password):
+        person = demo.Kaal(send)
+        person.call("POST", "/v1/sign-in", {"login": login, "password": password})
+        return person
+
+    def fetch(person, path):
+        status, _cookies, body = send("GET", path, {"X-Kaal-Session": person.session, "X-Kaal-Request": "1"}, b"")
+        return status, body
+
+    def logs():
+        """Everything the demo's container has said since it was made (run.sh logs shows the end of it)."""
+        done = subprocess.run(["docker", "logs", f"{PROJECT}-kaal-1"], capture_output=True, text=True, timeout=120)
+        return done.stdout + done.stderr
+
+    def seeding():
+        """What changes each time the made-up data has been put in; empty while it is being put in."""
+        done = subprocess.run(["docker", "exec", f"{PROJECT}-kaal-1", "cat", "/tmp/kaal-demo-ready"], capture_output=True, text=True, timeout=60)
+        return done.stdout.strip()
+
+    def starts_again(what, before):
+        eventually(what, lambda: seeding() not in ("", before))
+
+    def eventually(what, check, seconds=240):
+        deadline = time.monotonic() + seconds
+        while not check():
+            assert time.monotonic() < deadline, f"{what} did not happen in {seconds} seconds:\n{logs()[-3000:]}"
+            time.sleep(3)
+
+    def signed_out(person):
+        try:
+            person.call("GET", "/v1/account")
+        except demo.DemoError as error:
+            return "(401)" in str(error)
+        except OSError:
+            return False        # the demo is starting again
+        return False
+
+    seeded_notes = {note.title for note in demo.notes(TODAY) if not note.trash} | {demo.NOTICE_TITLE}
+
+    def the_seed_is_there(person):
+        listing = person.call("GET", "/v1/library/notes")
+        assert listing[0]["title"] == demo.NOTICE_TITLE and {note["title"] for note in listing} == seeded_notes
+        waiting = person.call("GET", "/v1/medical/receipts?inbox=true")
+        reviewed = person.call("GET", "/v1/medical/receipts?status=reviewed")
+        assert len(waiting) == 4 and {receipt["receipt"]["status"] for receipt in waiting} == {"needs_review"}
+        assert waiting[0]["title"] == "Example Family Clinic: office visit"
+        assert waiting[0]["receipt"]["fields"].get("amount") == "45.00", "the receipt the iPhone app's screen tests check"
+        assert len(reviewed) == 4 and sum(bool(receipt["receipt"].get("reimbursed_at")) for receipt in reviewed) == 1
+        assert len(person.call("GET", "/v1/medical/receipts?trash=true")) == 1
+        assert len(person.call("GET", "/v1/library/notes?trash=true")) == 1
+        assert person.call("GET", "/v1/medical/people")["people"] == demo.FAMILY
+        return listing, waiting
+
+    regular = _project_things("kaal")
+    try:
+        started = run_demo("--local", "--port", str(port), timeout=1800)
+        assert f"http://localhost:{port}" in started and REVIEW not in started
+        admin_password = read_settings(copy / "deploy" / "demo" / f"{PROJECT}.env")["KAAL_DEMO_ADMIN_PASSWORD"]
+
+        # The reviewer, signed in with a password, then as the iPhone app signs in.
+        jane = sign_in("reviewer", REVIEW)
+        account = jane.call("GET", "/v1/account")
+        assert account["account"] == {"login": "reviewer", "name": demo.REVIEWER_NAME, "admin": False, "has_password": True}
+        assert account["vault"]["name"] == demo.VAULT_NAME and len(account["vaults"]) == 2
+        verifier = secrets.token_urlsafe(48)
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+        approved = jane.call("POST", "/v1/account/app-sign-ins", {"challenge": challenge})
+        code = approved["code"]
+        assert approved["redirect"].startswith("kaal://signed-in?code=")
+        phone = demo.Kaal(send)
+        phone.session = phone.call("POST", "/v1/app-sign-ins", {"code": code, "verifier": verifier, "device": "Kaal app on iPhone"})["session"]
+        listing, waiting = the_seed_is_there(phone)
+        garden = phone.call("GET", f"/v1/library/notes/{by_title(listing)['Made-up garden plan']['id']}")["note"]
+        status, picture = fetch(phone, f"/v1/notes/{garden['id']}/attachments/{garden['attachments'][0]['id']}/view")
+        assert status == 200 and picture.startswith(b"\x89PNG")
+        clinic = waiting[0]
+        status, page = fetch(phone, f"/v1/medical/receipts/{clinic['id']}/attachments/{clinic['attachments'][0]['id']}/preview")
+        assert status == 200 and len(page) > 1000, "a picture of the receipt to check the values against"
+
+        status, copy_of_vault = fetch(phone, "/v1/vault/export")
+        assert status == 200 and copy_of_vault.startswith(b"PK"), "a readable copy of the vault can be downloaded"
+
+        # The administrator is someone else, and nobody can make an account.
+        owner = sign_in("owner", admin_password)
+        assert owner.call("GET", "/v1/account")["account"]["admin"] is True
+        with pytest.raises(demo.DemoError, match="403"):
+            jane.call("GET", "/v1/admin/people")
+        assert demo.Kaal(send).call("GET", "/v1/sign-in/options")["signup"] == "invitation"
+        with pytest.raises(demo.DemoError, match="403"):
+            demo.Kaal(send).call("POST", "/v1/sign-up", {"login": "stranger", "password": "made-up-stranger-1"})
+        # Over the demo's 10 MiB, though a regular installation takes up to 100. (A body
+        # over 11 MiB is refused by its stated length before it is even read.)
+        with pytest.raises(demo.DemoError, match="413"):
+            jane.call("POST", f"/v1/library/notes/{garden['id']}/attachments", files=[("file", "big.bin", "application/octet-stream", b"0" * (10 * 1024 * 1024 + 500_000))])
+
+        # What a visitor changes, the reset puts back, and the password App Review was given still works.
+        jane.call("POST", "/v1/library/notes", {"title": "Made-up note the reset removes", "body": "made up", "tags": []})
+        jane.call("POST", f"/v1/medical/receipts/{clinic['id']}/trash")
+        jane.call("POST", "/v1/medical/people", {"add": ["Made-up Visitor"]})
+        token = jane.call("POST", "/v1/account/tokens", {"name": "Made-up visitor token", "scopes": ["read"], "vault": account["vault"]["id"], "password": REVIEW})["secret"]
+        status, _cookies, _body = send("GET", "/v1/library/notes", {"Authorization": f"Bearer {token}"}, b"")
+        assert status == 200
+        jane.call("POST", "/v1/account/password", {"current": REVIEW, "new": "someone-else-chose-this"})
+        assert f"http://localhost:{port}" in run_demo("status")
+        assert "made-up data is back" in run_demo("reset")
+        with pytest.raises(demo.DemoError, match="401"):
+            sign_in("reviewer", "someone-else-chose-this")
+        with pytest.raises(demo.DemoError, match="401"):
+            phone.call("GET", "/v1/library/notes")
+        status, _cookies, _body = send("GET", "/v1/library/notes", {"Authorization": f"Bearer {token}"}, b"")
+        assert status == 401, "a token a visitor made is gone with everything else"
+        jane = sign_in("reviewer", REVIEW)
+        the_seed_is_there(jane)
+        account = jane.call("GET", "/v1/account")
+        assert [token["name"] for token in jane.call("GET", "/v1/account/tokens")["tokens"]] == ["Kaal for Chrome"]
+        assert [session["current"] for session in account["sessions"]] == [True]
+
+        # Between resets: a changed password and a renamed vault are put back within about a minute,
+        # and a token a visitor made with the old password stops working.
+        token = jane.call("POST", "/v1/account/tokens", {"name": "Made-up visitor token", "scopes": ["read"], "vault": account["vault"]["id"], "password": REVIEW})["secret"]
+        jane.call("POST", "/v1/vault/name", {"name": "Made-up name a visitor chose"})
+        jane.call("POST", "/v1/account/password", {"current": REVIEW, "new": "someone-else-chose-this"})
+        eventually("putting the reviewer's password back", lambda: signed_out(jane))
+        jane = sign_in("reviewer", REVIEW)
+        assert jane.call("GET", "/v1/account")["vault"]["name"] == demo.VAULT_NAME
+        status, _cookies, _body = send("GET", "/v1/library/notes", {"Authorization": f"Bearer {token}"}, b"")
+        assert status == 401
+        eventually("making the token the Tokens page shows again",
+                   lambda: [token["name"] for token in jane.call("GET", "/v1/account/tokens")["tokens"]] == ["Kaal for Chrome"], seconds=60)
+        assert len(jane.call("GET", "/v1/library/notes")) == len(seeded_notes), "only the password and the name were touched"
+
+        # A deleted vault, then a deleted account, each bring the whole reset forward.
+        before = seeding()
+        household = jane.call("GET", "/v1/account")["vaults"][1]["id"]
+        jane.call("POST", "/v1/session/vault", {"vault": household})
+        jane.call("DELETE", "/v1/vault", {"password": REVIEW})
+        starts_again("starting again after a vault was deleted", before)
+        assert "one of its vaults had been deleted" in logs()
+        jane = sign_in("reviewer", REVIEW)
+        vaults = jane.call("GET", "/v1/account")["vaults"]
+        assert len(vaults) == 2
+        before = seeding()
+        with pytest.raises(demo.DemoError, match="409"):
+            jane.call("DELETE", "/v1/account", {"password": REVIEW})     # not while John shares its vaults
+        for vault in vaults:
+            jane.call("POST", "/v1/session/vault", {"vault": vault["id"]})
+            john = next(member["account"] for member in jane.call("GET", "/v1/vault/members")["members"] if member["login"] == "john")
+            jane.call("DELETE", f"/v1/vault/members/{john}")
+        jane.call("DELETE", "/v1/account", {"password": REVIEW})
+        starts_again("starting again after the account was deleted", before)
+        the_seed_is_there(sign_in("reviewer", REVIEW))
+
+        # Storage a visitor fills: Kaal refuses what would leave too little free (the demo's
+        # floor, not a regular installation's 1 GiB), and the demo starts again within a minute.
+        # Kaal refuses a large file before reading it, which a client still sending it sees as
+        # a closed connection; either way the loop stops well short of 40 files.
+        jane = sign_in("reviewer", REVIEW)
+        before = seeding()
+        house = by_title(jane.call("GET", "/v1/library/notes"))["Made-up house notes"]["id"]
+        stopped = ""
+        for number in range(40):        # 360 MiB, which is more than the demo can hold
+            try:
+                jane.call("POST", f"/v1/library/notes/{house}/attachments",
+                          files=[("file", f"made-up-{number}.bin", "application/octet-stream", os.urandom(9 * 1024 * 1024))])
+            except (demo.DemoError, OSError) as error:
+                stopped = str(error)
+                break
+        assert stopped and 12 <= number < 30, f"the demo took {number} files of 9 MiB and then: {stopped}"
+        starts_again("starting again once the storage was nearly full", before)
+        assert "the demo's storage was nearly full" in logs() and "too small" not in logs()
+        assert "Kaal stopped by itself" not in logs(), "Kaal refused the files; it did not fall over"
+        state = subprocess.run(["docker", "inspect", "--format", "{{.RestartCount}} {{.State.OOMKilled}}", f"{PROJECT}-kaal-1"], capture_output=True, text=True, timeout=60)
+        assert state.stdout.split() == ["0", "false"], "and the container was neither restarted nor out of memory"
+        the_seed_is_there(sign_in("reviewer", REVIEW))
+
+        # Stopped and started again, it comes back the same, with the same passwords.
+        run_demo("stop", timeout=120)
+        run_demo("start", timeout=600)
+        the_seed_is_there(sign_in("reviewer", REVIEW))
+        sign_in("owner", admin_password)
+
+        # Set up as App Review reaches it, behind HTTPS: Kaal then names its cookie so that only a
+        # browser on that address may use it, and the demo must still fill and look after itself.
+        earlier = logs()     # the container is made anew for the new address, and its log starts again
+        behind = run_demo("--behind", "https://demo.example.org", timeout=900)
+        assert "https://demo.example.org" in behind and REVIEW not in behind
+        jane = sign_in("reviewer", REVIEW)
+        the_seed_is_there(jane)
+        jane.call("POST", "/v1/account/password", {"current": REVIEW, "new": "someone-else-chose-this"})
+        eventually("putting the reviewer's password back", lambda: signed_out(jane))
+        sign_in("reviewer", REVIEW)
+        shown = subprocess.run(["sh", str(run_sh), "logs"], env=env, capture_output=True, text=True, timeout=120)
+        assert "kaal.server" in shown.stdout + shown.stderr, "run.sh logs shows what the demo has said"
+        said = earlier + logs()
+        assert "ready: 9 notes and 9 receipts" in said and said.count("had been changed; it is back") == 2
+        assert REVIEW not in said and admin_password not in said and "someone-else-chose-this" not in said and "/#/setup/" not in said
+    finally:
+        subprocess.run(["sh", str(run_sh), "remove"], env=env, capture_output=True, text=True, timeout=300)
+    assert _project_things(PROJECT) == [], "nothing of the demo is left: no containers, volumes or networks"
+    assert subprocess.run(["docker", "image", "inspect", f"{PROJECT}:local"], capture_output=True).returncode != 0
+    # Everything a regular installation had is still there, and its containers were never stopped.
+    assert set(regular) <= set(_project_things("kaal")), "a regular installation on this machine is left alone"

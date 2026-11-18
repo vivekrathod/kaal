@@ -190,6 +190,13 @@ deploy/docker/install.sh --image ghcr.io/OWNER/kaal:latest
 
 where `OWNER` is the owner of the repository you cloned.
 
+## A demo with made-up data
+
+`deploy/demo/run.sh` runs a separate Kaal that holds only made-up notes and
+receipts and goes back to them every night, for App Review or for trying Kaal
+out without putting anything real in it. It leaves a regular installation on
+the same machine alone. See [`deploy/demo/README.md`](../deploy/demo/README.md).
+
 ## Removing Kaal
 
 `deploy/docker/kaalctl stop` stops it and keeps everything. To remove it and

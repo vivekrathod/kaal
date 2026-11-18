@@ -12,44 +12,29 @@ The app does nothing until it is signed in to a Kaal server, so App Review
 needs one it can reach from the internet, over HTTPS, holding nothing real.
 
 1. On a machine with Docker and a domain name pointing at it (for example
-   `demo.example.org`; any small server will do), install Kaal:
+   `demo.example.org`; any small server will do), start the demo:
 
    ```bash
-   deploy/docker/install.sh --domain DEMO-ADDRESS
+   KAAL_DEMO_PASSWORD=CHOOSE-ONE deploy/demo/run.sh --domain DEMO-ADDRESS
    ```
 
-   Open the link it prints and choose a password for yourself, the
-   administrator. Keep sign-up closed (the default), so the sign-in page
-   offers no way to create an account.
+   That is the whole installation ([`deploy/demo/README.md`](../../deploy/demo/README.md)).
+   It builds Kaal, sets up HTTPS for the domain, makes the account App Review
+   signs in with (`reviewer`, shown as Jane Madeup, not an administrator) with
+   the password you chose, and fills its vault with made-up notes and
+   receipts. Sign-up is closed, so the sign-in page offers no way to create
+   an account.
 
-2. Make the account App Review signs in with, and choose its password from
-   the link this prints:
+2. Nothing else needs setting up. Every night the demo goes back to the
+   made-up data, and within a minute it puts back a changed password or a
+   deleted account, so what one reviewer does is gone before the next looks.
 
-   ```bash
-   deploy/docker/kaalctl run kaal-server account add appreview --name "App Review"
-   deploy/docker/kaalctl setup-link appreview
-   ```
-
-   Save the recovery codes it shows somewhere; nobody needs them.
-
-3. Fill its vault with the made-up notes and receipts the screenshots show.
-   Sign in to the web app as `appreview`, make a token under Settings →
-   Tokens with read, reveal and write (it asks for the account's password),
-   save it to a file, and on any computer with this repository and Python
-   with Pillow:
-
-   ```bash
-   bin/demo-data.py fill --url https://DEMO-ADDRESS --token-file appreview.token
-   ```
-
-   It takes a minute or two: the server reads each receipt after storing it,
-   and the script waits for that before marking some of them reviewed and
-   reimbursed. It stops without adding anything if the made-up notes are
-   already there, so running it twice does no harm. Then revoke the token
-   under Settings → Tokens, and delete the file.
+3. The screenshots in `ios/AppStore/screenshots` were taken from the same
+   kind of made-up data (`bin/demo-data.py`, which `make-screenshots.sh`
+   runs); the demo's own notes and receipts differ in detail.
 
 4. Sign in on an iPhone yourself, with the build you are about to upload, the
-   address, `appreview` and its password, and go through the steps below
+   address, `reviewer` and its password, and go through the steps below
    once. In particular the app must still be signed in after the sign-in
    sheet closes, and after it is closed and opened again. A server reached
    over https takes an app's session only in the `X-Kaal-Session` header: a
@@ -58,16 +43,15 @@ needs one it can reach from the internet, over HTTPS, holding nothing real.
    must not be uploaded.
 
 Keep the server running until the review is finished, and for later versions
-too. Nothing in it is real: every name, receipt and address is made up and
-marked SAMPLE.
+too. Nothing in it is real: every name, receipt and address is made up.
 
 Three things to know about that server:
 
 - The reviewer can change and delete what is in it, and can delete the
-  `appreview` account itself (see "Deleting the account" below). Before each
-  submission, sign in as `appreview` and look; if the account is gone, make
-  it again from step 2. The demo server's daily backups keep the last 14
-  days (`deploy/docker/kaalctl backups`, `restore`).
+  `reviewer` account itself (see "Deleting the account" below). The demo puts
+  the account back within a minute and everything else every night
+  (`deploy/demo/run.sh reset` does it at once). Before each submission, sign
+  in as `reviewer` and look.
 - The sign-in pages take 30 requests a minute from one address
   (`KAAL_SIGN_IN_PER_MINUTE`), and five wrong passwords for a name slow
   further tries down. A reviewer signing in by hand never comes near either.
@@ -86,7 +70,7 @@ content of its own.
 We run a demo server with made-up data for you:
 
 - Address: DEMO-ADDRESS
-- Sign-in name: appreview
+- Sign-in name: reviewer
 - Password: DEMO-PASSWORD
 
 Nothing is sent to us: the app talks only to the server whose address is
@@ -116,7 +100,7 @@ a Kaal server are made by whoever runs it. The one place the app makes an
 account is for such an administrator: signed in as the administrator of
 their own server, Settings → People lets them add a person (who then chooses
 a password from a link the administrator sends them), and open or close
-sign-up on that server's own web page. The `appreview` account is not an
+sign-up on that server's own web page. The `reviewer` account is not an
 administrator, so those screens are not shown to it; an administrator sees
 the same Settings with two more rows, People and Sign-in services.
 

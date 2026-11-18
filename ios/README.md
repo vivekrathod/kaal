@@ -85,6 +85,11 @@ xcodebuild test -project ios/Kaal.xcodeproj -scheme Kaal -only-testing:KaalUITes
   -destination 'platform=iOS Simulator,name=iPhone 17'
 ```
 
+Kaal's demo is such a Kaal: `deploy/demo/run.sh --local` starts one at
+`http://localhost:8770` with the sign-in name `reviewer` (see
+[`deploy/demo/README.md`](../deploy/demo/README.md)). That account is not an
+administrator, so the tests skip the People and Sign-in services pages there.
+
 Without `TEST_RUNNER_KAAL_UI_SERVER` those tests are skipped. In the simulator
 speech recognition is not available, so the dictation test only checks that
 the app says so; dictation and the camera scanner need a real iPhone to try.
