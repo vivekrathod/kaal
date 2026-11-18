@@ -685,6 +685,7 @@
             "additionalProperties": {
               "type": "string"
             },
+            "maxProperties": 50,
             "title": "Fields",
             "type": "object"
           }

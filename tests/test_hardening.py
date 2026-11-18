@@ -246,7 +246,12 @@ def test_https_answers_tell_browsers_to_stay_on_https(house, tmp_path):
 
 
 def test_text_from_outside_cannot_forge_log_lines(house, caplog):
-    secret = house.state.tokens.create("made-up\nINFO kaal.server forged line", ["read"])[1]
+    # A token made before names were checked may still hold a line break: write one straight into the file.
+    secret = house.state.tokens.create("made-up", ["read"])[1]
+    stored = json.loads((house.home / "tokens.json").read_text())
+    stored["tokens"][-1]["name"] = "made-up\nINFO kaal.server forged line"
+    (house.home / "tokens.json").write_text(json.dumps(stored))
+    house.state.tokens._cache = None
     caplog.set_level(logging.INFO, logger="kaal.server")
     house.visitor().get("/v1/status", headers={"Authorization": f"Bearer {secret}"})
     lines = [record.getMessage() for record in caplog.records if record.name == "kaal.server"]
@@ -792,3 +797,129 @@ def test_ids_only_keeps_the_ids_of_what_was_attached_or_queued():
     assert server.ids_only({"status": "attached", "note": "n1", "attachmentId": "a1", "name": "made-up.pdf"}) == {"status": "attached", "note": "n1", "attachmentId": "a1"}
     assert server.ids_only({"status": "queued", "count": 2, "ids": ["n1", "n2"], "names": ["Jane Madeup"]}) == {"status": "queued", "count": 2, "ids": ["n1", "n2"]}
     assert server.ids_only({"note": {"id": "n1", "title": "Made-up"}}) == {"note": {"id": "n1"}}
+
+
+# --- a request that is not clear about its size, or says one thing and does another
+
+def _direct(app_or_layer, method, path, headers, body_pieces=(b"",), pause=0.0, more_to_come=False):
+    """Send one request straight to an ASGI app, with exactly these headers (repeats included)."""
+    import asyncio
+
+    seen = {}
+
+    async def go():
+        pieces = list(body_pieces)
+
+        async def receive():
+            if pause:
+                await asyncio.sleep(pause)
+            if pieces:
+                piece = pieces.pop(0)
+                return {"type": "http.request", "body": piece, "more_body": bool(pieces) or more_to_come}
+            await asyncio.sleep(3600)
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                seen["status"] = message["status"]
+
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method, "path": path, "raw_path": path.encode(),
+                 "query_string": b"", "scheme": "https", "server": ("testserver", 443), "client": ("203.0.113.7", 50000), "root_path": "",
+                 "headers": [(name.lower().encode(), value if isinstance(value, bytes) else value.encode()) for name, value in headers]}
+        await app_or_layer(scope, receive, send)
+
+    asyncio.run(go())
+    return seen.get("status")
+
+
+def test_a_request_that_is_not_clear_about_its_size_or_sender_is_refused(house):
+    sam = house.signed_in("sam")
+    session = sam.cookies.get("__Host-kaal_session")
+    mine = [("X-Kaal-Session", session), ("X-Kaal-Request", "1")]
+    body = b'{"query": "made-up"}'
+    assert _direct(house.app, "POST", "/v1/library/search", [*mine, ("Content-Type", "application/json"), ("Content-Length", str(len(body)))], [body]) == 200
+    # A length together with chunked encoding: this layer and the one reading the body could each believe a different one.
+    assert _direct(house.app, "POST", "/v1/library/search", [*mine, ("Content-Type", "application/json"), ("Content-Length", "10"), ("Transfer-Encoding", "chunked")], [body]) == 400
+    # The kind of body named twice, or the sender.
+    assert _direct(house.app, "POST", "/v1/library/search", [*mine, ("Content-Type", "application/json"), ("Content-Type", "multipart/form-data; boundary=x"), ("Content-Length", str(len(body)))], [body]) == 400
+    assert _direct(house.app, "GET", "/v1/session", [("X-Kaal-Session", session), ("X-Kaal-Session", "ks_made_up")]) == 400
+    assert _direct(house.app, "POST", "/v1/library/search", [*mine, ("Content-Type", "application/json"), ("Content-Length", "ten")], [body]) == 400
+
+
+def test_only_the_upload_routes_take_a_large_body_whatever_it_says_it_carries(house):
+    sam = house.signed_in("sam")
+    mine = [("X-Kaal-Session", sam.cookies.get("__Host-kaal_session")), ("X-Kaal-Request", "1")]
+    multipart = ("Content-Type", "multipart/form-data; boundary=made-up")
+    big = str(30 * 1024 * 1024)
+    for method, path in (("POST", "/v1/notes/search"), ("DELETE", "/v1/account"), ("PATCH", "/v1/medical/receipts/made-up/fields"), ("PUT", "/v1/library/notes/made-up")):
+        assert _direct(house.app, method, path, [*mine, multipart, ("Content-Length", big)]) == 413, (method, path)
+    # The same size is let through to an upload route (where it then fails for being empty, not for its size).
+    assert _direct(house.app, "POST", "/v1/captures", [*mine, multipart, ("Content-Length", big)], [b"--made-up--\r\n"]) != 413
+
+
+def test_a_body_that_stops_arriving_is_given_up_on(house, monkeypatch):
+    monkeypatch.setattr(server, "BODY_IDLE_SECONDS", 0.2)
+    sam = house.signed_in("sam")
+    mine = [("X-Kaal-Session", sam.cookies.get("__Host-kaal_session")), ("X-Kaal-Request", "1")]
+    started = time.monotonic()
+    answer = _direct(house.app, "POST", "/v1/library/search", [*mine, ("Content-Type", "application/json"), ("Content-Length", "2000")], [b'{"query": '], more_to_come=True)
+    # Answered, not left waiting: 408 from this layer, or 400 where the framework reports the unfinished body itself.
+    assert answer in (400, 408) and time.monotonic() - started < 5
+
+
+def test_a_long_list_of_wrong_fields_is_not_all_named_back(house):
+    sam = house.signed_in("sam")
+    many = sam.patch("/v1/medical/receipts/made-up/fields", json={"fields": {f"k{index}": 1 for index in range(5000)}})
+    assert many.status_code == 400 and len(many.content) < 2000
+
+
+def test_a_tokens_name_cannot_pass_for_a_sign_in_or_hide_characters(house):
+    store = tokens.TokenStore(house.home / "tokens.json")
+    for name in ("account:0123456789ab", "Token:made-up", "made‮up", "made\nup", "made\x1bup"):
+        with pytest.raises(tokens.TokenError):
+            store.create(name, ["read"])
+    assert store.create("Made-up laptop (2)", ["read"])[0]["name"] == "Made-up laptop (2)"
+    assert "‮" not in server.log_safe("made‮up") and "​" not in server.log_safe("made​up")
+
+
+def test_cookies_sent_as_several_headers_are_read_as_one(house):
+    sam = house.signed_in("sam")
+    session = sam.cookies.get("__Host-kaal_session")
+    assert _direct(house.app, "GET", "/v1/session", [("Cookie", "made-up=1"), ("Cookie", f"__Host-kaal_session={session}")]) == 200
+
+
+def test_ordinary_requests_are_never_counted_as_large_ones_in_flight():
+    """A page loads many files at once, and none of them is an upload."""
+    import asyncio
+
+    async def inner(scope, receive, send):
+        await asyncio.sleep(0.05)
+        await server._send_json(send, 200, {"result": "ok"})
+
+    asked = []
+
+    def whose(headers):
+        asked.append(1)
+        return "token:made-up"
+
+    limited = server.BodyLimitMiddleware(inner, 100 * 1024 * 1024, credentials=whose, full=lambda needed: False)
+
+    async def one(method, headers):
+        seen = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                seen.append(message["status"])
+
+        await limited({"type": "http", "method": method, "path": "/v1/session", "headers": headers}, receive, send)
+        return seen[0]
+
+    async def many():
+        plain = [one("GET", [(b"cookie", b"__Host-kaal_session=made-up")]) for _ in range(12)]
+        small = [one("POST", [(b"content-length", b"40"), (b"content-type", b"application/json")]) for _ in range(12)]
+        return await asyncio.gather(*plain, *small)
+
+    assert asyncio.run(many()) == [200] * 24
+    assert asked == [] and limited._uploading == {}                                   # nobody was even asked who they were

@@ -27,6 +27,7 @@ import secrets
 import stat
 import tempfile
 import threading
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -110,6 +111,10 @@ class TokenStore:
         name = name.strip()
         if not name:
             raise TokenError("A token needs a name.")
+        # The name is written in the server's log beside what the token did: it must read as a
+        # name there, not as a line of its own, as hidden characters, or as someone's sign-in.
+        if not name.isprintable() or any(unicodedata.category(letter) == "Cf" for letter in name) or name.lower().startswith(("account:", "session:", "token:")):
+            raise TokenError("A token's name is ordinary letters, digits and punctuation, and does not start with account:, session: or token:.")
         wanted = self._wanted(scopes)
         with self._lock:
             # A revoked token is kept for a while so that "who had access" can be answered, not for ever.
