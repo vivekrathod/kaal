@@ -91,7 +91,8 @@ export const api = {
   // { code, redirect }, where redirect is the only place the code may be sent.
   // The browser extension collecting its own token with the code the person's sign-in page handed it.
   extensionSignIn: (code, verifier, name) => result(request("POST", "/v1/extension-sign-ins", { json: { code, verifier, name } })),
-  appSignIn: (challenge, kind = "app", extension = "") => result(request("POST", "/v1/account/app-sign-ins", { json: { challenge, kind, extension } })),
+  appSignIn: (challenge, kind = "app", extension = "", password = "", confirm = "") =>
+    result(request("POST", "/v1/account/app-sign-ins", { json: { challenge, kind, extension, password, confirm } })),
   signInServices: () => result(request("GET", "/v1/admin/sign-in-services")),
   addSignInService: (service) => result(request("POST", "/v1/admin/sign-in-services", { json: service })),
   removeSignInService: (service) => result(request("DELETE", `/v1/admin/sign-in-services/${id(service)}`)),

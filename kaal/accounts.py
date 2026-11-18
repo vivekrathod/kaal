@@ -299,6 +299,12 @@ class AccountStore:
         with self._db() as db:
             return self._account(db.execute("SELECT * FROM accounts WHERE id = ? OR login = ?", (id_or_login, id_or_login)).fetchone())
 
+    def account_named(self, login: str) -> dict[str, Any] | None:
+        """The account with this sign-in name, and only that: what someone types to sign in, or to
+        share a vault, is never taken for an account's id."""
+        with self._db() as db:
+            return self._account(db.execute("SELECT * FROM accounts WHERE login = ?", (login,)).fetchone())
+
     def accounts(self) -> list[dict[str, Any]]:
         with self._db() as db:
             return [self._account(row) for row in db.execute("SELECT * FROM accounts ORDER BY rowid")]
@@ -442,11 +448,15 @@ class AccountStore:
 
     # --- who belongs to which vault
 
-    def grant(self, account: str, vault_id: str, role: str) -> dict[str, Any]:
+    def grant(self, account: str, vault_id: str, role: str, *, by_name: bool = False) -> dict[str, Any]:
+        """Let an account into a vault. ``by_name`` takes ``account`` as a sign-in name only (what a person types)."""
         if role not in ROLES:
             raise AccountError(f"A role is one of: {', '.join(ROLES)}.")
         with self._db(write=True) as db:
-            person = db.execute("SELECT id FROM accounts WHERE id = ? OR login = ?", (account, account)).fetchone()
+            if by_name:
+                person = db.execute("SELECT id FROM accounts WHERE login = ?", (account,)).fetchone()
+            else:
+                person = db.execute("SELECT id FROM accounts WHERE id = ? OR login = ?", (account, account)).fetchone()
             if person is None:
                 raise AccountError(f"No account {account!r}.")
             if not db.execute("SELECT 1 FROM vaults WHERE id = ?", (vault_id,)).fetchone():
@@ -765,6 +775,9 @@ class AccountStore:
     def free_login(self, wanted: str) -> str:
         """A sign-in name nobody has yet, as close to ``wanted`` as possible."""
         base = re.sub(r"[^a-z0-9._+-]", "", (wanted or "").lower()).lstrip("._+-")[:56] or "person"
+        if _LIKE_AN_ID.fullmatch(base):
+            # Never a name shaped like an account id, whatever the sign-in service says the person is called.
+            base = f"person-{base}"
         with self._db() as db:
             taken = {row["login"].lower() for row in db.execute("SELECT login FROM accounts WHERE login LIKE ?", (base + "%",))}
         return next(name for name in (base, *(f"{base}{number}" for number in range(2, 10_000))) if name not in taken)

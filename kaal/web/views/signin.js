@@ -233,16 +233,27 @@ export function appSignInView(asked, { session, onDone, signOut }) {
       notice("This browser is signed in with a device token. The app needs you to sign in with your own name: sign out, then sign in again.", "error"),
       h("button", { type: "button", class: "button primary", onClick: signOut }, "Sign out"), cancel));
   }
+  const proof = h("input", { type: "password", autocomplete: "current-password", "aria-label": "Your password", hidden: true });
   const allow = h("button", { type: "button", class: "button primary" }, "Allow");
   allow.addEventListener("click", async () => {
     problem.replaceChildren();
     allow.disabled = true;
     try {
-      const handed = await api.appSignIn(challenge, forExtension ? "extension" : "app", forExtension ? extension : "");
+      const typed = proof.value;
+      const handed = await api.appSignIn(challenge, forExtension ? "extension" : "app", forExtension ? extension : "",
+        proof.type === "password" ? typed : "", proof.type === "password" ? "" : typed.trim());
       onDone();
       location.assign(handed.redirect);
     } catch (error) {
       allow.disabled = false;
+      if (error.kind === "proof_needed") {
+        // This browser was signed in a while ago: say who you are again before something lasting is allowed.
+        const byName = session.account.has_password === false;
+        proof.type = byName ? "text" : "password";
+        proof.placeholder = byName ? "Your sign-in name" : "Your password";
+        proof.hidden = false;
+        proof.focus();
+      }
       problem.append(notice(error.message, "error"));
     }
   });
@@ -251,6 +262,6 @@ export function appSignInView(asked, { session, onDone, signOut }) {
     h("p", { class: "muted" }, forExtension
       ? `The Kaal extension in this browser will get a token for “${(session.vault || {}).name || "your vault"}” as “${session.account.login}”, to save pages and receipts and to check them. You can revoke it under Settings, Tokens. Allow this only if you pressed Connect in the extension just now.`
       : `The Kaal app on this device will be signed in as “${session.account.login}” and can do everything you can here. Allow this only if you opened the app yourself just now.`),
-    problem, allow, cancel,
+    problem, proof, allow, cancel,
     h("p", { class: "muted small choices" }, link("Not you? Sign out", signOut))));
 }

@@ -246,7 +246,7 @@ def test_a_recovery_code_sets_a_new_password_once(house):
 def test_a_token_can_never_manage_the_account_it_acts_for(house):
     """Otherwise any script's token could set its owner's password and take everything."""
     bearer = {"Authorization": f"Bearer {house.token}"}
-    cookie = {"Cookie": f"kaal_session={house.token}", **APP}
+    cookie = {"Cookie": f"__Host-kaal_session={house.token}", **APP}
     for headers in (bearer, cookie):
         assert house.browser().get("/v1/account", headers=headers).status_code == 403
         for path, body in (("/v1/account/password", {"current": "x", "new": "a brand new password"}), ("/v1/account/recovery-codes", {"password": "x"}),

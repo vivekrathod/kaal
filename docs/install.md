@@ -143,6 +143,8 @@ take effect after `deploy/docker/kaalctl start`. The ones most people want:
 | `KAAL_TRUSTED_PROXIES` | Whose word is taken for a visitor's address: `private` (the default here, for the proxy in a container), `none`, or a list of networks. |
 | `KAAL_FILE_JOBS`, `KAAL_FILE_MEMORY_MB` | How many files are read at once (default 2) and the memory each reading may use (default 1024). |
 | `KAAL_DOWNLOAD_MEMORY_MB` | The most memory held by files on their way to people at one time (default 1024). |
+| `KAAL_FREE_SPACE_MB` | Nothing new is stored once the disk has less than this free (default 1024; 0 for no floor). |
+| `KAAL_SEARCH_MEMORY_MB` | The most decrypted text each vault keeps in memory for searching (default 256). |
 
 Before opening sign-up to strangers, set the quota and the hourly allowance to
 what the disk can bear: ten new accounts an hour, each with ten vaults of

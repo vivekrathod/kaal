@@ -15,21 +15,25 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import hashlib
+import http.client
 import json
 import secrets
+import socket
+import ssl
 import threading
 import time
-import urllib.error
-import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 GOOGLE = {"id": "google", "name": "Google", "issuer": "https://accounts.google.com"}
 TIMEOUT_SECONDS = 10         # for each step of a request: connecting, and each wait for more of the answer
 TOTAL_SECONDS = 20           # for reading a whole answer, however slowly it trickles in
 FAIL_SECONDS = 30            # how long a service that could not be reached is not asked again
+CALLS_AT_ONCE = 4            # requests to sign-in services in progress at one time, for everyone
+WAIT_SECONDS = 3             # how long a request waits its turn before the visitor is told to try again
 MAX_ANSWER_BYTES = 1024 * 1024
 KEEP_SECONDS = 3600          # how long a service's published settings and keys are remembered
 CLOCK_SLACK_SECONDS = 120
@@ -47,33 +51,55 @@ class SignInServiceError(Exception):
         self.kind = kind
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
-        return None
+def _give_up(connection: http.client.HTTPSConnection) -> None:
+    """Close a connection from outside, so that whatever is waiting on it stops waiting."""
+    held = connection.sock
+    if held is not None:
+        try:
+            held.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            held.close()
+        except OSError:
+            pass
 
 
-def fetch(url: str, form: dict[str, str] | None = None) -> tuple[int, bytes]:
-    """One https request, without following redirects or reading an unbounded answer."""
+def fetch(url: str, form: dict[str, str] | None = None, *, trusting: ssl.SSLContext | None = None) -> tuple[int, bytes]:
+    """One https request: no redirects followed, no unbounded answer, and one deadline for all of
+    it (the status line, the headers and the body of any answer), however slowly it trickles in."""
     if not url.startswith("https://"):
         raise SignInServiceError("refusing an address that is not https")
-    request = urllib.request.Request(url, data=urlencode(form).encode("ascii") if form is not None else None, headers={"Accept": "application/json", "User-Agent": "kaal"})
+    connection = None
     try:
-        deadline = time.monotonic() + TOTAL_SECONDS
-        with urllib.request.build_opener(_NoRedirect).open(request, timeout=TIMEOUT_SECONDS) as response:
-            # Read in pieces against one deadline: the timeout above restarts with every byte that arrives.
-            body = b""
-            while len(body) <= MAX_ANSWER_BYTES:
-                if time.monotonic() > deadline:
-                    raise SignInServiceError("the sign-in service answered too slowly", "unreachable")
+        parts = urlsplit(url)
+        # ``trusting`` is for tests, which play a service with a certificate of their own making.
+        connection = http.client.HTTPSConnection(parts.hostname or "", parts.port or 443, timeout=TIMEOUT_SECONDS, context=trusting)
+        # The timeout above restarts with every byte that arrives; this does not.
+        watchdog = threading.Timer(TOTAL_SECONDS, _give_up, [connection])
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            body = urlencode(form).encode("ascii") if form is not None else None
+            headers = {"Accept": "application/json", "User-Agent": "kaal"}
+            if body is not None:
+                headers["Content-Type"] = "application/x-www-form-urlencoded"
+            connection.request("POST" if body is not None else "GET", (parts.path or "/") + (f"?{parts.query}" if parts.query else ""), body=body, headers=headers)
+            response = connection.getresponse()
+            answer = b""
+            while len(answer) <= MAX_ANSWER_BYTES:
                 piece = response.read1(64 * 1024)
                 if not piece:
                     break
-                body += piece
-            return response.status, body[:MAX_ANSWER_BYTES]
-    except urllib.error.HTTPError as error:
-        return error.code, error.read(MAX_ANSWER_BYTES)
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
+                answer += piece
+            return response.status, answer[:MAX_ANSWER_BYTES]
+        finally:
+            watchdog.cancel()
+    except (http.client.HTTPException, OSError, ValueError) as error:
         raise SignInServiceError(f"could not reach the sign-in service ({type(error).__name__})", "unreachable") from None
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def seal_secret(installation_key: bytes, secret: str) -> str:
@@ -202,9 +228,18 @@ class Services:
         self._failed: dict[tuple[str, str], tuple[float, SignInServiceError]] = {}
         self._flights: dict[tuple[str, str], threading.Lock] = {}
 
-    def _flight(self, what: str, issuer: str) -> threading.Lock:
+    @contextlib.contextmanager
+    def _flight(self, what: str, issuer: str) -> Iterator[None]:
+        """One request at a time for each thing a service publishes; whoever waits too long for
+        their turn is told to try again, rather than holding a thread behind a slow service."""
         with self._lock:
-            return self._flights.setdefault((what, issuer), threading.Lock())
+            lock = self._flights.setdefault((what, issuer), threading.Lock())
+        if not lock.acquire(timeout=WAIT_SECONDS):
+            raise SignInServiceError("the sign-in service is slow to answer", "unreachable")
+        try:
+            yield
+        finally:
+            lock.release()
 
     def _recent_failure(self, what: str, issuer: str) -> None:
         with self._lock:
@@ -217,10 +252,19 @@ class Services:
         with self._lock:
             self._failed[(what, issuer)] = (time.monotonic() + FAIL_SECONDS, error)
 
+    # Every request to a sign-in service holds one of the server's worker threads while it waits,
+    # so only a few are in progress at once; the rest are told to try again rather than queue.
+    _calls = threading.BoundedSemaphore(CALLS_AT_ONCE)
+
     def _fetch(self, url: str, form: dict[str, str] | None = None) -> tuple[int, bytes]:
         if not url.startswith("https://"):
             raise SignInServiceError("refusing an address that is not https")
-        return (self._fetch_with or fetch)(url, form)
+        if not self._calls.acquire(timeout=WAIT_SECONDS):
+            raise SignInServiceError("too many requests to sign-in services are in progress", "unreachable")
+        try:
+            return (self._fetch_with or fetch)(url, form)
+        finally:
+            self._calls.release()
 
     def settings(self, issuer: str) -> dict[str, Any]:
         """What the service publishes at /.well-known/openid-configuration."""
