@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Draw the web app's PNG icons from the same shapes as kaal/web/icon.svg.
+"""Draw the web app's and the Chrome extension's PNG icons from the same shapes
+as kaal/web/icon.svg.
 
 Browsers ask for /favicon.ico, and phones for /apple-touch-icon.png, whatever
-the page declares; neither accepts an SVG everywhere. Run this after changing
-the icon.
+the page declares; neither accepts an SVG everywhere, and Chrome takes only
+PNGs for an extension. Run this after changing the icon.
 """
 from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-WEB = Path(__file__).resolve().parents[1] / "kaal" / "web"
+ROOT = Path(__file__).resolve().parents[1]
+WEB = ROOT / "kaal" / "web"
+EXTENSION_ICONS = ROOT / "chrome-extension" / "icons"
 GREEN, WHITE = (31, 95, 85, 255), (255, 255, 255, 255)
 SCALE = 8  # drawn large and shrunk, for smooth edges
 
@@ -36,6 +39,16 @@ def main() -> None:
     for name, size, square in (("icon-32.png", 32, False), ("icon-180.png", 180, True), ("icon-512.png", 512, False)):
         draw(size, square=square).save(WEB / name, optimize=True)
         print(f"wrote kaal/web/{name}")
+    EXTENSION_ICONS.mkdir(exist_ok=True)
+    for size in (16, 32, 48):
+        draw(size, square=False).save(EXTENSION_ICONS / f"icon-{size}.png", optimize=True)
+        print(f"wrote chrome-extension/icons/icon-{size}.png")
+    # Chrome's guidance for the 128 icon, which the Web Store shows too: the
+    # picture 96 pixels across, with 16 clear pixels around it.
+    large = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+    large.paste(draw(96, square=False), (16, 16))
+    large.save(EXTENSION_ICONS / "icon-128.png", optimize=True)
+    print("wrote chrome-extension/icons/icon-128.png")
 
 
 if __name__ == "__main__":

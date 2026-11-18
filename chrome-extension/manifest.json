@@ -4,6 +4,12 @@
   "version": "1.2.0",
   "description": "Save the page in front of you to your Kaal server, and check a medical receipt beside the page it came from.",
   "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApybJtPACgI7ru7YW2AqfTwERDEMiDXk3AIvca1z04Xpf+wZdbDE/PXsxHCnSl4gz7FbR8xyd/enNDsfsGYH/55sAAugy4Nom8GLYcxbfE0ECde5W60YKjRY2Ycjmhuko5eWVrmWTb2weHYwUH/edlOmM9EFRho9nzbSVhaUZZR3vkquoIgcOwfrWT1a0eqdfmhOuKNY7EqsapwPyRZzutjsHVyQRYTlLZmbvK28rGKyUhIS57k7T/ZR/AHfENsWa6ryavTdHzZDGeCavzoMluyAloxJkkMFzpOEL+/2+wqSrtlIMbB1Uas8YcY0kg7PSoawaWWylzdxXnkPGoaVXbQIDAQAB",
   "permissions": [
     "activeTab",
@@ -23,7 +29,11 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Kaal"
+    "default_title": "Kaal",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
   },
   "options_ui": {
     "page": "options.html",

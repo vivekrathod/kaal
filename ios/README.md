@@ -89,6 +89,14 @@ Without `TEST_RUNNER_KAAL_UI_SERVER` those tests are skipped. In the simulator
 speech recognition is not available, so the dictation test only checks that
 the app says so; dictation and the camera scanner need a real iPhone to try.
 
+## Publishing
+
+[`AppStore/`](AppStore/listing.md) holds what App Store Connect asks for: the
+listing, the privacy answers, notes for App Review, export compliance and the
+screenshots. `AppStore/make-screenshots.sh` takes the screenshots again on a
+simulator of its own, against a throwaway Kaal holding made-up data
+(`bin/demo-data.py`). The privacy manifest is `Kaal/PrivacyInfo.xcprivacy`.
+
 ## How it is put together
 
 - `Kaal/Core/` has no screens: the API client (`API.swift`, `Endpoints.swift`),

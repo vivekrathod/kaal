@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The app's privacy manifest, which the App Store reads when a build is uploaded.
+  The app collects nothing for its authors and does no tracking: what a person
+  saves goes only to the Kaal server they sign in to (see docs/privacy.md and
+  ios/AppStore/privacy-labels.md).
+
+  UserDefaults keeps the address of that server and what it last said about the
+  account (CA92.1: read and written by this app only). Nothing else on Apple's
+  list of APIs that need a reason is used; check again when adding code that
+  reads file dates, disk space or the time since the phone started.
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

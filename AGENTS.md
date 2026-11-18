@@ -69,7 +69,7 @@ Tests use a throwaway key file, and never a real `~/.config/kaal/config.toml` (s
 
 ```bash
 env -u PYTHONPATH .venv/bin/python -m pytest -q
-.venv/bin/python -m py_compile bin/kaal.py bin/sync-extension-web.py bin/make-icons.py kaal/*.py
+.venv/bin/python -m py_compile bin/kaal.py bin/sync-extension-web.py bin/make-icons.py bin/demo-data.py bin/package-extension.py kaal/*.py
 ```
 
 After changing the Chrome extension or a web file it shares, also run its browser test, which is off by default (it needs Chrome for Testing or Chromium, and Node 22 or later):
@@ -77,6 +77,8 @@ After changing the Chrome extension or a web file it shares, also run its browse
 ```bash
 KAAL_E2E=1 env -u PYTHONPATH .venv/bin/python -m pytest -q tests/test_extension_e2e.py
 ```
+
+Store material (README "Publishing") lives in `docs/` (the GitHub Pages site, including the privacy policy), `ios/AppStore/` and `chrome-extension/store/`. When a change alters what the apps store, send or ask permission for, update `docs/privacy.md`, `ios/AppStore/privacy-labels.md`, `ios/Kaal/PrivacyInfo.xcprivacy` and `chrome-extension/store/listing.md` with it; `tests/test_store_material.py` checks the limits and the privacy manifest. Screenshots are only ever taken against `bin/demo-data.py` (`ios/AppStore/make-screenshots.sh`, `chrome-extension/store/make-screenshots.sh`), never a real vault. `bin/package-extension.py` builds the extension's store zip.
 
 After changing an endpoint, regenerate the API spec (a test fails until you do):
 

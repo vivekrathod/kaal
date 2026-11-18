@@ -1,0 +1,19 @@
+# GitHub Pages builds this folder into Kaal's small website: a landing page
+# (index.md), installing, the privacy policy and getting help. The App Store
+# and the Chrome Web Store link to the privacy and help pages, at
+# https://OWNER.github.io/REPO/privacy.html and .../support.html.
+#
+# Turn it on under the repository's Settings → Pages: "Deploy from a branch",
+# the default branch, folder /docs. Every page is plain Markdown that also
+# reads correctly on GitHub itself.
+title: Kaal
+description: A private vault for notes, documents and medical receipts, on a server you control.
+lang: en
+theme: jekyll-theme-primer
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      # Sends links that leave this folder (such as ../README.md) to the repository.
+      layout: kaal

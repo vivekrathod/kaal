@@ -113,7 +113,12 @@ for). Any `Kaal Capture` folder left in Downloads is no longer used.
 No build step. `lib.js` holds the decisions that need no browser
 (`tests/test_extension.py` runs it under Node). `web/` holds copies of the web
 app's files that the side panel shares; change the originals in `kaal/web/` and
-run `bin/sync-extension-web.py`.
+run `bin/sync-extension-web.py`. The icons in `icons/` are drawn by
+`bin/make-icons.py`.
+
+`bin/package-extension.py` builds the zip for the Chrome Web Store from the
+files the extension uses, and [`store/`](store/listing.md) holds the store's
+text and pictures (`store/make-screenshots.sh` takes them again).
 
 `tests/test_extension_e2e.py` drives the extension in a real browser against a
 throwaway server and a made-up receipt page: connect, save a page, save a
