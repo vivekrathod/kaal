@@ -114,15 +114,47 @@ another), the demo empties itself and puts the made-up data back. To do it now:
 deploy/demo/run.sh reset
 ```
 
-A reset removes everything anyone added or changed, signs everyone out, and
-takes about a minute, during which the demo does not answer. The reviewer's
-password is put back if someone changed it; that is also checked every five
-minutes between resets.
+A reset starts from nothing: the demo throws away everything it holds, the
+accounts, vaults, tokens and sign-ins included, and makes it all again. So it
+removes whatever anyone added or changed, signs everyone out, and puts both
+passwords back to the ones in the demo's settings file. It takes about a
+minute, during which the demo does not answer, so choose a time when the
+people you expect are unlikely to be looking: 03:00 UTC is the evening in
+California, and `--reset-at 10:00` is the middle of the night there.
 
-Kaal's usual protection against guessing applies to the demo too: after five
-wrong passwords for `reviewer`, each further try has to wait, up to fifteen
-minutes. If someone does that during a review, `deploy/demo/run.sh reset`
-clears it at once.
+## What a visitor can do, and what puts it right
+
+The reviewer's password is given to App Review and to anyone else you tell, so
+count on strangers having it. Whoever has it can do everything that account
+can. None of it reaches past the demo, and none of it lasts:
+
+| A visitor can | What puts it right |
+|---|---|
+| Add, change, trash or delete notes and receipts, add files, change the family names | The nightly reset |
+| Change the reviewer's password, with the password or with a recovery code | Put back within a minute, and everyone is signed out, whoever changed it included; the recovery codes are replaced |
+| Rename a vault, which removes the notice in its name | The name is put back within a minute |
+| Delete the reviewer's account or one of its vaults, or hand a vault to John | The whole reset happens within a minute instead of at night |
+| Fill the demo's storage with files | The whole reset happens once nine tenths of it is used |
+| Make tokens (at most 50) | They work until the next reset, and reach only what the reviewer can see |
+| See which browsers and apps are signed in as `reviewer` (the kind of device and when, nothing more) and sign them out | Signing in again; the nightly reset clears the list |
+| Download a copy of a vault | Nothing to put right: it holds only what is in the demo |
+| Type wrong passwords | Kaal slows guessing per address, so one visitor's wrong tries do not hold up another's |
+
+A visitor cannot open the administrator's pages, make an account, read
+anything outside the demo's container, or touch another Kaal on the machine.
+
+What is left: anything a visitor types can be read by every other visitor
+until the reset, so the notice asks people to put nothing real in. And someone
+who keeps at it can spoil the demo for others, by trashing the notes just
+before a reviewer looks or by deleting the account again and again so that the
+demo keeps starting over. If that happens during a review, give the reviewer
+account a new password and tell App Review:
+
+```bash
+KAAL_DEMO_PASSWORD=a-new-one-for-app-review deploy/demo/run.sh
+```
+
+That starts the demo again with the made-up data and the new password.
 
 ## Other commands
 
@@ -141,15 +173,18 @@ address, port and passwords chosen before and applies what is new.
 
 - **The same hardening as a regular installation**, from the same Compose
   file: the container is read-only, has no Linux capabilities and cannot gain
-  privileges, and Kaal can be reached directly only from the machine itself
-  (127.0.0.1), with Caddy (HTTPS and HSTS) or your own proxy in front.
+  privileges, its logs are kept small, and Kaal can be reached directly only
+  from the machine itself (127.0.0.1), with Caddy (HTTPS) or your own proxy in
+  front. Kaal's own protections are all on: sign-in is limited per address,
+  wrong passwords are slowed, and browsers are told to use HTTPS only.
 - **Nothing on disk.** The vaults, the accounts and the key are held in memory
   inside the container and are gone when it stops. The demo refuses to start
   unless those folders really are in memory, so it can never empty a volume
   that holds anyone's real data.
 - **Limits for strangers**: files up to 10 MiB, at most 256 MB stored in all,
-  at most 1 GB of memory and 256 processes. If it ever runs out, it starts
-  again with the made-up data. Anything stored is gone by the next morning.
+  at most 1 GB of memory and 256 processes. When the storage is nearly full,
+  or the memory runs out, it starts again with the made-up data. Anything
+  stored is gone by the next morning.
 - **No new accounts**: sign-up is closed, and the limit on new accounts is
   zero even if an administrator opened it. A person may own at most three
   vaults.
@@ -178,7 +213,8 @@ password with a setup link from `kaal-server` itself, and then puts everything
 else in through Kaal's API, signed in as the people in it, exactly as the web
 app and the iPhone app would. The receipts and their PDFs and pictures are
 drawn by `demo.py` on the spot. A reset stops Kaal, empties the memory it
-used, and does it all again.
+used, and does it all again. Between resets `demo.py` looks at the reviewer's
+account once a minute, as described above.
 
 The same demo serves the iPhone app's screen-by-screen tests
 (`ios/README.md`): `deploy/demo/run.sh --local`, then

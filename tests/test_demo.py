@@ -21,6 +21,7 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -129,7 +130,7 @@ def test_the_made_up_notes_are_in_with_their_picture_and_pdfs(seeded):
     garden = jane.call("GET", f"/v1/library/notes/{notes['Made-up garden plan']['id']}")["note"]
     (picture,) = garden["attachments"]
     assert f"![Garden plan](attachment:{picture['id']})" in garden["body"]
-    client = TestClient(seeded.app, base_url="https://testserver", headers={"X-Kaal-Request": "1", "Cookie": f"kaal_session={jane.session}"})
+    client = TestClient(seeded.app, base_url="https://testserver", headers={"X-Kaal-Request": "1", "X-Kaal-Session": jane.session})
     shown = client.get(f"/v1/notes/{garden['id']}/attachments/{picture['id']}/view")
     assert shown.status_code == 200 and shown.headers["content-type"] == "image/png"
 
@@ -203,7 +204,7 @@ def test_kaals_rules_read_each_made_up_pdf_as_intended(tmp_path):
 def test_people_vaults_and_sign_up_are_as_app_review_needs(seeded):
     jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
     account = jane.call("GET", "/v1/account")
-    assert account["account"] == {"login": "reviewer", "name": "Jane Madeup", "admin": False}
+    assert account["account"] == {"login": "reviewer", "name": "Jane Madeup", "admin": False, "has_password": True}
     assert account["vault"] == {"id": account["vault"]["id"], "name": demo.VAULT_NAME, "role": "owner"}
     assert [vault["name"] for vault in account["vaults"]] == [demo.VAULT_NAME, demo.HOUSEHOLD]
     assert [session["current"] for session in account["sessions"]] == [True], "the seed signed itself out"
@@ -224,20 +225,113 @@ def test_people_vaults_and_sign_up_are_as_app_review_needs(seeded):
         seeded.signed_in("john", "anything-at-all")
 
 
+# --- what anyone holding the published password can do, and what puts it right
+
+
+def keep(seeded):
+    return demo.keep_reviewer(seeded.connect, seeded.run, REVIEWER_PASSWORD, seeded.made["vaults"])
+
+
 def test_a_changed_reviewer_password_is_put_back(seeded):
     jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
-    assert demo.keep_password(seeded.connect, seeded.run, REVIEWER_PASSWORD) is False
+    assert keep(seeded) == [], "nothing is wrong, so nothing is done and nobody is signed out"
+    jane.call("GET", "/v1/account")
     jane.call("POST", "/v1/account/password", {"current": REVIEWER_PASSWORD, "new": "someone-else-chose-this"})
-    assert not demo.password_holds("reviewer", REVIEWER_PASSWORD)
+    assert demo.what_is_wrong(REVIEWER_PASSWORD, seeded.made["vaults"]) == ["password"]
 
-    assert demo.keep_password(seeded.connect, seeded.run, REVIEWER_PASSWORD) is True
-    assert demo.password_holds("reviewer", REVIEWER_PASSWORD)
+    assert keep(seeded) == ["password"]
+    assert keep(seeded) == []
     seeded.signed_in("reviewer", REVIEWER_PASSWORD)
     with pytest.raises(demo.DemoError, match="401"):
         seeded.signed_in("reviewer", "someone-else-chose-this")
     with pytest.raises(demo.DemoError, match="401"):
-        jane.call("GET", "/v1/account")     # putting it back signed everyone out
+        jane.call("GET", "/v1/account")     # putting it back signed everyone out, whoever changed it included
     assert len(seeded.signed_in("reviewer", REVIEWER_PASSWORD).call("GET", "/v1/library/notes")) == 8, "the notes stay until the nightly reset"
+
+
+def test_a_password_changed_with_a_recovery_code_is_put_back_and_the_codes_are_replaced(seeded):
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    codes = jane.call("POST", "/v1/account/recovery-codes", {"password": REVIEWER_PASSWORD})["recovery_codes"]
+    seeded.connect().call("POST", "/v1/sign-in/recover", {"login": "reviewer", "code": codes[0], "password": "someone-else-chose-this"})
+    assert keep(seeded) == ["password"]
+    seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    with pytest.raises(demo.DemoError, match="401"):
+        seeded.connect().call("POST", "/v1/sign-in/recover", {"login": "reviewer", "code": codes[1], "password": "someone-else-chose-again"})
+    assert keep(seeded) == [], "the codes a visitor wrote down no longer work"
+
+
+def test_a_renamed_vault_gets_its_name_and_so_its_notice_back(seeded):
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    jane.call("POST", "/v1/vault/name", {"name": "Made-up name a visitor chose"})
+    assert keep(seeded) == ["names"]
+    account = jane.call("GET", "/v1/account")       # only a changed password signs people out
+    assert [vault["name"] for vault in account["vaults"]] == [demo.VAULT_NAME, demo.HOUSEHOLD]
+    assert [session["current"] for session in account["sessions"]] == [True], "the check signed itself out again"
+
+    jane.call("POST", "/v1/account/password", {"current": REVIEWER_PASSWORD, "new": "someone-else-chose-this"})
+    jane.call("POST", "/v1/session/vault", {"vault": account["vaults"][1]["id"]})
+    jane.call("POST", "/v1/vault/name", {"name": "Another made-up name"})
+    assert keep(seeded) == ["password", "names"]
+    assert [vault["name"] for vault in seeded.signed_in("reviewer", REVIEWER_PASSWORD).call("GET", "/v1/account")["vaults"]] == [demo.VAULT_NAME, demo.HOUSEHOLD]
+    assert keep(seeded) == []
+
+
+def test_a_deleted_vault_or_account_calls_for_starting_again(seeded):
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    household = jane.call("GET", "/v1/account")["vaults"][1]["id"]
+    jane.call("POST", "/v1/session/vault", {"vault": household})
+    jane.call("DELETE", "/v1/vault", {"password": REVIEWER_PASSWORD})
+    assert keep(seeded) == ["gone"]
+    assert [vault["name"] for vault in jane.call("GET", "/v1/account")["vaults"]] == [demo.VAULT_NAME], "nothing is put right piecemeal"
+
+    # The account cannot go while John shares its vault; a visitor can see him out first.
+    with pytest.raises(demo.DemoError, match="409"):
+        jane.call("DELETE", "/v1/account", {"password": REVIEWER_PASSWORD})
+    john = next(member["account"] for member in jane.call("GET", "/v1/vault/members")["members"] if member["login"] == "john")
+    jane.call("DELETE", f"/v1/vault/members/{john}")
+    jane.call("DELETE", "/v1/account", {"password": REVIEWER_PASSWORD})
+    with pytest.raises(demo.DemoError, match="401"):
+        seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    assert keep(seeded) == ["gone"]
+    assert seeded.signed_in("owner", ADMIN_PASSWORD).call("GET", "/v1/account")["account"]["admin"] is True, "the administrator is untouched"
+
+
+def test_a_vault_given_away_calls_for_starting_again(seeded):
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    admin = seeded.signed_in("owner", ADMIN_PASSWORD)
+    reviewer = next(person["id"] for person in admin.call("GET", "/v1/admin/people")["people"] if person["login"] == "reviewer")
+    jane.call("POST", "/v1/vault/members", {"login": "john", "role": "owner"})
+    try:
+        jane.call("DELETE", f"/v1/vault/members/{reviewer}")
+    except demo.DemoError:
+        pytest.skip("Kaal does not let an owner leave their own vault")
+    assert keep(seeded) == ["gone"]
+
+
+def test_tokens_and_ended_sessions_keep_nobody_out_so_they_wait_for_the_reset(seeded):
+    """A visitor can make tokens and sign others out. Neither is put right piecemeal: the reset starts from nothing."""
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    main = jane.call("GET", "/v1/account")["vault"]["id"]
+    made = jane.call("POST", "/v1/account/tokens", {"name": "Made-up visitor token", "scopes": ["read"], "vault": main, "password": REVIEWER_PASSWORD})
+    with pytest.raises(demo.DemoError, match="403"):
+        jane.call("POST", "/v1/account/tokens", {"name": "Made-up token without the password", "scopes": ["read"], "vault": main})
+    other = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    assert jane.call("POST", "/v1/account/sessions/sign-out-others")["count"] == 1
+    with pytest.raises(demo.DemoError, match="401"):
+        other.call("GET", "/v1/account")
+    seeded.signed_in("reviewer", REVIEWER_PASSWORD)      # signing in again is all it takes
+    assert keep(seeded) == [], "neither keeps anyone out, so both wait for the reset"
+    assert made["secret"] and len(jane.call("GET", "/v1/account/tokens")["tokens"]) == 2
+
+
+def test_storage_that_is_nearly_full_calls_for_starting_again(tmp_path, monkeypatch):
+    usage = SimpleNamespace(total=256 * 1024 * 1024, used=0)
+    monkeypatch.setattr(demo.shutil, "disk_usage", lambda folder: usage)
+    assert demo.nearly_full(tmp_path) is False
+    usage.used = 200 * 1024 * 1024
+    assert demo.nearly_full(tmp_path) is False
+    usage.used = 231 * 1024 * 1024
+    assert demo.nearly_full(tmp_path) is True
 
 
 def test_the_seed_refuses_passwords_that_could_not_be_typed_or_kept(kaal_server):
@@ -485,6 +579,10 @@ def test_compose_resolves_the_demo_with_the_regular_hardening(tmp_path):
     environment = kaal_service["environment"]
     assert environment["KAAL_RECEIPT_AI"] == "off" and environment["KAAL_SIGNUPS_PER_HOUR"] == "0"
     assert environment["KAAL_MAX_UPLOAD_BYTES"] == "10485760" and environment["KAAL_COOKIE_SECURE"] == "0"
+    # From the regular setup: limits apply per visitor behind the proxy, and logs cannot fill the disk.
+    assert environment["KAAL_TRUSTED_PROXIES"] == "private"
+    assert kaal_service["logging"] == {"driver": "json-file", "options": {"max-file": "3", "max-size": "10m"}}
+    assert kaal_service["restart"] == "unless-stopped"
     assert kaal_service["command"] == ["python", "/opt/kaal-demo/demo.py", "serve"]
     assert kaal_service["healthcheck"]["test"] == ["CMD", "python", "/opt/kaal-demo/demo.py", "health"]
     assert int(kaal_service["mem_limit"]) == 1024 ** 3 and kaal_service["pids_limit"] == 256
@@ -544,8 +642,36 @@ def test_the_real_demo_shows_the_made_up_data_and_puts_it_back(tmp_path):
         return person
 
     def fetch(person, path):
-        status, _cookies, body = send("GET", path, {"Cookie": f"kaal_session={person.session}", "X-Kaal-Request": "1"}, b"")
+        status, _cookies, body = send("GET", path, {"X-Kaal-Session": person.session, "X-Kaal-Request": "1"}, b"")
         return status, body
+
+    def logs():
+        """Everything the demo's container has said since it was made (run.sh logs shows the end of it)."""
+        done = subprocess.run(["docker", "logs", f"{PROJECT}-kaal-1"], capture_output=True, text=True, timeout=120)
+        return done.stdout + done.stderr
+
+    def seeding():
+        """What changes each time the made-up data has been put in; empty while it is being put in."""
+        done = subprocess.run(["docker", "exec", f"{PROJECT}-kaal-1", "cat", "/tmp/kaal-demo-ready"], capture_output=True, text=True, timeout=60)
+        return done.stdout.strip()
+
+    def starts_again(what, before):
+        eventually(what, lambda: seeding() not in ("", before))
+
+    def eventually(what, check, seconds=240):
+        deadline = time.monotonic() + seconds
+        while not check():
+            assert time.monotonic() < deadline, f"{what} did not happen in {seconds} seconds:\n{logs()[-3000:]}"
+            time.sleep(3)
+
+    def signed_out(person):
+        try:
+            person.call("GET", "/v1/account")
+        except demo.DemoError as error:
+            return "(401)" in str(error)
+        except OSError:
+            return False        # the demo is starting again
+        return False
 
     seeded_notes = {note.title for note in demo.notes(TODAY) if not note.trash} | {demo.NOTICE_TITLE}
 
@@ -572,11 +698,13 @@ def test_the_real_demo_shows_the_made_up_data_and_puts_it_back(tmp_path):
         # The reviewer, signed in with a password, then as the iPhone app signs in.
         jane = sign_in("reviewer", REVIEW)
         account = jane.call("GET", "/v1/account")
-        assert account["account"] == {"login": "reviewer", "name": demo.REVIEWER_NAME, "admin": False}
+        assert account["account"] == {"login": "reviewer", "name": demo.REVIEWER_NAME, "admin": False, "has_password": True}
         assert account["vault"]["name"] == demo.VAULT_NAME and len(account["vaults"]) == 2
         verifier = secrets.token_urlsafe(48)
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
-        code = jane.call("POST", "/v1/account/app-sign-ins", {"challenge": challenge})["code"]
+        approved = jane.call("POST", "/v1/account/app-sign-ins", {"challenge": challenge})
+        code = approved["code"]
+        assert approved["redirect"].startswith("kaal://signed-in?code=")
         phone = demo.Kaal(send)
         phone.session = phone.call("POST", "/v1/app-sign-ins", {"code": code, "verifier": verifier, "device": "Kaal app on iPhone"})["session"]
         listing, waiting = the_seed_is_there(phone)
@@ -587,9 +715,14 @@ def test_the_real_demo_shows_the_made_up_data_and_puts_it_back(tmp_path):
         status, page = fetch(phone, f"/v1/medical/receipts/{clinic['id']}/attachments/{clinic['attachments'][0]['id']}/preview")
         assert status == 200 and len(page) > 1000, "a picture of the receipt to check the values against"
 
+        status, copy_of_vault = fetch(phone, "/v1/vault/export")
+        assert status == 200 and copy_of_vault.startswith(b"PK"), "a readable copy of the vault can be downloaded"
+
         # The administrator is someone else, and nobody can make an account.
         owner = sign_in("owner", admin_password)
         assert owner.call("GET", "/v1/account")["account"]["admin"] is True
+        with pytest.raises(demo.DemoError, match="403"):
+            jane.call("GET", "/v1/admin/people")
         assert demo.Kaal(send).call("GET", "/v1/sign-in/options")["signup"] == "invitation"
         with pytest.raises(demo.DemoError, match="403"):
             demo.Kaal(send).call("POST", "/v1/sign-up", {"login": "stranger", "password": "made-up-stranger-1"})
@@ -601,6 +734,10 @@ def test_the_real_demo_shows_the_made_up_data_and_puts_it_back(tmp_path):
         # What a visitor changes, the reset puts back, and the password App Review was given still works.
         jane.call("POST", "/v1/library/notes", {"title": "Made-up note the reset removes", "body": "made up", "tags": []})
         jane.call("POST", f"/v1/medical/receipts/{clinic['id']}/trash")
+        jane.call("POST", "/v1/medical/people", {"add": ["Made-up Visitor"]})
+        token = jane.call("POST", "/v1/account/tokens", {"name": "Made-up visitor token", "scopes": ["read"], "vault": account["vault"]["id"], "password": REVIEW})["secret"]
+        status, _cookies, _body = send("GET", "/v1/library/notes", {"Authorization": f"Bearer {token}"}, b"")
+        assert status == 200
         jane.call("POST", "/v1/account/password", {"current": REVIEW, "new": "someone-else-chose-this"})
         assert f"http://localhost:{port}" in run_demo("status")
         assert "made-up data is back" in run_demo("reset")
@@ -608,6 +745,41 @@ def test_the_real_demo_shows_the_made_up_data_and_puts_it_back(tmp_path):
             sign_in("reviewer", "someone-else-chose-this")
         with pytest.raises(demo.DemoError, match="401"):
             phone.call("GET", "/v1/library/notes")
+        status, _cookies, _body = send("GET", "/v1/library/notes", {"Authorization": f"Bearer {token}"}, b"")
+        assert status == 401, "a token a visitor made is gone with everything else"
+        jane = sign_in("reviewer", REVIEW)
+        the_seed_is_there(jane)
+        account = jane.call("GET", "/v1/account")
+        assert [token["name"] for token in jane.call("GET", "/v1/account/tokens")["tokens"]] == ["Kaal for Chrome"]
+        assert [session["current"] for session in account["sessions"]] == [True]
+
+        # Between resets: a changed password and a renamed vault are put back within about a minute.
+        jane.call("POST", "/v1/vault/name", {"name": "Made-up name a visitor chose"})
+        jane.call("POST", "/v1/account/password", {"current": REVIEW, "new": "someone-else-chose-this"})
+        eventually("putting the reviewer's password back", lambda: signed_out(jane))
+        jane = sign_in("reviewer", REVIEW)
+        assert jane.call("GET", "/v1/account")["vault"]["name"] == demo.VAULT_NAME
+        assert len(jane.call("GET", "/v1/library/notes")) == len(seeded_notes), "only the password and the name were touched"
+
+        # A deleted vault, then a deleted account, each bring the whole reset forward.
+        before = seeding()
+        household = jane.call("GET", "/v1/account")["vaults"][1]["id"]
+        jane.call("POST", "/v1/session/vault", {"vault": household})
+        jane.call("DELETE", "/v1/vault", {"password": REVIEW})
+        starts_again("starting again after a vault was deleted", before)
+        assert "one of its vaults had been deleted" in logs()
+        jane = sign_in("reviewer", REVIEW)
+        vaults = jane.call("GET", "/v1/account")["vaults"]
+        assert len(vaults) == 2
+        before = seeding()
+        with pytest.raises(demo.DemoError, match="409"):
+            jane.call("DELETE", "/v1/account", {"password": REVIEW})     # not while John shares its vaults
+        for vault in vaults:
+            jane.call("POST", "/v1/session/vault", {"vault": vault["id"]})
+            john = next(member["account"] for member in jane.call("GET", "/v1/vault/members")["members"] if member["login"] == "john")
+            jane.call("DELETE", f"/v1/vault/members/{john}")
+        jane.call("DELETE", "/v1/account", {"password": REVIEW})
+        starts_again("starting again after the account was deleted", before)
         the_seed_is_there(sign_in("reviewer", REVIEW))
 
         # Stopped and started again, it comes back the same, with the same passwords.
@@ -615,9 +787,22 @@ def test_the_real_demo_shows_the_made_up_data_and_puts_it_back(tmp_path):
         run_demo("start", timeout=600)
         the_seed_is_there(sign_in("reviewer", REVIEW))
         sign_in("owner", admin_password)
-        logs = subprocess.run(["sh", str(run_sh), "logs"], env=env, capture_output=True, text=True, timeout=120)
-        assert "ready: 9 notes and 9 receipts" in logs.stdout + logs.stderr
-        assert REVIEW not in logs.stdout + logs.stderr and admin_password not in logs.stdout + logs.stderr
+
+        # Set up as App Review reaches it, behind HTTPS: Kaal then names its cookie so that only a
+        # browser on that address may use it, and the demo must still fill and look after itself.
+        earlier = logs()     # the container is made anew for the new address, and its log starts again
+        behind = run_demo("--behind", "https://demo.example.org", timeout=900)
+        assert "https://demo.example.org" in behind and REVIEW not in behind
+        jane = sign_in("reviewer", REVIEW)
+        the_seed_is_there(jane)
+        jane.call("POST", "/v1/account/password", {"current": REVIEW, "new": "someone-else-chose-this"})
+        eventually("putting the reviewer's password back", lambda: signed_out(jane))
+        sign_in("reviewer", REVIEW)
+        shown = subprocess.run(["sh", str(run_sh), "logs"], env=env, capture_output=True, text=True, timeout=120)
+        assert "kaal.server" in shown.stdout + shown.stderr, "run.sh logs shows what the demo has said"
+        said = earlier + logs()
+        assert "ready: 9 notes and 9 receipts" in said and said.count("had been changed; it is back") == 2
+        assert REVIEW not in said and admin_password not in said and "someone-else-chose-this" not in said and "/#/setup/" not in said
     finally:
         subprocess.run(["sh", str(run_sh), "remove"], env=env, capture_output=True, text=True, timeout=300)
     assert _project_things(PROJECT) == [], "nothing of the demo is left: no containers, volumes or networks"

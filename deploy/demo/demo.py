@@ -11,8 +11,13 @@ from `kaal-server`, then Kaal's own API for the rest, so nothing here writes
 Kaal's files. Nothing here prints a password or a setup link either.
 
 While it runs, `kill -HUP` (deploy/demo/run.sh reset) puts the made-up data
-back at once. It needs the standard library, plus Pillow for the pictures,
-which the container image has.
+back at once. Everyone who looks at the demo signs in with the same published
+password, so every minute it also checks that the next visitor still can: a
+changed password or vault name is put back, and a deleted account or vault, or
+storage that strangers have filled, brings the whole reset forward.
+
+It needs the standard library, plus Pillow for the pictures, which the
+container image has.
 """
 from __future__ import annotations
 
@@ -49,7 +54,9 @@ NOTICE_TITLE = "Read me first: this is Kaal's demo"
 
 LOCAL = "http://127.0.0.1:8765"
 READY = Path("/tmp/kaal-demo-ready")
-CHECK_SECONDS = 300        # how often the reviewer's password is checked
+CHECK_SECONDS = 60         # how often the reviewer's account is checked (see keep_reviewer)
+FULL = 0.9                 # how much of its storage may be used before the demo starts again
+SESSION_COOKIES = {"kaal_session", "__Host-kaal_session"}   # over plain http, and over https
 RESET_AT = "03:00"         # UTC, unless KAAL_DEMO_RESET_AT says otherwise
 PASSWORD = re.compile(r"[A-Za-z0-9._-]{10,128}")
 
@@ -440,8 +447,9 @@ def multipart(fields: dict[str, str], files: list[tuple[str, str, str, bytes]]) 
 
 
 class Kaal:
-    """One person signed in to Kaal: the session they were given, sent back as the
-    kaal_session cookie with X-Kaal-Request: 1, as the web app and the iPhone app do."""
+    """One person signed in to Kaal: the session they were given in a cookie, sent back in
+    the X-Kaal-Session header with X-Kaal-Request: 1, as the iPhone app does. (A cookie
+    would do over plain http only: over https its name changes and browsers alone may send it.)"""
 
     def __init__(self, send: Sender) -> None:
         self._send = send
@@ -451,7 +459,7 @@ class Kaal:
              fields: dict[str, str] | None = None) -> object:
         headers = {"X-Kaal-Request": "1", "Accept": "application/json", "User-Agent": "Kaal demo"}
         if self.session:
-            headers["Cookie"] = f"kaal_session={self.session}"
+            headers["X-Kaal-Session"] = self.session
         data = b""
         if files is not None:
             data, headers["Content-Type"] = multipart(fields or {}, files)
@@ -460,7 +468,7 @@ class Kaal:
         status, cookies, raw = self._send(method, path, headers, data)
         for cookie in cookies:
             name, _, rest = cookie.partition("=")
-            if name.strip() == "kaal_session":
+            if name.strip() in SESSION_COOKIES:
                 self.session = rest.split(";", 1)[0].strip().strip('"')
         try:
             answer = json.loads(raw or b"{}")
@@ -534,13 +542,16 @@ def _tick() -> None:
 
 
 def seed(connect: Callable[[], Kaal], run: Callable[[list[str]], str], *, reviewer_password: str, admin_password: str,
-         today: date, reset_at: str = RESET_AT, pause: Callable[[], None] = _tick) -> dict[str, int]:
+         today: date, reset_at: str = RESET_AT, pause: Callable[[], None] = _tick) -> dict:
     """Fill a new, empty Kaal with the made-up demo, through its API as people would.
 
     ``connect`` gives a new, signed-out session; ``run`` runs a kaal-server
     command on the server and returns what it printed. ``pause`` is called
     between notes and between receipts and must let Kaal's clock move on by a
     second, so that each list's order is the same every time.
+
+    Answers how much was put in, and under "vaults" the reviewer's two vaults
+    (id to name), which keep_reviewer looks after until the next reset.
     """
     for which, password in (("reviewer", reviewer_password), ("administrator", admin_password)):
         if not PASSWORD.fullmatch(password or ""):
@@ -594,36 +605,73 @@ def seed(connect: Callable[[], Kaal], run: Callable[[list[str]], str], *, review
     for note in made_notes:
         _add_note(jane, note)
         pause()
-    jane.call("POST", "/v1/account/tokens", {"name": "Kaal for Chrome", "scopes": ["read", "write"], "vault": main})
+    jane.call("POST", "/v1/account/tokens", {"name": "Kaal for Chrome", "scopes": ["read", "write"], "vault": main, "password": reviewer_password})
     # The notice is written a moment after everything else, so it is always at the top of the list.
     pause()
     _add_note(jane, notice(reset_at))
     jane.call("DELETE", "/v1/session")
-    return {"notes": len(made_notes) + 1, "household_notes": len(household_notes(today)), "receipts": len(made_receipts)}
+    return {"notes": len(made_notes) + 1, "household_notes": len(household_notes(today)), "receipts": len(made_receipts),
+            "vaults": {main: VAULT_NAME, household: HOUSEHOLD}}
 
 
-# --- keeping the reviewer's password what App Review was told
+# --- keeping the reviewer's account as App Review was told it is
+#
+# The reviewer's password is published, so anyone may do whatever that account
+# may: change its password, delete it or its vaults, rename them. None of that
+# may keep the next visitor out until the night's reset.
 
 
-def password_holds(login: str, password: str) -> bool:
-    """Whether a person's password is still this one. Asks Kaal's own account store, so
-    it signs nobody in and leaves the count of wrong passwords alone."""
+def what_is_wrong(password: str, vaults: dict[str, str]) -> list[str]:
+    """What a visitor has done to the reviewer's account that would keep others out or
+    mislead them: "gone" (the account or one of its vaults was deleted or given away),
+    "password" (changed), "names" (a vault renamed, so the notice in its name is lost).
+
+    Asks Kaal's own account store, so it signs nobody in and leaves the count of wrong passwords alone.
+    """
     from kaal import accounts, passwords, server
 
     settings = server.Settings.from_env()
     store = accounts.AccountStore(settings.accounts_file, settings.home)
-    person = store.account(login)
-    return person is not None and passwords.verify_password(store.password_hash(person["id"]), password)
+    person = store.account(REVIEWER)
+    if person is None or person["disabled_at"]:
+        return ["gone"]
+    owned = {vault["id"]: vault["name"] for vault in store.vaults_of(person["id"]) if vault["role"] == "owner"}
+    if any(vault not in owned for vault in vaults):
+        return ["gone"]
+    found = []
+    if not passwords.verify_password(store.password_hash(person["id"]), password):
+        found.append("password")
+    if any(owned[vault] != name for vault, name in vaults.items()):
+        found.append("names")
+    return found
 
 
-def keep_password(connect: Callable[[], Kaal], run: Callable[[list[str]], str], password: str, holds: Callable[[str, str], bool] = password_holds) -> bool:
-    """Put the reviewer's password back if someone changed it. True when it had to be put back."""
-    if holds(REVIEWER, password):
-        return False
+def keep_reviewer(connect: Callable[[], Kaal], run: Callable[[list[str]], str], password: str, vaults: dict[str, str],
+                  wrong: Callable[[str, dict[str, str]], list[str]] = what_is_wrong) -> list[str]:
+    """Put the reviewer's password and vault names back if a visitor changed them, and say what
+    was found. ["gone"] is for the caller: only starting again brings a deleted account or vault back."""
+    found = wrong(password, vaults)
+    if not found or "gone" in found:
+        return found
     person = connect()
-    sign_in_with_setup_link(person, run, REVIEWER, password, REVIEWER_NAME)
+    if "password" in found:
+        # A setup link, as for someone who forgot theirs. It signs everyone out, whoever changed it included.
+        sign_in_with_setup_link(person, run, REVIEWER, password, REVIEWER_NAME)
+    else:
+        person.call("POST", "/v1/sign-in", {"login": REVIEWER, "password": password})
+    if "names" in found:
+        for vault, name in vaults.items():
+            person.call("POST", "/v1/session/vault", {"vault": vault})
+            person.call("POST", "/v1/vault/name", {"name": name})
     person.call("DELETE", "/v1/session")
-    return True
+    return found
+
+
+def nearly_full(folder: Path, limit: float = FULL) -> bool:
+    """Whether strangers have filled the demo's storage. Kaal cannot even sign anyone in
+    once it is full, so the demo starts again rather than wait for the night."""
+    usage = shutil.disk_usage(folder)
+    return usage.used >= usage.total * limit
 
 
 # --- the container's main process
@@ -717,6 +765,7 @@ def serve() -> int:
                 _wait_until_up(kaal_server)
                 made = seed(connect, run, reviewer_password=reviewer_password, admin_password=admin_password,
                             today=datetime.now(timezone.utc).date(), reset_at=reset_at)
+                vaults = made["vaults"]
                 READY.write_text(secrets.token_hex(8) + "\n")
                 when = next_reset(datetime.now(timezone.utc), reset_at)
                 log.info("ready: %d notes and %d receipts, all made up; back to this at %s UTC", made["notes"], made["receipts"], f"{when:%Y-%m-%d %H:%M}")
@@ -730,10 +779,20 @@ def serve() -> int:
                         break
                     if time.monotonic() >= check_at:
                         try:
-                            if keep_password(connect, run, reviewer_password):
-                                log.warning("the reviewer's password had been changed; it is back to the one App Review was given")
-                        except DemoError as error:
-                            log.error("could not check the reviewer's password: %s", error)
+                            found = keep_reviewer(connect, run, reviewer_password, vaults)
+                        except Exception as error:   # a check that fails is tried again; it is no reason to start over
+                            found = []
+                            log.error("could not check the reviewer's account (%s: %s)", type(error).__name__, error)
+                        if "gone" in found:
+                            log.warning("the reviewer's account or one of its vaults had been deleted; putting the made-up data back now")
+                            break
+                        if nearly_full(home):
+                            log.warning("the demo's storage was nearly full; putting the made-up data back now")
+                            break
+                        if "password" in found:
+                            log.warning("the reviewer's password had been changed; it is back to the one App Review was given")
+                        if "names" in found:
+                            log.warning("a vault had been renamed; its name is back")
                         check_at = time.monotonic() + CHECK_SECONDS
                     wake.wait(max(1.0, min(30.0, (when - datetime.now(timezone.utc)).total_seconds(), check_at - time.monotonic())))
                     wake.clear()

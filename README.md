@@ -24,6 +24,10 @@ for you, Tailscale or another proxy, or just this machine), starts Kaal, and
 prints a link for choosing your password. [`docs/install.md`](docs/install.md)
 covers the key, updates and backups.
 
+To look around first, `deploy/demo/run.sh --local` runs a separate Kaal that
+holds only made-up notes and receipts
+([`deploy/demo/README.md`](deploy/demo/README.md)).
+
 ## Security model
 
 - Every note, attachment, piece of extracted or OCR text and the index is encrypted at rest, medical receipts included.
