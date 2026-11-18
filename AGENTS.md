@@ -69,7 +69,7 @@ Tests use a throwaway key file, and never a real `~/.config/kaal/config.toml` (s
 
 ```bash
 env -u PYTHONPATH .venv/bin/python -m pytest -q
-.venv/bin/python -m py_compile bin/kaal.py bin/sync-extension-web.py bin/make-icons.py kaal/*.py
+.venv/bin/python -m py_compile bin/kaal.py bin/sync-extension-web.py bin/make-icons.py bin/demo-data.py bin/package-extension.py kaal/*.py
 ```
 
 After changing the Chrome extension or a web file it shares, also run its browser test, which is off by default (it needs Chrome for Testing or Chromium, and Node 22 or later):
@@ -77,6 +77,8 @@ After changing the Chrome extension or a web file it shares, also run its browse
 ```bash
 KAAL_E2E=1 env -u PYTHONPATH .venv/bin/python -m pytest -q tests/test_extension_e2e.py
 ```
+
+Store material (README "Publishing") lives in `docs/` (the GitHub Pages site, including the privacy policy), `ios/AppStore/` and `chrome-extension/store/`. When a change alters what the apps store, send or ask permission for, update `docs/privacy.md`, `ios/AppStore/privacy-labels.md`, `ios/Kaal/PrivacyInfo.xcprivacy` and `chrome-extension/store/listing.md` with it; `tests/test_store_material.py` checks the limits, the privacy manifest, and the statements that can be checked against the code (the app's password fields, the debugger commands the extension sends, what the Docker install's Caddy logs); a failure there means the text is no longer true, so change the text, not the test. Screenshots are only ever taken against `bin/demo-data.py` (`ios/AppStore/make-screenshots.sh`, `chrome-extension/store/make-screenshots.sh`), never a real vault; `bin/demo-data.py fill` also fills the reviewers' demo server, and waits for it to read each receipt (`tests/test_demo_data.py`). `bin/package-extension.py` builds the extension's store zip from the files the manifest reaches and checks it (`--check FILE.zip` checks one again); the browser test loads that zip too. A new file the extension uses must be reachable from `manifest.json`, or a test fails.
 
 After changing an endpoint, regenerate the API spec (a test fails until you do):
 
@@ -96,5 +98,7 @@ deploy/deploy.sh --host USER@SERVER --rollback
 ```
 
 Deploying or rolling back changes a live vault's server: do it only when the user has approved that specific release, and pass `--yes` only after they have. `--status` and `--dry-run` change nothing on the server. The script does not install systemd unit files.
+
+`deploy/demo/run.sh` runs a separate demo installation that holds only made-up data, made through Kaal's API by `deploy/demo/demo.py`, and resets it every night (see `deploy/demo/README.md`). It is its own Compose project and keeps everything in memory; never point it, or its reset, at a real installation. Its reviewer password is published, so between resets `demo.py` puts back what a visitor can do to that account (`keep_reviewer`); when the server gains something a signed-in person can do to their own account, decide there what puts it right. Its tests are in `tests/test_demo.py`; the Docker one runs only with `KAAL_DEMO_DOCKER=1`.
 
 The root `README.md` is end-user documentation. Update this file when agent behavior, safety rules, or stable command locations change.

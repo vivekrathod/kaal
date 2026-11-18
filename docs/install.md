@@ -141,8 +141,9 @@ take effect after `deploy/docker/kaalctl start`. The ones most people want:
 | `KAAL_SIGN_IN_PER_MINUTE` | How often one address may call the sign-in pages' routes (default 30 a minute). |
 | `KAAL_PASSWORD_CHECKS` | How many passwords are checked at the same moment (default 4). Each takes memory and a processor for a moment. |
 | `KAAL_TRUSTED_PROXIES` | Whose word is taken for a visitor's address: `private` (the default here, for the proxy in a container), `none`, or a list of networks. |
-| `KAAL_FILE_JOBS`, `KAAL_FILE_MEMORY_MB` | How many files are read at once (default 2) and the memory each reading may use (default 1024). |
+| `KAAL_FILE_JOBS`, `KAAL_FILE_MEMORY_MB`, `KAAL_FILE_OUTPUT_MB` | How many files are read at once (default 2), the memory each reading may use (default 1024) and about how much it may write (default 256). |
 | `KAAL_DOWNLOAD_MEMORY_MB` | The most memory held by files on their way to people at one time (default 1024). |
+| `KAAL_HSTS` | `1` tells browsers to use HTTPS only for the host name, on every port. The installer sets it for a domain of Kaal's own. |
 | `KAAL_FREE_SPACE_MB` | Nothing new is stored once the disk has less than this free (default 1024; 0 for no floor). |
 | `KAAL_SEARCH_MEMORY_MB` | The most decrypted text each vault keeps in memory for searching (default 256). |
 
@@ -188,6 +189,13 @@ deploy/docker/install.sh --image ghcr.io/OWNER/kaal:latest
 ```
 
 where `OWNER` is the owner of the repository you cloned.
+
+## A demo with made-up data
+
+`deploy/demo/run.sh` runs a separate Kaal that holds only made-up notes and
+receipts and goes back to them every night, for App Review or for trying Kaal
+out without putting anything real in it. It leaves a regular installation on
+the same machine alone. See [`deploy/demo/README.md`](../deploy/demo/README.md).
 
 ## Removing Kaal
 

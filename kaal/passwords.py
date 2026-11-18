@@ -44,11 +44,11 @@ def set_concurrency(count: int) -> None:
     _checks = threading.BoundedSemaphore(max(1, count))
 
 
-def _derive(password: str, salt: bytes, memory: int, iterations: int, lanes: int, length: int) -> bytes:
+def _derive(password: str, salt: bytes, memory: int, iterations: int, lanes: int, length: int, wait: float = 0.0) -> bytes:
     from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 
     gate = _checks
-    if not gate.acquire(timeout=WAIT_SECONDS):
+    if not gate.acquire(timeout=wait or WAIT_SECONDS):
         raise PasswordBusy()
     try:
         return Argon2id(salt=salt, length=length, iterations=iterations, lanes=lanes, memory_cost=memory).derive(password.encode("utf-8"))
@@ -66,9 +66,11 @@ def check_new(password: str, *, login: str = "") -> None:
         raise PasswordError("Choose a password that is not your sign-in name.")
 
 
-def hash_password(password: str) -> str:
+def hash_password(password: str, *, patient: bool = False) -> str:
+    """``patient`` is for a step that cannot be taken back (a one-time code has just been used):
+    it waits much longer for its turn rather than answer "busy" with the code already gone."""
     salt = secrets.token_bytes(16)
-    derived = _derive(password, salt, MEMORY_KIB, ITERATIONS, LANES, LENGTH)
+    derived = _derive(password, salt, MEMORY_KIB, ITERATIONS, LANES, LENGTH, wait=120.0 if patient else 0.0)
     return f"argon2id$m={MEMORY_KIB},t={ITERATIONS},p={LANES}${_b64(salt)}${_b64(derived)}"
 
 

@@ -9,7 +9,7 @@ import XCTest
 ///     xcodebuild test -project ios/Kaal.xcodeproj -scheme Kaal -only-testing:KaalUITests -destination …
 ///
 /// The person needs a vault with at least one receipt waiting for review and a note
-/// called "Made-up house notes". `KAAL_UI_SHOTS` names a folder to keep pictures of each screen in.
+/// called "Boiler and radiators". `KAAL_UI_SHOTS` names a folder to keep pictures of each screen in.
 ///
 /// The tests run in the order of their names, and each relies on the ones before it: the first
 /// signs in and the last ones sign out. Those that save from other apps are in ShareScenarioTests.swift.
@@ -115,8 +115,9 @@ final class ScenarioTests: XCTestCase {
             secret.tap()
             secret.typeText(password)
             shot("02-kaal-sign-in-page")
-            putKeyboardAway()
-            page.buttons["Sign in"].tap()
+            // Return sends the form, as the keyboard's Go key does. The bar above the
+            // keyboard can cover the page's Sign in button, so a tap there can miss.
+            secret.typeText("\n")
         }
 
         // The browser may offer to remember the password first.
@@ -198,22 +199,24 @@ final class ScenarioTests: XCTestCase {
         shot("10-note-in-trash")
         remove.tap()
         confirm("Delete forever")
-        // Back in the Trash it is no longer listed. (The Trash need not be empty: the tests
-        // after this one leave what they made there, and may have run before.)
-        appears(app.navigationBars["Notes"], "the Trash again", timeout: 30)
-        XCTAssertTrue(trashed.waitForNonExistence(timeout: 30), "the note should be gone from the Trash")
+        // Gone from the Trash. Other things may be in it, as in Kaal's demo (deploy/demo).
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: trashed)
+        if XCTWaiter().wait(for: [gone], timeout: 30) != .completed {
+            shot("failed-note-still-in-trash")
+            XCTFail("the note was not deleted for good")
+        }
     }
 
     func test03ANoteShowsItsMarkdownAndFiles() {
         launch()
         tab("Notes")
-        let row = app.staticTexts["Made-up house notes"].firstMatch
+        let row = app.staticTexts["Boiler and radiators"].firstMatch
         appears(row, "the note with files", timeout: 30)
         row.tap()
         appears(app.staticTexts["Boiler"], "the heading")
         appears(labelled(app.staticTexts, containing: "Pressure should be 1.5 bar"), "bold text shown as text")
         appears(app.staticTexts["Hall"], "the table")
-        appears(labelled(app.staticTexts, containing: "northside.pdf"), "the PDF listed under the note", timeout: 30)
+        appears(labelled(app.staticTexts, containing: "boiler-manual.pdf"), "the PDF listed under the note", timeout: 30)
         sleep(2)
         shot("11-note-with-files")
         app.swipeUp()
@@ -224,16 +227,16 @@ final class ScenarioTests: XCTestCase {
         let search = app.searchFields.firstMatch
         appears(search, "the search field")
         search.tap()
-        search.typeText("radiators")
-        appears(app.staticTexts["Made-up house notes"].firstMatch, "the note found by a word in it", timeout: 30)
-        XCTAssertFalse(app.staticTexts["Made-up shopping list"].exists)
+        search.typeText("drawer")
+        appears(app.staticTexts["Boiler and radiators"].firstMatch, "the note found by a word in it", timeout: 30)
+        XCTAssertFalse(app.staticTexts["Lentil soup"].exists)
         shot("13-search")
     }
 
     func test04AReceiptIsCheckedAndMarkedReimbursed() {
         launch()
         tab("Receipts")
-        let row = app.staticTexts["$45.00"].firstMatch
+        let row = app.staticTexts["$64.50"].firstMatch
         appears(row, "a receipt waiting for review", timeout: 30)
         shot("14-receipts")
         row.tap()
@@ -253,11 +256,11 @@ final class ScenarioTests: XCTestCase {
         let reviewed = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Reviewed'")).firstMatch
         appears(reviewed, "the Reviewed list", timeout: 30)
         reviewed.tap()
-        let done = app.staticTexts["$45.00"].firstMatch
+        let done = app.staticTexts["$64.50"].firstMatch
         appears(done, "the receipt among the reviewed", timeout: 30)
         done.tap()
         appears(app.staticTexts["Reviewed"], "the reviewed receipt", timeout: 30)
-        let mark = app.buttons["Mark $45.00 reimbursed"]
+        let mark = app.buttons["Mark $64.50 reimbursed"]
         for _ in 0..<8 where !mark.exists { app.swipeUp() }
         appears(mark, "Mark reimbursed")
         mark.tap()
@@ -275,7 +278,7 @@ final class ScenarioTests: XCTestCase {
         shot("18-totals")
 
         tab("Settings")
-        appears(app.staticTexts["Jane Madeup"], "the family list", timeout: 30)
+        appears(app.staticTexts["Jane Example"], "the family list", timeout: 30)
         shot("19-settings")
         app.swipeUp()
         shot("20-settings-lower")
@@ -392,6 +395,23 @@ final class ScenarioTests: XCTestCase {
         app.buttons["Move to Trash"].tap()
         confirm("Move to Trash")
         appears(app.buttons["Trash"], "the notes list")
+    }
+
+    func test07aWhatDeletingTheAccountWouldDeleteIsShownAndNothingIsDeleted() {
+        launch()
+        tab("Settings")
+        appears(app.staticTexts["Family"], "Settings", timeout: 30)
+        let ask = app.buttons["What would be deleted?"]
+        for _ in 0..<8 where !ask.exists { app.swipeUp() }
+        appears(ask, "What would be deleted?")
+        ask.tap()
+        // Kaal either says what stops it (a server's only account, or its only administrator,
+        // cannot go) or lists what would go and offers the button. Nothing is deleted here.
+        let delete = app.buttons["Delete my account"]
+        let stopped = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'only account' OR label CONTAINS 'only administrator' OR label CONTAINS 'only owner' OR label CONTAINS 'first vault'")).firstMatch
+        let told = expectation(for: NSPredicate { _, _ in delete.exists || stopped.exists }, evaluatedWith: nil)
+        wait(for: [told], timeout: 30)
+        shot("28a-delete-my-account")
     }
 
     func test08SpeakingANoteStartsListeningOrSaysWhyNot() {

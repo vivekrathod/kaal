@@ -129,6 +129,12 @@ final class AppModel {
         forget()
     }
 
+    /// The person deleted their account from this app. The server has ended every sign-in with it.
+    func accountDeleted() {
+        forget()
+        notice = "Your account was deleted."
+    }
+
     /// The server no longer knows this session: it ran out, or was signed out from another device.
     func expired() {
         guard phase == .signedIn else { return }

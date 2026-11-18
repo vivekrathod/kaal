@@ -16,6 +16,8 @@ x-kaal: &kaal
   read_only: true
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
+  # A runaway program reading a file cannot fork without end.
+  pids_limit: 512
   tmpfs: [/tmp]
 
 services:
@@ -26,6 +28,7 @@ services:
     environment:
       KAAL_PUBLIC_URL: ${KAAL_PUBLIC_URL:?Run deploy/docker/install.sh first}
       KAAL_COOKIE_SECURE: ${KAAL_COOKIE_SECURE:-1}
+      KAAL_HSTS: ${KAAL_HSTS:-0}
       # Only proxies on this machine (Caddy, Docker's port forwarding, Tailscale) can reach Kaal,
       # so the address they pass on is believed, and limits apply per visitor.
       KAAL_TRUSTED_PROXIES: private

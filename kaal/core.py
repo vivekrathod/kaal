@@ -542,8 +542,15 @@ def init_vault(args: argparse.Namespace) -> None:
     emit(result, indent=2)
 
 
+MAX_TAG_CHARS = 100
+
+
 def parse_tags(raw: str) -> list[str]:
-    return sorted({t.strip().lstrip("#") for t in raw.split(",") if t.strip()})
+    tags = sorted({t.strip().lstrip("#") for t in raw.split(",") if t.strip()})
+    # Tags live in the vault's index, which is read whole each time: a tag is a word or two, not a document.
+    if any(len(tag) > MAX_TAG_CHARS for tag in tags):
+        die(f"A tag is at most {MAX_TAG_CHARS} characters.")
+    return tags
 
 
 def sensitivity_label(requested: str | None = "auto") -> str:
@@ -575,7 +582,7 @@ def run_tesseract(path: Path) -> str:
     tesseract = shutil.which("tesseract")
     if not tesseract:
         return ""
-    proc = tools.run([tesseract, str(path), "stdout"], text=True, timeout=120)
+    proc = tools.run([tesseract, str(path), "stdout"], text=True, timeout=60)
     return proc.stdout if proc is not None and proc.returncode == 0 else ""
 
 
@@ -585,7 +592,7 @@ def run_pdftotext(path: Path) -> str:
         return ""
     # Preserve column alignment: medical receipt labels and values frequently
     # share a visual row but are separated by whitespace rather than a colon.
-    proc = tools.run([pdftotext, "-layout", "-l", "50", str(path), "-"], text=True, timeout=60)
+    proc = tools.run([pdftotext, "-layout", "-l", "50", str(path), "-"], text=True, timeout=30)
     return proc.stdout if proc is not None and proc.returncode == 0 else ""
 
 
@@ -597,7 +604,7 @@ def run_pdf_ocr(path: Path, *, max_pages: int = 10) -> str:
         prefix = Path(td) / "page"
         # 3000 pixels on the longest side reads as well as 300 dpi for a letter page, and a
         # page drawn absurdly large cannot turn into an absurdly large picture.
-        proc = tools.run([pdftoppm, "-png", "-scale-to", "3000", "-f", "1", "-l", str(max_pages), str(path), str(prefix)], text=True, timeout=180)
+        proc = tools.run([pdftoppm, "-png", "-scale-to", "3000", "-f", "1", "-l", str(max_pages), str(path), str(prefix)], text=True, timeout=90)
         if proc is None or proc.returncode != 0:
             return ""
         return "\n\n".join(text for image in sorted(Path(td).glob("page-*.png")) if (text := run_tesseract(image)).strip())
@@ -965,7 +972,7 @@ SEARCH_PIECE_LIMIT = 400_000   # characters of one note or one file's text that 
 
 
 def search_memory_chars() -> int:
-    """How much decrypted text one vault keeps in memory for searching (KAAL_SEARCH_MEMORY_MB, 256).
+    """How much decrypted text, in bytes, one vault keeps in memory for searching (KAAL_SEARCH_MEMORY_MB, 256).
     Beyond it the text read longest ago is let go, and read again when it is next searched."""
     try:
         return max(1, int(os.environ.get("KAAL_SEARCH_MEMORY_MB") or 256)) * 1024 * 1024
@@ -980,7 +987,8 @@ def _forget_text(vault: Any, note_id: str) -> None:
 
 def _remember_text(vault: Any, note_id: str, stamp: Any, pieces: list[tuple[str, str, str]]) -> None:
     _forget_text(vault, note_id)
-    size = sum(len(text) for _where, _name, text in pieces)
+    # In bytes as held in memory: text with a single emoji in it takes four bytes a character.
+    size = sum(sys.getsizeof(text) for _where, _name, text in pieces)
     vault.text_cache[note_id] = (stamp, pieces)
     vault.text_sizes[note_id] = size
     vault.text_total += size
@@ -1928,6 +1936,9 @@ def reextract_receipt(note_id: str, outer_lock: Any = None) -> str:
                 os.chmod(copy, 0o600)
                 extracted_md = extract_attachment_markdown(copy, ocr=True, extract=True)
                 ai_fields, ai_info = receipt_ai_candidates(copy, extracted_md)
+        except tools.Busy:
+            # Never got a turn at reading it: that says nothing about the receipt, which stays waiting.
+            raise
         except (Exception, KaalError) as error:
             failure = type(error).__name__
     with (outer_lock or nullcontext()), vault_capture_lock():
@@ -2101,15 +2112,17 @@ def medical_show(args: argparse.Namespace) -> None:
 
 def attachment_preview(note_meta: dict[str, Any], attachment_meta: dict[str, Any], page: int = 1) -> tuple[str, bytes]:
     """A page of an attachment as an image a browser can show: (media type, bytes)."""
-    with tempfile.TemporaryDirectory(prefix="kaal-preview-") as directory:
+    # One of a few turns, taken before the file is even decrypted, and only the page asked for
+    # is drawn. tools.Busy (no turn in a couple of seconds) is the caller's to answer.
+    with tools.turn("previews"), tempfile.TemporaryDirectory(prefix="kaal-preview-") as directory:
         os.chmod(directory, 0o700)
         copy = Path(directory) / f"preview{Path(attachment_meta.get('name', '')).suffix.lower()}"
         copy.write_bytes(attachment_original_bytes(note_meta, attachment_meta))
         os.chmod(copy, 0o600)
-        images = receipt_ai.receipt_images(copy)
-    if page < 1 or page > len(images):
+        images = receipt_ai.receipt_images(copy, page=max(1, page), pool=None)
+    if not images:
         die("No preview is available for that page.", kind="not_found")
-    return images[page - 1]
+    return images[0]
 
 
 def medical_receipt_meta(index: dict[str, Any], note_id: str) -> dict[str, Any]:

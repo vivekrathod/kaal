@@ -24,6 +24,10 @@ for you, Tailscale or another proxy, or just this machine), starts Kaal, and
 prints a link for choosing your password. [`docs/install.md`](docs/install.md)
 covers the key, updates and backups.
 
+To look around first, `deploy/demo/run.sh --local` runs a separate Kaal that
+holds only made-up notes and receipts
+([`deploy/demo/README.md`](deploy/demo/README.md)).
+
 ## Security model
 
 - Every note, attachment, piece of extracted or OCR text and the index is encrypted at rest, medical receipts included.
@@ -326,10 +330,11 @@ restores into an empty vault and verifies it.
   for everyone who shares it, and tokens made for it stop working. The
   installation's first vault cannot be deleted; backups and older tokens rely
   on it. On the server: `kaal-server vault remove VAULT_ID --yes`.
-- **Deleting an account.** Settings → Delete my account shows what would go
-  first: the account, its tokens, and every vault only it belongs to. Vaults
-  shared with others stay with them, but the only owner of a shared vault must
-  make someone else an owner first, and the only administrator cannot leave.
+- **Deleting an account.** Settings → Delete my account, in the web app or
+  the iPhone app, shows what would go first: the account, its tokens, and
+  every vault only it belongs to. Vaults shared with others stay with them,
+  but the only owner of a shared vault must make someone else an owner first,
+  and the only administrator cannot leave.
   Administrators remove someone else under Settings → People. On the server:
   `kaal-server account remove LOGIN` says what would go, and `--yes` does it.
 
@@ -374,6 +379,10 @@ anything but loopback, and refuses token or config files that others can read.
 status, token name and duration only, never bodies, query strings, file
 contents or tokens. Validation errors name the bad fields without echoing the
 values. Uploads go to a private folder that is removed after each request.
+A proxy in front of Kaal logs what it is set to: the Docker install's Caddy is
+set to keep no record of requests (`deploy/docker/Caddyfile` says why: left
+alone, it logs each request that fails, with the visitor's address, the
+address asked for and its headers).
 
 **What leaves the server.** Nothing, unless `KAAL_RECEIPT_AI` is set. With it
 set, each captured or re-extracted medical receipt's text and page images are
@@ -390,18 +399,31 @@ proxy. What it does about strangers:
 - The routes that need no sign-in answer each address only so often
   (`KAAL_SIGN_IN_PER_MINUTE`, 30), and take small requests only. Wrong
   passwords are slowed for the name and the address together, so guessing from
-  one place does not lock the real person out from another; only a few
-  passwords are checked at once (`KAAL_PASSWORD_CHECKS`, 4), and more are told
-  to try again.
+  one place does not lock the real person out from another. Very many
+  addresses guessing one name together are slowed to about a try a minute
+  between them, yet someone arriving from an address that has not got that
+  name wrong always has their first try; recovery codes, and proving a
+  password while already signed in, are counted apart. Only a few passwords
+  are checked at once (`KAAL_PASSWORD_CHECKS`, 4), and more are told to try
+  again.
 - The visitor's address is taken from `X-Forwarded-For` only when the request
   comes from a proxy named in `KAAL_TRUSTED_PROXIES` (this machine by default;
-  `private` for a proxy in a container; `none` to believe nobody).
-- The session cookie is tied to the one host (`__Host-`), browsers are told to
-  stay on HTTPS, and nothing a visitor sends is written to the log as they
-  typed it.
-- Files are read by pdftotext, pdftoppm and tesseract with a time limit and a
-  memory limit (`KAAL_FILE_MEMORY_MB`, 1024), a few at a time
-  (`KAAL_FILE_JOBS`, 2), and with nothing of the server's environment.
+  `private` for a proxy in a container; `none` to believe nobody). An IPv6
+  visitor is counted by their /56. A proxy of your own must send that header:
+  where it does not, Kaal cannot tell visitors apart, holds nothing against
+  the one address it sees, and limits them all together instead.
+- The session cookie is tied to the one host (`__Host-`), and nothing a
+  visitor sends is written to the log as they typed it. With `KAAL_HSTS=1`
+  browsers are told to use HTTPS only for the host name, every port of it; the
+  installer sets that for a domain of Kaal's own, and it is off elsewhere,
+  since a name shared with other services over plain http would lose them.
+- Files are read by pdftotext, pdftoppm and tesseract with a time limit, a
+  memory limit (`KAAL_FILE_MEMORY_MB`, 1024) and a limit on what they write
+  (`KAAL_FILE_OUTPUT_MB`, 256), a few at a time (`KAAL_FILE_JOBS`, 2), with
+  nothing of the server's environment, and nothing they complain about is
+  kept. A request that cannot have a turn within seconds is told the server is
+  busy rather than left waiting; so is one behind a slow change to its vault,
+  and a client that stops taking an answer is given up on.
 - A vault other than the first may hold `KAAL_VAULT_QUOTA_MB` (10240; 0 for no
   limit), and nothing new is stored, nor a copy of a vault written, once the
   disk has less than `KAAL_FREE_SPACE_MB` (1024) free. A person may own
@@ -717,6 +739,63 @@ Delete a note and its attachments:
 ```bash
 kaal delete NOTE_ID --yes
 ```
+
+## Publishing
+
+What the App Store and the Chrome Web Store ask for, apart from the accounts,
+is in the repository:
+
+- [`docs/`](docs/index.md): a small website for GitHub Pages, with the
+  [privacy policy](docs/privacy.md) and [where to get help](docs/support.md)
+  that both stores link to.
+- [`ios/AppStore/`](ios/AppStore/listing.md): the
+  [listing](ios/AppStore/listing.md) (and what the App Store search showed
+  about the name), the [privacy answers](ios/AppStore/privacy-labels.md),
+  [notes for App Review](ios/AppStore/review-notes.md), why the app needs no
+  [export documents](ios/AppStore/export-compliance.md), and the screenshots
+  (`make-screenshots.sh` takes them again). The app's privacy manifest is
+  `ios/Kaal/PrivacyInfo.xcprivacy`.
+- [`chrome-extension/store/`](chrome-extension/store/listing.md): the listing,
+  why each permission is needed, the data disclosures, and the screenshots and
+  promo tile (`make-screenshots.sh`). `bin/package-extension.py` builds the
+  zip to upload, and checks it.
+- `bin/demo-data.py`: a Kaal holding only made-up notes and receipts, for the
+  screenshots and for the reviewers' demo account.
+
+`tests/test_store_material.py` checks the text against each store's limits,
+the pictures against its sizes, the zip against the extension, the privacy
+manifest against the code, and those statements in the privacy policy and
+the listings that can be checked mechanically (the app's password fields,
+the debugger commands the extension sends, what the Docker install's proxy
+logs). The rest of the policy is prose: read it again whenever what the
+apps store, send or ask for changes.
+
+Only the owner can do the rest:
+
+1. Turn on GitHub Pages for `docs/` (Settings → Pages, "Deploy from a
+   branch", folder `/docs`), check that the three pages open (the site has
+   not been built anywhere yet), and use their real addresses wherever the
+   listings say `OWNER.github.io/REPO`. Turn on private vulnerability
+   reporting (Security tab), which the help page points to.
+2. Run the demo on a domain (`deploy/demo/run.sh --domain …`, which makes the
+   `reviewer` account and fills it with made-up data), and keep it running
+   ([`review-notes.md`](ios/AppStore/review-notes.md)).
+3. For the App Store: join the Apple Developer Program, register the bundle
+   identifier under that team, create the app in App Store Connect (which is
+   when the name is really tested), sign and upload a build from Xcode, fill
+   in the listing, privacy and age-rating answers, add contact details, and
+   submit. Before that, decide whether the app is offered on iPad (which
+   needs iPad screenshots too). Sign in to the https demo server with the
+   very build you upload first (step 4 of "Before submitting" in the review
+   notes), and go through the notes' steps for the share extension, which is
+   part of the app.
+4. For the Chrome Web Store: register as a developer (a one-time fee), upload
+   the zip as a draft, allow the id the store gives it on the demo server, fill
+   in the listing and privacy tabs, and submit. Then put the store's public
+   key and id into the extension and the server, as
+   [`chrome-extension/store/listing.md`](chrome-extension/store/listing.md)
+   describes, and release the server; until a server has that release, its
+   operator has to allow the store's copy by hand (`KAAL_EXTENSION_IDS`).
 
 ## Licence
 

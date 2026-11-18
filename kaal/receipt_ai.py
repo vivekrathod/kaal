@@ -271,6 +271,8 @@ def _shrunk(data: bytes) -> tuple[str, bytes] | None:
             image = Image.open(io.BytesIO(data))
             if image.width * image.height > MAX_PICTURE_PIXELS:
                 raise _Unreadable
+            # A JPEG is decoded straight to about the size wanted, not to full size and then shrunk.
+            image.draft("RGB", (MAX_IMAGE_EDGE, MAX_IMAGE_EDGE))
             image.load()
         with image:
             image = ImageOps.exif_transpose(image).convert("RGB")
@@ -282,8 +284,11 @@ def _shrunk(data: bytes) -> tuple[str, bytes] | None:
         raise _Unreadable from None
 
 
-def receipt_images(path: Path) -> list[tuple[str, bytes]]:
-    """Page images of a receipt file as (media type, bytes); empty when none can be made."""
+def receipt_images(path: Path, *, page: int | None = None, pool: str | None = "files") -> list[tuple[str, bytes]]:
+    """Page images of a receipt file as (media type, bytes); empty when none can be made.
+
+    With ``page``, only that page (for showing one in the web app, quickly). ``pool`` is whose
+    turn the work takes; None when the caller already holds one."""
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         pdftoppm = shutil.which("pdftoppm")
@@ -292,19 +297,22 @@ def receipt_images(path: Path) -> list[tuple[str, bytes]]:
         with tempfile.TemporaryDirectory(prefix="kaal-receipt-pages-") as directory:
             prefix = Path(directory) / "page"
             # A size on the longest side, not a resolution: a page drawn absurdly large stays a normal picture.
-            done = tools.run([pdftoppm, "-scale-to", str(MAX_IMAGE_EDGE), "-png", "-f", "1", "-l", str(MAX_PAGES), str(path), str(prefix)], timeout=60)
+            first, last, limit = (page, page, 20) if page else (1, MAX_PAGES, 60)
+            done = tools.run([pdftoppm, "-scale-to", str(MAX_IMAGE_EDGE), "-png", "-f", str(first), "-l", str(last), str(path), str(prefix)], timeout=limit, pool=pool)
             if done is None or done.returncode != 0:
                 return []
             pages = [page.read_bytes() for page in sorted(Path(directory).glob("page*.png"))]
         return [("image/png", page) for page in pages if 0 < len(page) <= MAX_IMAGE_BYTES]
-    if suffix not in CONVERTIBLE_IMAGE_SUFFIXES:
+    if suffix not in CONVERTIBLE_IMAGE_SUFFIXES or (page or 1) != 1:
         return []
     try:
         data = path.read_bytes()
     except OSError:
         return []
     try:
-        shrunk = _shrunk(data)
+        # Decoding a large picture takes memory for a moment: it takes a turn like the programs do.
+        with tools.turn(pool):
+            shrunk = _shrunk(data)
     except _Unreadable:
         # Broken, or far too many pixels: nothing is sent.
         return []

@@ -612,6 +612,11 @@ class AccountStore:
                        (_sha(code), account_id, vault_id, challenge, _now(), _later(minutes=APP_SIGNIN_MINUTES), kind))
         return code
 
+    def end_app_signins(self, account_id: str) -> int:
+        """Forget every app sign-in this account approved that has not been collected yet."""
+        with self._db(write=True) as db:
+            return db.execute("DELETE FROM app_signins WHERE account_id = ?", (account_id,)).rowcount
+
     def finish_app_signin(self, code: str, verifier: str, kind: str = "app") -> dict[str, Any] | None:
         """Whose sign-in a code is, used up by asking. None when the code is unknown,
         too old, or the app does not hold the secret the challenge was made from."""
@@ -712,8 +717,13 @@ class AccountStore:
             raise AccountError("A sign-in service's address must start with https://")
         with self._db(write=True) as db:
             before = db.execute("SELECT issuer FROM signin_services WHERE id = ?", (service_id,)).fetchone()
-            if before is not None and before["issuer"] != issuer:
+            # A service taken away and offered again counts as the same only at the same address.
+            # Otherwise whoever offers it could answer for the people connected to the old one.
+            remembered = db.execute("SELECT value FROM meta WHERE key = ?", (f"removed_service_issuer:{service_id}",)).fetchone()
+            known = before["issuer"] if before is not None else (remembered["value"] if remembered is not None else None)
+            if known != issuer:
                 db.execute("DELETE FROM identities WHERE service = ?", (service_id,))
+            db.execute("DELETE FROM meta WHERE key = ?", (f"removed_service_issuer:{service_id}",))
             db.execute("INSERT INTO signin_services (id, name, issuer, client_id, secret, created) VALUES (?, ?, ?, ?, ?, ?) "
                        "ON CONFLICT(id) DO UPDATE SET name = excluded.name, issuer = excluded.issuer, client_id = excluded.client_id, secret = excluded.secret",
                        (service_id, name, issuer, client_id, secret, _now()))
@@ -728,8 +738,12 @@ class AccountStore:
             return [self._service(row) for row in db.execute("SELECT * FROM signin_services ORDER BY rowid")]
 
     def remove_service(self, service_id: str) -> bool:
-        """Stop offering a service. People's connections are kept, in case it is added again."""
+        """Stop offering a service. People's connections are kept, in case it is added again at
+        the same address (which is remembered so that it can be told from another)."""
         with self._db(write=True) as db:
+            row = db.execute("SELECT issuer FROM signin_services WHERE id = ?", (service_id,)).fetchone()
+            if row is not None:
+                self._set(db, f"removed_service_issuer:{service_id}", row["issuer"])
             return db.execute("DELETE FROM signin_services WHERE id = ?", (service_id,)).rowcount > 0
 
     # --- identities: which person at a sign-in service is which account here

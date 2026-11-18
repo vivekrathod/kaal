@@ -1,0 +1,54 @@
+<!doctype html>
+<!-- A made-up patient portal, for the store's screenshots of saving a receipt. Nothing here is real. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Greenway Family Clinic - Payment receipt</title>
+  <style>
+    body { margin: 0; background: #eef1f4; color: #1d2733; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    header { background: #24527a; color: #fff; padding: 18px 32px; display: flex; align-items: center; justify-content: space-between; }
+    header strong { font-size: 20px; letter-spacing: 0.3px; }
+    nav a { color: #d6e4f0; text-decoration: none; margin-left: 22px; font-size: 14px; }
+    nav a.here { color: #fff; border-bottom: 2px solid #fff; padding-bottom: 3px; }
+    main { max-width: 640px; margin: 28px auto; padding: 0 24px; }
+    .crumbs { color: #5b6b7b; font-size: 13px; margin-bottom: 10px; }
+    .card { background: #fff; border-radius: 10px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08); padding: 26px 30px; }
+    h1 { font-size: 21px; margin: 0 0 4px; }
+    .number { color: #5b6b7b; font-size: 13px; margin: 0 0 18px; }
+    .paid { display: inline-block; background: #e3f3e8; color: #1f6b3a; font-weight: 600; font-size: 13px; padding: 3px 10px; border-radius: 99px; margin-bottom: 14px; }
+    table { border-collapse: collapse; width: 100%; }
+    td { padding: 7px 0; border-bottom: 1px solid #edf0f2; }
+    td:first-child { color: #5b6b7b; width: 46%; }
+    tr.total td { font-weight: 700; font-size: 17px; border-bottom: 0; padding-top: 14px; color: #1d2733; }
+    .actions { margin-top: 18px; display: flex; gap: 12px; }
+    .actions span { border: 1px solid #c9d3dc; border-radius: 6px; padding: 7px 14px; font-size: 14px; color: #24527a; }
+    .sample { margin-top: 18px; color: #8a96a3; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Greenway Family Clinic</strong>
+    <nav><a href="#">Appointments</a><a href="#">Messages</a><a href="#" class="here">Billing</a></nav>
+  </header>
+  <main>
+    <div class="crumbs">Billing › Payments › Receipt</div>
+    <div class="card">
+      <h1>Payment receipt</h1>
+      <p class="number">Receipt G-20931</p>
+      <span class="paid">Paid</span>
+      <table>
+        <tr><td>Patient:</td><td>Sam Example</td></tr>
+        <tr><td>Provider:</td><td>Greenway Family Clinic</td></tr>
+        <tr><td>Date of Service:</td><td>11/10/2026</td></tr>
+        <tr><td>Payment Date:</td><td>11/12/2026</td></tr>
+        <tr><td>Insurance:</td><td>Acme Health Plan</td></tr>
+        <tr><td>Office visit</td><td>$150.00</td></tr>
+        <tr><td>Insurance paid</td><td>-$110.00</td></tr>
+        <tr class="total"><td>Amount paid:</td><td>$40.00</td></tr>
+      </table>
+      <div class="actions"><span>Download PDF</span><span>Print</span></div>
+      <p class="sample">SAMPLE - a made-up receipt for illustration. Questions? Call 555-0100.</p>
+    </div>
+  </main>
+</body>
+</html>

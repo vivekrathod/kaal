@@ -16,6 +16,10 @@ extension Capture {
     /// Whether this device can scan pages with its camera. The simulator cannot.
     static var canScan: Bool {
         #if targetEnvironment(simulator)
+        #if DEBUG
+        // The store's screenshots are taken in the simulator, and should show the buttons an iPhone shows.
+        if CommandLine.arguments.contains("-kaal-store-screenshots") { return true }
+        #endif
         return false
         #elseif os(iOS)
         return VNDocumentCameraViewController.isSupported

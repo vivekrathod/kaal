@@ -15,6 +15,7 @@ import functools
 import glob
 import hashlib
 import http.server
+import importlib.util
 import json
 import os
 import shutil
@@ -23,6 +24,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -142,6 +144,15 @@ def stage(tmp_path, request):
     threading.Thread(target=site.serve_forever, daemon=True).start()
 
     extension = EXT
+    if variant == "packaged":
+        # What the Chrome Web Store is given: the zip from bin/package-extension.py, unpacked.
+        spec = importlib.util.spec_from_file_location("package_extension", ROOT / "bin" / "package-extension.py")
+        package = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(package)
+        package.build(tmp_path / "kaal.zip")
+        extension = tmp_path / "extension"
+        with zipfile.ZipFile(tmp_path / "kaal.zip") as archive:
+            archive.extractall(extension)
     if variant in ("granted", "updated"):
         extension = tmp_path / "extension"
         shutil.copytree(EXT, extension)
@@ -185,6 +196,20 @@ def drive(stage, script, **more):
     done = subprocess.run(["node", str(DRIVER.with_name(script))], env=env, capture_output=True, text=True, timeout=300)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-2000:]
     return json.loads(done.stdout)
+
+
+@pytest.mark.parametrize("stage", ["packaged"], indirect=True)
+def test_the_zip_for_the_web_store_loads_and_runs_in_a_real_browser(stage):
+    out = drive(stage, "packaged.mjs")
+    manifest = json.loads((EXT / "manifest.json").read_text())
+    # It is this version, without the key, so Chrome gives it an id of its own.
+    assert out["version"] == manifest["version"] and out["hasKey"] is False and out["id"] != extension_id()
+    assert out["permissions"] == manifest["permissions"]
+    assert out["icons"] == [True] * 6 and out["storeFiles"] == [False, False]
+    # The worker started, and every page ran its own script with nothing missing.
+    assert out["pages"] == {"popup.html": {"text": "Connect to Kaal", "missing": []},
+                            "options.html": {"text": "kaal_…", "missing": []},
+                            "panel.html": {"text": "Kaal isn't connected yet.Open settings", "missing": []}}
 
 
 @pytest.mark.parametrize("stage", ["updated"], indirect=True)

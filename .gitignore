@@ -25,3 +25,5 @@ __pycache__/
 # Settings of a local Docker installation (deploy/docker/install.sh).
 /deploy/docker/.env
 /deploy/docker/kaal.env
+# Settings of a demo (deploy/demo/run.sh), with its passwords.
+/deploy/demo/*.env

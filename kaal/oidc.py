@@ -74,9 +74,15 @@ def fetch(url: str, form: dict[str, str] | None = None, *, trusting: ssl.SSLCont
     try:
         parts = urlsplit(url)
         # ``trusting`` is for tests, which play a service with a certificate of their own making.
+        started = time.monotonic()
         connection = http.client.HTTPSConnection(parts.hostname or "", parts.port or 443, timeout=TIMEOUT_SECONDS, context=trusting)
+        # Connected first, so that the deadline has a connection to close: making it counts too.
+        connection.connect()
+        left = TOTAL_SECONDS - (time.monotonic() - started)
+        if left <= 0:
+            raise OSError("the sign-in service took too long to reach")
         # The timeout above restarts with every byte that arrives; this does not.
-        watchdog = threading.Timer(TOTAL_SECONDS, _give_up, [connection])
+        watchdog = threading.Timer(left, _give_up, [connection])
         watchdog.daemon = True
         watchdog.start()
         try:

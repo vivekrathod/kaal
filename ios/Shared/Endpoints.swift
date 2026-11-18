@@ -20,6 +20,14 @@ extension KaalAPI {
     // MARK: One's own account
 
     func account() async throws -> JSON { try await result("GET", "/v1/account") }
+    /// What deleting one's own account would delete (`vaults_to_delete`), which vaults are only
+    /// left (`vaults_to_leave`), and anything that stops it (`blocked`).
+    func removalPlan() async throws -> JSON { try await result("GET", "/v1/account/removal") }
+    /// Delete one's own account for good. Kaal asks who is asking: `password`, or, for an account
+    /// that has none (one that signs in only through a service), `confirm`, the sign-in name typed out.
+    func deleteAccount(password: String = "", confirm: String = "") async throws {
+        try await result("DELETE", "/v1/account", json: ["password": password, "confirm": confirm])
+    }
     func changePassword(current: String, new: String) async throws -> JSON {
         try await result("POST", "/v1/account/password", json: ["current": current, "new": new])
     }

@@ -1,0 +1,18 @@
+---
+layout: default
+---
+{%- comment -%}
+  The pages here are also read on GitHub, where a link such as ../README.md
+  opens that file in the repository. On the website it would point outside
+  the site, so every link that leaves this folder is sent to the same file in
+  the repository instead.
+{%- endcomment -%}
+{%- assign branch = site.github.source.branch | default: "HEAD" -%}
+{%- capture repository -%}href="{{ site.github.repository_url }}/blob/{{ branch }}/{%- endcapture -%}
+{{ content | replace: 'href="../', repository }}
+{%- comment -%}
+  On GitHub the reader is already in the repository. Here they are not, so
+  every page ends with the way back to it and to its issues.
+{%- endcomment %}
+<hr>
+<p><small><a href="{{ site.github.repository_url }}">Kaal on GitHub</a> · <a href="{{ site.github.repository_url }}/issues">Ask a question or report a problem</a></small></p>
