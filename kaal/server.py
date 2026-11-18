@@ -43,7 +43,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from kaal import __version__, accounts, core, oidc, passwords, tokens
+from kaal import __version__, accounts, core, oidc, passwords, tokens, tools
 
 log = logging.getLogger("kaal.server")
 
@@ -203,17 +203,31 @@ def _is_trusted(address: str, listed: tuple[str, ...]) -> bool:
     return any(parsed in network for network in _networks(listed))
 
 
+SHARED = "shared"
+
+
+def _bare(hop: str) -> str:
+    """One entry of X-Forwarded-For as an address: without a port, and without brackets."""
+    hop = hop.strip()
+    if hop.startswith("["):
+        return hop[1:].split("]", 1)[0]
+    return hop.split(":", 1)[0] if hop.count(":") == 1 else hop
+
+
 def client_address(request: Request) -> str:
-    """Who is asking: the connecting address, or, behind a trusted proxy, the first address in
-    X-Forwarded-For that is not a trusted proxy. An IPv6 address counts as its /64."""
+    """Who is asking: the connecting address, or, behind a trusted proxy, the last address in
+    X-Forwarded-For (every line of it) that is not a trusted proxy.
+
+    "shared" when the request came from a trusted proxy that names no visitor: everyone behind it
+    looks the same, so nothing may be held against that one address. An IPv6 address counts as
+    its /56, since one home line or server is commonly given that many addresses."""
     listed = request.app.state.kaal.settings.trusted_proxies
     address = request.client.host if request.client else ""
     if _is_trusted(address, listed):
-        hops = [hop.strip() for hop in request.headers.get("x-forwarded-for", "").split(",") if hop.strip()]
-        for hop in reversed(hops):
-            address = hop
-            if not _is_trusted(hop, listed):
-                break
+        hops = [_bare(hop) for line in request.headers.getlist("x-forwarded-for") for hop in line.split(",") if hop.strip()]
+        address = next((hop for hop in reversed(hops) if not _is_trusted(hop, listed)), "")
+        if not address:
+            return SHARED
     try:
         parsed = ipaddress.ip_address(address.strip("[]"))
     except ValueError:
@@ -221,7 +235,7 @@ def client_address(request: Request) -> str:
     if parsed.version == 6:
         if parsed.ipv4_mapped is not None:
             return str(parsed.ipv4_mapped)
-        return str(ipaddress.ip_network(f"{parsed}/64", strict=False))
+        return str(ipaddress.ip_network(f"{parsed}/56", strict=False))
     return str(parsed)
 
 
@@ -259,7 +273,9 @@ class ExtractionWorker:
                         return attempted
                     attempted += 1
                     try:
-                        outcome = core.reextract_receipt(note_id, outer_lock=vault.request_lock)
+                        # Nobody is waiting on this, so it waits its turn for as long as it takes.
+                        with tools.patient(900.0):
+                            outcome = core.reextract_receipt(note_id, outer_lock=vault.request_lock)
                         log.info("receipt read: %s", outcome)
                     except (Exception, core.KaalError) as error:
                         # Leave it pending for the next pass; never log a receipt's contents.
@@ -367,15 +383,20 @@ class Downloads:
         self._by_caller: dict[str, int] = {}
         self._lock = threading.Lock()
 
+        self._bytes_by_caller: dict[str, int] = {}
+
     def take(self, caller: str, size: int) -> tuple[str, int] | None:
         with self._lock:
             if self._by_caller.get(caller, 0) >= self.per_caller:
                 return None
-            # One file is always allowed, however large; more only while they fit.
-            if self._held and self._held + size > self.limit:
+            # One file is always allowed, however large; more only while they fit, and one
+            # caller holds at most a quarter of the room, so they cannot shut everyone else out.
+            mine = self._bytes_by_caller.get(caller, 0)
+            if (self._held and self._held + size > self.limit) or (mine and mine + size > self.limit // 4):
                 return None
             self._held += size
             self._by_caller[caller] = self._by_caller.get(caller, 0) + 1
+            self._bytes_by_caller[caller] = mine + size
             return caller, size
 
     def give(self, ticket: tuple[str, int]) -> None:
@@ -385,8 +406,10 @@ class Downloads:
             left = self._by_caller.get(caller, 0) - 1
             if left > 0:
                 self._by_caller[caller] = left
+                self._bytes_by_caller[caller] = max(0, self._bytes_by_caller.get(caller, 0) - size)
             else:
                 self._by_caller.pop(caller, None)
+                self._bytes_by_caller.pop(caller, None)
 
 
 class HeldDownloadsMiddleware:
@@ -404,11 +427,38 @@ class HeldDownloadsMiddleware:
             return
         held: list[Callable[[], None]] = []
         scope["kaal_held"] = held
+
+        async def steady_send(message: dict) -> None:
+            """Hand an answer to the client a piece at a time, and give up on a client that takes
+            none of it for a while: otherwise one that asks and never reads holds its answer,
+            and whatever was counted for it, for as long as it likes."""
+            if message["type"] not in ("http.response.start", "http.response.body"):
+                await send(message)
+                return
+            body = message.get("body", b"") if message["type"] == "http.response.body" else b""
+            if len(body) <= SEND_PIECE_BYTES:
+                await asyncio.wait_for(send(message), SEND_IDLE_SECONDS)
+                return
+            more = message.get("more_body", False)
+            view = memoryview(body)
+            for start in range(0, len(view), SEND_PIECE_BYTES):
+                last = start + SEND_PIECE_BYTES >= len(view)
+                piece = {"type": "http.response.body", "body": bytes(view[start:start + SEND_PIECE_BYTES]), "more_body": more or not last}
+                await asyncio.wait_for(send(piece), SEND_IDLE_SECONDS)
+
         try:
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, steady_send)
+        except asyncio.TimeoutError:
+            # The client stopped taking its answer. Ending here closes the connection.
+            log.info("a client stopped reading; its answer was dropped")
         finally:
             for give_back in held:
                 give_back()
+
+
+SEND_PIECE_BYTES = 256 * 1024
+SEND_IDLE_SECONDS = 60.0
+VAULT_WAIT_SECONDS = 30.0
 
 
 def held_download(request: Request, size: int, pool: Downloads | None = None) -> JSONResponse | None:
@@ -661,6 +711,10 @@ class AppState:
     invites: Any = None
     token_making: Any = None
     exports: Any = None
+    previews: Any = None
+    proofs: Any = None
+    strangers_shared: Any = None
+    signups_from: Any = None
 
 
 class Scoped:
@@ -683,8 +737,15 @@ class Scoped:
     def in_vault(self) -> Iterator[core.Vault]:
         """Work on the request's vault, holding its request lock so requests take turns."""
         vault = self._chosen()
-        with core.use_vault(vault), vault.request_lock:
-            yield vault
+        # A bounded wait: behind a slow change to the same vault, a request is told so rather
+        # than holding one of the server's threads for as long as that change takes.
+        if not vault.request_lock.acquire(timeout=VAULT_WAIT_SECONDS):
+            raise HTTPException(503, "This vault is busy with another change. Try again in a moment.", headers={"Retry-After": "10"})
+        try:
+            with core.use_vault(vault):
+                yield vault
+        finally:
+            vault.request_lock.release()
 
     def beside_vault(self) -> Any:
         """Work on the request's vault without its request lock: for slow reading
@@ -767,39 +828,62 @@ def create_vault(store: accounts.AccountStore, name: str, owner: str) -> dict[st
 
 
 class SignInGuard:
-    """Slows password guessing without letting anyone lock a person out.
+    """Slows password guessing without letting one visitor lock a person out.
 
     Three counts of wrong tries, kept in memory (a restart clears them):
     a sign-in name tried from one address (five free, then a minute, doubling to fifteen);
     one address across every name (twenty free, then the same); and a sign-in name from
     everywhere together (fifty free, then at most a minute, so many addresses together
     cannot guess fast, but neither can they keep the person out for long). A correct
-    sign-in clears its name's counts. Tries for one name are checked one at a time, so
+    sign-in clears its name's counts, and a count nobody has added to for a while is
+    forgotten, so a household's typos over the months do not add up. Where a proxy hides
+    who is asking ("shared"), only the count by name is kept: nothing is held against an
+    address that is really everyone. Tries for one name are checked one at a time, so
     parallel guesses cannot slip past a count.
     """
 
     RULES = {"pair": (5, 60.0, 900.0), "from": (20, 60.0, 900.0), "name": (50, 5.0, 60.0)}
+    # How long after the last wrong try a count is forgotten.
+    FORGOTTEN_AFTER = {"pair": 24 * 3600.0, "from": 1800.0, "name": 3600.0}
     REMEMBERED = 20_000
+    TURN_SECONDS = 3.0
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._seen: dict[tuple[str, str], tuple[int, float, float]] = {}   # failures, next try allowed at, last failure
         self._names = [threading.Lock() for _ in range(64)]
 
-    def one_at_a_time(self, login: str) -> threading.Lock:
-        """Hold this while checking a password for ``login``."""
-        return self._names[int(hashlib.sha256(login.lower().encode()).hexdigest()[:8], 16) % len(self._names)]
+    @contextlib.contextmanager
+    def one_at_a_time(self, login: str) -> Iterator[None]:
+        """Hold this while checking a password for ``login``. Whoever cannot have a turn within a
+        few seconds is told the server is busy, rather than left holding one of its threads."""
+        lock = self._names[int(hashlib.sha256(login.lower().encode()).hexdigest()[:8], 16) % len(self._names)]
+        if not lock.acquire(timeout=self.TURN_SECONDS):
+            raise passwords.PasswordBusy()
+        try:
+            yield
+        finally:
+            lock.release()
 
     @staticmethod
     def _keys(login: str, address: str) -> dict[str, tuple[str, str]]:
         name = login.lower()
+        if address == SHARED:
+            return {"name": ("name", name)}
         return {"pair": ("pair", f"{name}\n{address}"), "from": ("from", address), "name": ("name", name)}
+
+    def _entry(self, kind: str, key: tuple[str, str], now: float) -> tuple[int, float, float]:
+        entry = self._seen.get(key, (0, 0.0, 0.0))
+        if entry[0] and now - entry[2] > self.FORGOTTEN_AFTER[kind] and entry[1] <= now:
+            self._seen.pop(key, None)
+            return (0, 0.0, 0.0)
+        return entry
 
     def wait(self, login: str, address: str = "") -> int:
         """Seconds until this name may be tried again from this address; 0 means now."""
         now = time.monotonic()
         with self._lock:
-            latest = max((self._seen.get(key, (0, 0.0, 0.0))[1] for key in self._keys(login, address).values()), default=0.0)
+            latest = max((self._entry(kind, key, now)[1] for kind, key in self._keys(login, address).items()), default=0.0)
         return max(0, int(latest - now + 0.999))
 
     def failed(self, login: str, address: str = "") -> None:
@@ -807,7 +891,7 @@ class SignInGuard:
         with self._lock:
             for kind, key in self._keys(login, address).items():
                 free, first, longest = self.RULES[kind]
-                count = self._seen.get(key, (0, 0.0, 0.0))[0] + 1
+                count = self._entry(kind, key, now)[0] + 1
                 over = count - free
                 pause = min(longest, first * 2 ** min(over - 1, 20)) if over > 0 else 0.0
                 if key not in self._seen and len(self._seen) >= self.REMEMBERED:
@@ -826,8 +910,9 @@ class SignInGuard:
     def succeeded(self, login: str, address: str = "") -> None:
         keys = self._keys(login, address)
         with self._lock:
-            self._seen.pop(keys["pair"], None)
-            self._seen.pop(keys["name"], None)
+            for kind in ("pair", "name"):
+                if kind in keys:
+                    self._seen.pop(keys[kind], None)
 
 
 def device_label(user_agent: str) -> str:
@@ -1054,7 +1139,10 @@ def stranger_gate(request: Request) -> None:
     """Routes that need no sign-in do real work (checking a password, starting a trip to Google);
     each address may call them only so often, so one client cannot crowd everyone else out."""
     state = request.app.state.kaal
-    if not state.strangers.allow(f"addr:{client_address(request)}"):
+    address = client_address(request)
+    # Where a proxy hides who is asking, the allowance is for everyone behind it together, and larger.
+    allowed = state.strangers_shared.allow(SHARED) if address == SHARED else state.strangers.allow(f"addr:{address}")
+    if not allowed:
         raise HTTPException(429, "Too many tries from here. Wait a minute and try again.", headers={"Retry-After": "60"})
 
 
@@ -1139,7 +1227,8 @@ def require(*scopes: str, adds: bool = False) -> Callable:
         if missing:
             raise HTTPException(403, f"This token lacks the {', '.join(missing)} scope.")
         request.state.vault = vault
-        request.state.caller, request.state.scopes = record["id"], allowed
+        # Counted with the person's own sign-in, so fifty tokens are not fifty people.
+        request.state.caller, request.state.scopes = f"account:{account['id']}", allowed
         if adds:
             _room_checked(request, state, vault)
         return {**record, "scopes": allowed, "account": account["id"], "vault": vault_id, "role": role}
@@ -1231,6 +1320,8 @@ def _run(state: AppState, handler: Callable[[Any], None], *, exact_note: str | N
             if exact_note is not None:
                 core.note_by_id(exact_note)
             result, options = core.call_captured(handler, SimpleNamespace(**params))
+        except tools.Busy:
+            return _error(503, "Kaal is reading other files just now. Try again in a moment.", "busy", headers={"Retry-After": "10"})
         except core.KaalError as error:
             return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind, error.details)
     meta = options.pop("meta", None)
@@ -1338,12 +1429,14 @@ def _content_response(request: Request, state: AppState, note_id: str, attachmen
             matches = [att for att in meta.get("attachments", []) if att.get("id") == attachment_id]
             if not matches:
                 core.die("Attachment not found.", kind="not_found")
+            # Counted before it is decrypted, by the size on record, so a crowd of requests is
+            # turned away before any of them costs memory.
+            busy = held_download(request, int(matches[0].get("size") or 0))
+            if busy is not None:
+                return busy
             data = core.attachment_original_bytes(meta, matches[0])
         except core.KaalError as error:
             return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind, error.details)
-    busy = held_download(request, len(data))
-    if busy is not None:
-        return busy
     return Response(
         content=data,
         media_type="application/octet-stream",
@@ -1618,6 +1711,12 @@ def create_app(settings: Settings) -> FastAPI:
     app.state.kaal.worker = ExtractionWorker(registry.all)
     app.state.kaal.services = oidc.Services()
     app.state.kaal.strangers = RateLimiter(settings.strangers_per_minute)
+    app.state.kaal.strangers_shared = RateLimiter(settings.strangers_per_minute * 20)
+    # Proving one's own password again (for a token, new codes, a deletion) costs the server as
+    # much as a sign-in; nobody needs to do it more than a few times a minute.
+    app.state.kaal.proofs = RateLimiter(6)
+    # New accounts from one address in an hour, before the allowance everyone shares is touched.
+    app.state.kaal.signups_from = Hourly(3)
     app.state.kaal.usage = Usage()
     if store.get(HOST_COOKIE_SINCE) is None:
         # From now on a browser's sign-in is accepted only in the cookie tied to this host.
@@ -1625,6 +1724,8 @@ def create_app(settings: Settings) -> FastAPI:
     app.state.kaal.downloads = Downloads(settings.download_memory_bytes)
     # A whole vault written out for download sits on disk until its client has it: one at a time each.
     app.state.kaal.exports = Downloads(1 << 62, per_caller=1)
+    # Pictures of files being drawn for one person at a time.
+    app.state.kaal.previews = Downloads(1 << 62, per_caller=3)
     # Adding someone to a vault says whether that sign-in name exists; nobody needs to try many a minute.
     app.state.kaal.invites = RateLimiter(10)
     # Tokens, and apps signed in, per person: each leaves a record behind, and nobody makes many.
@@ -1803,10 +1904,14 @@ def create_app(settings: Settings) -> FastAPI:
         session_record, cookie = open_session(request, state, account)
         return with_cookie(answer({**who(person_record(state, session_record)), **also}), state, cookie)
 
-    def checked_password(request: Request, state: Any, account: dict[str, Any] | None, password: str, login: str) -> bool:
+    def checked_password(request: Request, state: Any, account: dict[str, Any] | None, password: str, login: str, *, signing_in: bool = False) -> bool:
         """One password attempt for a sign-in name, counted by the guard either way. Attempts for
-        one name are checked one at a time, so parallel guesses all see the count."""
+        one name are checked one at a time, so parallel guesses all see the count. Someone already
+        signed in who proves their password again may do so only a few times a minute, right or
+        wrong: each check is real work, and a loop of right answers would otherwise go uncounted."""
         address = client_address(request)
+        if not signing_in and account is not None and not state.proofs.allow(account["id"]):
+            raise HTTPException(429, "You have entered your password several times in a minute. Wait a little and try again.", headers={"Retry-After": "30"})
         with state.guard.one_at_a_time(login):
             waiting = state.guard.wait(login, address)
             if waiting:
@@ -1853,7 +1958,7 @@ def create_app(settings: Settings) -> FastAPI:
             login = body.login.strip().lower()[:64]
         # By sign-in name only: an account's id is not a second name to guess under.
         account = state.accounts.account_named(login)
-        if not checked_password(request, state, account, body.password, login):
+        if not checked_password(request, state, account, body.password, login, signing_in=True):
             if refused_too_often(request, state):
                 raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
             raise HTTPException(401, "That sign-in name and password do not match.")
@@ -1873,8 +1978,11 @@ def create_app(settings: Settings) -> FastAPI:
             passwords.check_new(body.password, login=login)
         except passwords.PasswordError as error:
             return _error(400, str(error), "invalid")
-        with state.guard.one_at_a_time(login):
-            waiting = state.guard.wait(login, address)
+        # Recovery codes are counted apart from passwords: wrong passwords from elsewhere must not
+        # keep the person from the one thing that gets them back in, nor the other way round.
+        counted = f"recover:{login}"
+        with state.guard.one_at_a_time(counted):
+            waiting = state.guard.wait(counted, address)
             if waiting:
                 raise HTTPException(429, "Too many wrong tries. Wait a little and try again.", headers={"Retry-After": str(waiting)})
             account = state.accounts.account_named(login)
@@ -1882,10 +1990,11 @@ def create_app(settings: Settings) -> FastAPI:
             # The code is checked the same way whether or not the name exists, so timing says nothing.
             matched = state.accounts.use_recovery_code(account["id"] if usable else "no-such-account", body.code)
             if not usable or not matched:
-                state.guard.failed(login, address)
+                state.guard.failed(counted, address)
                 raise HTTPException(401, "That sign-in name and recovery code do not match.")
-            state.guard.succeeded(login, address)
-        state.accounts.set_password(account["id"], passwords.hash_password(body.password))
+            state.guard.succeeded(counted, address)
+        # The code is used up now, so this waits its turn rather than answering "busy".
+        state.accounts.set_password(account["id"], passwords.hash_password(body.password, patient=True))
         state.accounts.end_sessions(account["id"])
         state.tokens.revoke_where(account=account["id"])
         return start_session(request, state, account)
@@ -1914,11 +2023,19 @@ def create_app(settings: Settings) -> FastAPI:
             passwords.check_new(body.password, login=account["login"])
         except passwords.PasswordError as error:
             return _error(400, str(error), "invalid")
+        # Hashed before the link is used up: a server too busy to hash answers so with the link intact.
+        hashed = passwords.hash_password(body.password)
+        in_use = state.accounts.password_hash(account["id"]) is not None or bool(state.accounts.identities_of(account["id"]))
         if state.accounts.setup_account(body.code, spend=True) is None:
             return _error(404, "This setup link has been used or has run out. Ask for a new one.", "not_found")
-        state.accounts.set_password(account["id"], passwords.hash_password(body.password))
+        state.accounts.set_password(account["id"], hashed)
         state.accounts.rename(account["id"], body.name)
         state.accounts.end_sessions(account["id"])
+        if in_use:
+            # A link for an account already in use is a reset by whoever runs the server: like a
+            # recovery, it ends every other way in that the old password had made.
+            state.tokens.revoke_where(account=account["id"])
+        state.accounts.end_app_signins(account["id"])
         codes = state.accounts.new_recovery_codes(account["id"])
         return start_session(request, state, state.accounts.account(account["id"]), recovery_codes=codes)
 
@@ -2053,6 +2170,7 @@ def create_app(settings: Settings) -> FastAPI:
         except passwords.PasswordError as error:
             return _error(400, str(error), "invalid")
         state.accounts.set_password(person["account"], passwords.hash_password(body.new))
+        state.accounts.end_app_signins(person["account"])
         return answer({"status": "changed", "signed_out_elsewhere": state.accounts.end_sessions(person["account"], keep=person["session"])})
 
     @app.post("/v1/account/recovery-codes", tags=["account"])
@@ -2506,8 +2624,12 @@ def create_app(settings: Settings) -> FastAPI:
             passwords.check_new(body.password, login=login)
             if state.accounts.account(login) is not None:
                 raise accounts.AccountError("already taken")
-            # Only a request that would really make an account uses up the hourly allowance.
-            if not state.signups.allow():
+            # Hashed before anything is made, so "busy" leaves nothing half-made behind.
+            hashed = passwords.hash_password(body.password)
+            # Only a request that would really make an account uses up an allowance: first this
+            # address's own, then the one everyone shares.
+            address = client_address(request)
+            if (address != SHARED and not state.signups_from.allow(address)) or not state.signups.allow():
                 raise HTTPException(429, "Too many new accounts just now. Try again later.", headers={"Retry-After": "600"})
             made = state.accounts.add_account(login, body.name)
         except passwords.PasswordError as error:
@@ -2516,7 +2638,7 @@ def create_app(settings: Settings) -> FastAPI:
             return _error(409 if "already" in str(error) else 400, "That sign-in name is taken." if "already" in str(error) else str(error),
                           "conflict" if "already" in str(error) else "invalid")
         create_vault(state.accounts, body.vault_name.strip() or "My notes", made["id"])
-        state.accounts.set_password(made["id"], passwords.hash_password(body.password))
+        state.accounts.set_password(made["id"], hashed)
         return start_session(request, state, made, recovery_codes=state.accounts.new_recovery_codes(made["id"]))
 
     @app.get("/v1/status", tags=["service"], dependencies=[require("read")])
@@ -2620,6 +2742,9 @@ def create_app(settings: Settings) -> FastAPI:
         """A picture, PDF or plain-text file, served so the browser shows it; other kinds are refused."""
         try:
             meta, attachment = note_attachment(S(request), note_id, attachment_id)
+            busy = held_download(request, int(attachment.get("size") or 0))
+            if busy is not None:
+                return busy
             with S(request).beside_vault():
                 data = core.attachment_original_bytes(meta, attachment)
         except core.KaalError as error:
@@ -2627,9 +2752,6 @@ def create_app(settings: Settings) -> FastAPI:
         media_type = viewable_type(attachment.get("name", ""), data)
         if media_type is None:
             return _error(415, "This kind of file can only be downloaded.", "invalid")
-        busy = held_download(request, len(data))
-        if busy is not None:
-            return busy
         headers = {
             "Content-Disposition": f"inline; filename*=UTF-8''{quote(attachment.get('name', 'file'), safe='')}",
             "X-Content-Type-Options": "nosniff",
@@ -2643,10 +2765,15 @@ def create_app(settings: Settings) -> FastAPI:
     @app.get("/v1/notes/{note_id}/attachments/{attachment_id}/preview", tags=["notes"], dependencies=[require("read", "reveal")], response_class=Response)
     def preview_attachment(request: Request, note_id: str, attachment_id: str, page: int = Query(1, ge=1, le=20)):
         """A picture of a note's file, shrunk for the page: an image itself, or a PDF's page."""
+        busy = held_download(request, 0, request.app.state.kaal.previews)
+        if busy is not None:
+            return busy
         try:
             meta, attachment = note_attachment(S(request), note_id, attachment_id)
             with S(request).beside_vault():
                 media_type, data = core.attachment_preview(meta, attachment, page)
+        except tools.Busy:
+            return _error(503, "Kaal is drawing other files just now. Try again in a moment.", "busy", headers={"Retry-After": "3"})
         except core.KaalError as error:
             return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind, error.details)
         return Response(content=data, media_type=media_type, headers={"X-Content-Type-Options": "nosniff"})
@@ -2780,6 +2907,9 @@ def create_app(settings: Settings) -> FastAPI:
     @app.get("/v1/medical/receipts/{note_id}/attachments/{attachment_id}/preview", tags=["medical"], dependencies=[require("read", "reveal")], response_class=Response)
     def medical_preview(request: Request, note_id: str, attachment_id: str, page: int = Query(1, ge=1, le=20)):
         state = S(request)
+        busy = held_download(request, 0, request.app.state.kaal.previews)
+        if busy is not None:
+            return busy
         try:
             with state.in_vault():
                 meta = core.medical_receipt_meta(core.load_index(), note_id)
@@ -2789,6 +2919,8 @@ def create_app(settings: Settings) -> FastAPI:
             # Rendering is slow and needs no lock: it works on a private copy.
             with state.beside_vault():
                 media_type, data = core.attachment_preview(meta, matches[0], page)
+        except tools.Busy:
+            return _error(503, "Kaal is drawing other files just now. Try again in a moment.", "busy", headers={"Retry-After": "3"})
         except core.KaalError as error:
             return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind, error.details)
         return Response(content=data, media_type=media_type)

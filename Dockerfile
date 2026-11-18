@@ -26,6 +26,7 @@ ENV KAAL_HOME=/srv/kaal \
     KAAL_KEY_PROVIDER=file \
     KAAL_KEY_FILE=/etc/kaal/master.key \
     KAAL_CONFIG=/nonexistent \
+    PYTHONNOUSERSITE=1 \
     KAAL_LOCAL=1 \
     KAAL_BIND=0.0.0.0 \
     KAAL_ALLOW_NON_LOOPBACK=1 \

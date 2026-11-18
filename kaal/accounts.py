@@ -612,6 +612,11 @@ class AccountStore:
                        (_sha(code), account_id, vault_id, challenge, _now(), _later(minutes=APP_SIGNIN_MINUTES), kind))
         return code
 
+    def end_app_signins(self, account_id: str) -> int:
+        """Forget every app sign-in this account approved that has not been collected yet."""
+        with self._db(write=True) as db:
+            return db.execute("DELETE FROM app_signins WHERE account_id = ?", (account_id,)).rowcount
+
     def finish_app_signin(self, code: str, verifier: str, kind: str = "app") -> dict[str, Any] | None:
         """Whose sign-in a code is, used up by asking. None when the code is unknown,
         too old, or the app does not hold the secret the challenge was made from."""

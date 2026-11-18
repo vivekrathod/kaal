@@ -64,7 +64,7 @@ def test_the_visitor_is_found_behind_trusted_proxies_only(house):
     direct = house.build()
     assert server.client_address(request_for(direct, "127.0.0.1", "198.51.100.9")) == "198.51.100.9"          # Tailscale serve on this machine
     assert server.client_address(request_for(direct, "172.18.0.3", "198.51.100.9")) == "172.18.0.3"          # not trusted by default
-    assert server.client_address(request_for(direct, "2001:db8:1:2:3:4:5:6")) == "2001:db8:1:2::/64"
+    assert server.client_address(request_for(direct, "2001:db8:1:2:3:4:5:6")) == "2001:db8:1::/56"
     assert server.client_address(request_for(direct, "not-an-address")) == "unknown"
     with pytest.raises(ValueError):
         server.trusted_proxy_list("10.0.0.0/8, nonsense")
@@ -537,6 +537,7 @@ def test_approving_an_app_needs_a_sign_in_just_made_or_the_password(house, monke
 def test_tokens_cannot_be_made_and_revoked_without_end(house):
     sam = house.signed_in("sam")
     vault = sam.get("/v1/session").json()["result"]["vault"]["id"]
+    house.state.proofs = server.RateLimiter(10_000)                                   # this test is about tokens, not how often a password is proved
     answers = []
     for index in range(server.TOKENS_PER_HOUR + 1):
         made = sam.post("/v1/account/tokens", json={"name": f"made-up-{index}", "scopes": ["read"], "vault": vault, "password": GOOD})
@@ -923,3 +924,246 @@ def test_ordinary_requests_are_never_counted_as_large_ones_in_flight():
 
     assert asyncio.run(many()) == [200] * 24
     assert asked == [] and limited._uploading == {}                                   # nobody was even asked who they were
+
+
+# --- what a reading program says, and waiting for a turn
+
+def test_a_programs_complaints_are_not_kept_and_what_it_prints_is_bounded(monkeypatch):
+    noisy = tools.run(["/bin/sh", "-c", "yes made-up-complaint | head -c 30000000 >&2; echo made-up"], timeout=30, text=True)
+    assert noisy is not None and noisy.stdout.strip() == "made-up" and noisy.stderr == ""
+    monkeypatch.setenv("KAAL_FILE_OUTPUT_MB", "1")
+    chatty = tools.run(["/bin/sh", "-c", "yes made-up | head -c 20000000"], timeout=30)
+    # Cut off by the system, not read into memory (shells count the limit in blocks of 512 or 1024 bytes).
+    assert chatty is not None and len(chatty.stdout) <= 2 * 1024 * 1024 + 4096
+
+
+def test_no_turn_in_time_is_busy_not_an_empty_file(monkeypatch):
+    monkeypatch.setattr(tools, "_pools", {})
+    monkeypatch.setattr(tools, "PREVIEW_WAIT_SECONDS", 0.2)
+    release = threading.Event()
+    holders = [threading.Thread(target=lambda: tools.run(["/bin/sh", "-c", "sleep 3"], timeout=10, pool="previews")) for _ in range(2)]
+    for holder in holders:
+        holder.start()
+    time.sleep(0.5)
+    started = time.monotonic()
+    with pytest.raises(tools.Busy):
+        tools.run(["/bin/echo", "made-up"], timeout=5, pool="previews")
+    assert time.monotonic() - started < 2
+    # The other pool is not held up by it, a turn already held needs no second one, and patience waits.
+    assert tools.run(["/bin/echo", "made-up"], timeout=5, text=True).stdout.strip() == "made-up"
+    assert tools.run(["/bin/echo", "made-up"], timeout=5, text=True, pool=None).stdout.strip() == "made-up"
+    with tools.patient(10):
+        assert tools.run(["/bin/echo", "made-up"], timeout=5, text=True, pool="previews").stdout.strip() == "made-up"
+    release.set()
+    for holder in holders:
+        holder.join()
+
+
+def _note_with_file(client, name="made-up.txt", data=b"made-up words"):
+    note = client.post("/v1/library/notes", json={"title": "Made-up", "body": "x"}).json()["result"]
+    note_id = note.get("id") or note["note"]["id"]
+    assert client.post(f"/v1/library/notes/{note_id}/attachments", files={"file": (name, data, "application/octet-stream")}).status_code == 200
+    shown = client.get(f"/v1/library/notes/{note_id}").json()["result"]
+    return note_id, (shown.get("note") or shown)["attachments"][0]["id"]
+
+
+def test_a_picture_of_a_file_is_answered_busy_rather_than_queued(house, monkeypatch):
+    sam = house.signed_in("sam")
+    note_id, attachment = _note_with_file(sam)
+    path = f"/v1/notes/{note_id}/attachments/{attachment}/preview"
+
+    def no_turn(*_args, **_kwargs):
+        raise tools.Busy()
+
+    monkeypatch.setattr(kaal, "attachment_preview", no_turn)
+    busy = sam.get(path)
+    assert busy.status_code == 503 and busy.json()["kind"] == "busy" and busy.headers["retry-after"]
+    # And one person has only a few being drawn at a time.
+    caller = f"account:{house.store.account('sam')['id']}"
+    held = [house.state.previews.take(caller, 0) for _ in range(3)]
+    assert all(held) and sam.get(path).status_code == 503
+    for ticket in held:
+        house.state.previews.give(ticket)
+    assert house.state.previews._by_caller == {}
+
+
+def test_one_person_holds_at_most_a_quarter_of_the_room_for_downloads():
+    downloads = server.Downloads(limit_bytes=1000)
+    first = downloads.take("mallory", 200)
+    assert first and downloads.take("mallory", 100) is None                           # 300 would be more than her quarter
+    assert downloads.take("mallory", 40) is not None and downloads.take("vic", 200) is not None
+    downloads.give(first)
+    assert downloads.take("mallory", 100) is not None
+
+
+def test_a_token_is_counted_with_the_person_who_made_it(house):
+    sam = house.signed_in("sam")
+    vault = sam.get("/v1/session").json()["result"]["vault"]["id"]
+    note_id, attachment = _note_with_file(sam)
+    secret = sam.post("/v1/account/tokens", json={"name": "made-up", "scopes": ["read", "reveal"], "vault": vault, "password": GOOD}).json()["result"]["secret"]
+    caller = f"account:{house.store.account('sam')['id']}"
+    held = [house.state.downloads.take(caller, 1) for _ in range(server.Downloads.PER_CALLER)]
+    script = house.visitor(Authorization=f"Bearer {secret}")
+    assert script.get(f"/v1/notes/{note_id}/attachments/{attachment}/content").status_code == 503
+    for ticket in held:
+        house.state.downloads.give(ticket)
+    assert script.get(f"/v1/notes/{note_id}/attachments/{attachment}/content").status_code == 200
+
+
+def test_a_client_that_stops_taking_its_answer_is_given_up_on(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(server, "SEND_IDLE_SECONDS", 0.2)
+    given_back = []
+
+    async def inner(scope, receive, send):
+        scope["kaal_held"].append(lambda: given_back.append("ticket"))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"0" * (1024 * 1024)})
+
+    sizes = []
+
+    async def stalling_send(message):
+        if message["type"] == "http.response.body":
+            sizes.append(len(message["body"]))
+            if len(sizes) == 2:
+                await asyncio.sleep(3600)                                           # the client takes no more
+
+    async def go():
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await server.HeldDownloadsMiddleware(inner)({"type": "http", "method": "GET", "path": "/"}, receive, stalling_send)
+
+    started = time.monotonic()
+    asyncio.run(go())
+    assert time.monotonic() - started < 5 and given_back == ["ticket"]
+    assert sizes == [server.SEND_PIECE_BYTES] * 2                                    # handed over a piece at a time
+
+
+def test_a_request_waits_only_so_long_for_a_busy_vault(house, monkeypatch):
+    monkeypatch.setattr(server, "VAULT_WAIT_SECONDS", 0.2)
+    sam = house.signed_in("sam")
+    vault = house.state.vaults.get(sam.get("/v1/session").json()["result"]["vault"]["id"])
+    with vault.request_lock:                                                          # as if a slow change were under way
+        started = time.monotonic()
+        busy = sam.get("/v1/library/notes")
+        assert busy.status_code == 503 and time.monotonic() - started < 3
+    assert sam.get("/v1/library/notes").status_code == 200
+
+
+def test_a_receipt_that_never_got_its_turn_stays_waiting(house, monkeypatch):
+    app = house.build(background_extraction=True)
+    made = app.state.kaal.accounts.add_account("sam")
+    server.create_vault(app.state.kaal.accounts, "My notes", made["id"])
+    sam = house.visitor(application=app)
+    assert sam.post("/v1/setup", json={"code": app.state.kaal.accounts.new_setup_code("sam"), "password": GOOD}).status_code == 200
+    saved = sam.post("/v1/medical/receipts", files={"file": ("receipt.txt", b"Amount paid: $40.00\n", "text/plain")})
+    assert saved.status_code == 200, saved.text
+    vault = app.state.kaal.vaults.get(sam.get("/v1/session").json()["result"]["vault"]["id"])
+
+    def no_turn(*_args, **_kwargs):
+        raise tools.Busy()
+
+    real = kaal.extract_attachment_markdown
+    monkeypatch.setattr(kaal, "extract_attachment_markdown", no_turn)
+    app.state.kaal.worker.drain()
+    with kaal.use_vault(vault):
+        assert len(kaal.pending_receipt_ids()) == 1                                   # not recorded as read with nothing in it
+    monkeypatch.setattr(kaal, "extract_attachment_markdown", real)
+    app.state.kaal.worker.drain()
+    with kaal.use_vault(vault):
+        assert kaal.pending_receipt_ids() == []
+
+
+# --- everyone behind one address, and addresses that are really one visitor
+
+def test_a_proxy_that_hides_who_is_asking_makes_everyone_shared_and_nobody_is_locked_out(house):
+    behind = house.build(trusted_proxies=server.trusted_proxy_list("private"))
+    assert server.client_address(request_for(behind, "172.18.0.3", "172.18.0.1")) == server.SHARED
+    assert server.client_address(request_for(behind, "172.18.0.3")) == server.SHARED
+    direct = house.build()
+    assert server.client_address(request_for(direct, "127.0.0.1")) == server.SHARED
+    # A stranger's wrong tries for other names, from behind the same proxy, are not held against a right password.
+    guard = server.SignInGuard()
+    for index in range(40):
+        guard.failed(f"made-up-{index}", server.SHARED)
+    for _ in range(10):
+        guard.failed("sam", server.SHARED)
+    assert guard.wait("sam", server.SHARED) == 0
+    # The same from a real address is slowed, as before.
+    for _ in range(6):
+        guard.failed("sam", "203.0.113.9")
+    assert guard.wait("sam", "203.0.113.9") > 0 and guard.wait("sam", "198.51.100.1") == 0
+
+
+def test_every_line_of_the_forwarded_header_counts_and_a_port_is_not_part_of_an_address(house):
+    direct = house.build()
+    scope = {"type": "http", "method": "GET", "path": "/", "client": ("127.0.0.1", 1), "app": direct, "query_string": b"",
+             "headers": [(b"x-forwarded-for", b"203.0.113.50"), (b"x-forwarded-for", b"198.51.100.66")]}
+    assert server.client_address(server.Request(scope)) == "198.51.100.66"            # the proxy's own line, not the visitor's claim
+    assert server.client_address(request_for(direct, "127.0.0.1", "198.51.100.90:51234")) == "198.51.100.90"
+    assert server.client_address(request_for(direct, "127.0.0.1", "[2001:db8:1:2::9]:443")) == "2001:db8:1::/56"
+
+
+def test_an_addresss_wrong_tries_are_forgotten_after_a_while(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    guard = server.SignInGuard()
+    for index in range(20):
+        guard.failed(f"made-up-{index}", "203.0.113.9")                               # a household's typos
+        clock[0] += 3 * 3600
+    guard.failed("sam", "203.0.113.9")
+    assert guard.wait("sam", "203.0.113.9") == 0                                      # each was long forgotten by the next
+    for index in range(21):
+        guard.failed(f"made-up-{index}", "203.0.113.9")                               # the same number at once is still slowed
+    assert guard.wait("alex", "203.0.113.9") > 0
+
+
+def test_wrong_passwords_do_not_keep_someone_from_their_recovery_code(house):
+    sam = house.signed_in("sam")
+    code = sam.post("/v1/account/recovery-codes", json={"password": GOOD}).json()["result"]["recovery_codes"][0]
+    stranger = house.visitor("198.51.100.77")
+    for _ in range(8):
+        stranger.post("/v1/sign-in", json={"login": "sam", "password": "a wrong made-up password"})
+    assert stranger.post("/v1/sign-in", json={"login": "sam", "password": GOOD}).status_code == 429
+    recovered = stranger.post("/v1/sign-in/recover", json={"login": "sam", "code": code, "password": "another made-up password 7"})
+    assert recovered.status_code == 200, recovered.text
+
+
+def test_a_busy_server_does_not_use_up_a_setup_link_or_half_make_an_account(house, monkeypatch):
+    house.store.add_account("sam")
+    code = house.store.new_setup_code("sam")
+    house.store.put("signup", "open")
+
+    def busy(*_args, **_kwargs):
+        raise passwords.PasswordBusy()
+
+    visitor = house.visitor("198.51.100.5")
+    with monkeypatch.context() as patched:
+        patched.setattr(passwords, "hash_password", busy)
+        assert visitor.post("/v1/setup", json={"code": code, "password": GOOD}).status_code == 503
+        assert visitor.post("/v1/sign-up", json={"login": "newcomer", "password": GOOD}).status_code == 503
+    assert house.store.account("newcomer") is None
+    assert visitor.post("/v1/setup", json={"code": code, "password": GOOD}).status_code == 200      # the link was not used up
+
+
+def test_one_address_makes_only_a_few_accounts_an_hour(house):
+    house.store.put("signup", "open")
+    here = house.visitor("198.51.100.5")
+    answers = [here.post("/v1/sign-up", json={"login": f"made-up-{index}", "password": GOOD}).status_code for index in range(4)]
+    assert answers == [200, 200, 200, 429]
+    assert house.visitor("198.51.100.6").post("/v1/sign-up", json={"login": "made-up-elsewhere", "password": GOOD}).status_code == 200
+
+
+def test_proving_ones_password_over_and_over_is_limited_even_when_right(house):
+    sam = house.signed_in("sam")
+    answers = [sam.post("/v1/account/recovery-codes", json={"password": GOOD}).status_code for _ in range(8)]
+    assert answers[:6] == [200] * 6 and answers[6:] == [429, 429]
+    assert house.visitor("198.51.100.9").post("/v1/sign-in", json={"login": "sam", "password": GOOD}).status_code == 200   # signing in is not counted here
+
+
+def test_changing_the_password_ends_an_app_sign_in_not_yet_collected(house):
+    sam = house.signed_in("sam")
+    code = sam.post("/v1/account/app-sign-ins", json={"challenge": "A" * 43}).json()["result"]["code"]
+    assert sam.post("/v1/account/password", json={"current": GOOD, "new": "another made-up password 7"}).status_code == 200
+    assert house.visitor("198.51.100.9").post("/v1/app-sign-ins", json={"code": code, "verifier": "made-up-verifier-" + "x" * 30, "device": "made-up"}).status_code == 401

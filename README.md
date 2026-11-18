@@ -388,18 +388,27 @@ proxy. What it does about strangers:
 - The routes that need no sign-in answer each address only so often
   (`KAAL_SIGN_IN_PER_MINUTE`, 30), and take small requests only. Wrong
   passwords are slowed for the name and the address together, so guessing from
-  one place does not lock the real person out from another; only a few
-  passwords are checked at once (`KAAL_PASSWORD_CHECKS`, 4), and more are told
-  to try again.
+  one place does not lock the real person out from another. Very many
+  addresses guessing one name together are slowed to about a try a minute,
+  which can also make the real person wait up to a minute at a time; recovery
+  codes are counted apart, so they still work. Only a few passwords are
+  checked at once (`KAAL_PASSWORD_CHECKS`, 4), and more are told to try again.
 - The visitor's address is taken from `X-Forwarded-For` only when the request
   comes from a proxy named in `KAAL_TRUSTED_PROXIES` (this machine by default;
-  `private` for a proxy in a container; `none` to believe nobody).
+  `private` for a proxy in a container; `none` to believe nobody). An IPv6
+  visitor is counted by their /56. A proxy of your own must send that header:
+  where it does not, Kaal cannot tell visitors apart, holds nothing against
+  the one address it sees, and limits them all together instead.
 - The session cookie is tied to the one host (`__Host-`), browsers are told to
   stay on HTTPS, and nothing a visitor sends is written to the log as they
   typed it.
-- Files are read by pdftotext, pdftoppm and tesseract with a time limit and a
-  memory limit (`KAAL_FILE_MEMORY_MB`, 1024), a few at a time
-  (`KAAL_FILE_JOBS`, 2), and with nothing of the server's environment.
+- Files are read by pdftotext, pdftoppm and tesseract with a time limit, a
+  memory limit (`KAAL_FILE_MEMORY_MB`, 1024) and a limit on what they write
+  (`KAAL_FILE_OUTPUT_MB`, 256), a few at a time (`KAAL_FILE_JOBS`, 2), with
+  nothing of the server's environment, and nothing they complain about is
+  kept. A request that cannot have a turn within seconds is told the server is
+  busy rather than left waiting; so is one behind a slow change to its vault,
+  and a client that stops taking an answer is given up on.
 - A vault other than the first may hold `KAAL_VAULT_QUOTA_MB` (10240; 0 for no
   limit), and nothing new is stored, nor a copy of a vault written, once the
   disk has less than `KAAL_FREE_SPACE_MB` (1024) free. A person may own

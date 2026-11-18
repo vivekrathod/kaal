@@ -20,7 +20,7 @@ protects, what stays readable, and what the server records. In short:
   as nothing without the key, which is never stored beside the data.
 - **Strangers on the network** reach only the sign-in routes, which are
   limited per address, take small requests, and slow down password guessing
-  without letting it lock the real person out.
+  without letting one visitor lock the real person out.
 - **Someone signed in** is held to the vaults they belong to and their role in
   each; a token is held to its scopes and to the role of whoever made it. An
   administrator manages people and settings but cannot read a vault they do
@@ -39,7 +39,12 @@ protects, what stays readable, and what the server records. In short:
   system or the container image updated.
 - **A determined flood.** The limits keep one visitor from getting in the way
   of the rest. Absorbing a large attack belongs to the proxy or network in
-  front.
+  front. Very many addresses guessing one person's password together can make
+  that person wait up to a minute at a time to sign in; their recovery codes
+  still work.
+- **People who share a vault with you.** Reading a file someone attached still
+  happens while the vault is held, for up to a few minutes for a file made to
+  be slow; others using that vault are told it is busy meanwhile.
 - **A stolen device that is signed in**, until its session or token is ended
   (Settings, in the web app, or `kaal-server token revoke`).
 - **The `read` scope as a privacy boundary for a note's wording.** It hides
