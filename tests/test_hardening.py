@@ -102,9 +102,9 @@ def test_many_addresses_together_slow_a_name_by_at_most_a_minute():
     guard = server.SignInGuard()
     for n in range(60):
         guard.failed("sam", f"198.51.100.{n}")
-    assert 0 < guard.wait("sam", "192.0.2.1") <= 60
-    guard.succeeded("sam", "192.0.2.1")
-    assert guard.wait("sam", "192.0.2.1") == 0
+    assert 0 < guard.wait("sam", "198.51.100.59") <= 60                               # the last of them to try, with one wrong try of its own
+    guard.succeeded("sam", "198.51.100.59")
+    assert guard.wait("sam", "198.51.100.59") == 0
 
 
 def test_flooding_the_guard_with_names_does_not_free_a_locked_one(monkeypatch):
@@ -240,7 +240,10 @@ def test_a_browser_signed_in_before_the_change_is_moved_to_the_new_cookie_once(h
 
 
 def test_https_answers_tell_browsers_to_stay_on_https(house, tmp_path):
-    assert house.visitor().get("/v1/health").headers["Strict-Transport-Security"] == "max-age=31536000"
+    # Only when asked for: the header covers every port of the host name, which may serve other things over http.
+    asked = house.build(hsts=True)
+    assert house.visitor(application=asked).get("/v1/health").headers["Strict-Transport-Security"] == "max-age=31536000"
+    assert house.visitor().get("/v1/health").headers["Strict-Transport-Security"] == "max-age=0"     # and a browser told so earlier forgets it
     insecure = house.build(cookie_secure=False)
     assert "Strict-Transport-Security" not in TestClient(insecure).get("/v1/health").headers
 
@@ -342,8 +345,8 @@ def test_a_vault_that_is_full_refuses_something_new_but_can_still_be_tidied(hous
     note_id = note.get("id") or note["note"]["id"]
     assert sam.post(f"/v1/library/notes/{note_id}/attachments", files=big).status_code == 200
     full = sam.post(f"/v1/library/notes/{note_id}/attachments", files=big)
-    assert full.status_code == 413 and "full" in full.json()["error"]
-    assert sam.post("/v1/library/notes", json={"title": "One more", "body": "x" * 60_000}).status_code == 413
+    assert full.status_code == 507 and "full" in full.json()["error"]              # not "too large": the clients show this message as written
+    assert sam.post("/v1/library/notes", json={"title": "One more", "body": "x" * 60_000}).status_code == 507
     # Reading, and moving things to the Trash, still work.
     assert sam.get("/v1/library/notes").status_code == 200
     assert sam.post(f"/v1/library/notes/{note_id}/trash").status_code == 200
@@ -357,7 +360,7 @@ def test_the_first_vault_and_a_server_without_a_limit_have_no_quota(house):
     other = SimpleNamespace(root=house.home / "elsewhere")
     with pytest.raises(server.HTTPException) as refused:
         server._room_checked(request, tight.state.kaal, other)
-    assert refused.value.status_code == 413
+    assert refused.value.status_code == 507
     server._room_checked(request, house.build(vault_quota_bytes=0).state.kaal, other)  # 0 means no limit
 
 
@@ -1167,3 +1170,87 @@ def test_changing_the_password_ends_an_app_sign_in_not_yet_collected(house):
     code = sam.post("/v1/account/app-sign-ins", json={"challenge": "A" * 43}).json()["result"]["code"]
     assert sam.post("/v1/account/password", json={"current": GOOD, "new": "another made-up password 7"}).status_code == 200
     assert house.visitor("198.51.100.9").post("/v1/app-sign-ins", json={"code": code, "verifier": "made-up-verifier-" + "x" * 30, "device": "made-up"}).status_code == 401
+
+
+# --- what the last critics found
+
+def test_what_goes_into_a_vaults_index_has_a_length(house):
+    sam = house.signed_in("sam")
+    long = "x" * 5000
+    assert sam.post("/v1/notes", json={"title": "Made-up", "body": "x", "tags": [long]}).status_code == 400
+    assert sam.post("/v1/library/notes", json={"title": "Made-up", "body": "x", "tags": ["made-up", long]}).status_code == 400
+    assert sam.post("/v1/medical/people", json={"add": [long]}).status_code == 400
+    assert sam.patch("/v1/medical/receipts/made-up/fields", json={"fields": {"provider": long}}).status_code == 400
+    assert sam.post("/v1/captures", files={"file": ("made-up.txt", b"made-up", "text/plain")}, data={"source_title": "x" * 10_000}).status_code == 400
+    assert sam.post("/v1/notes", json={"title": "Made-up", "body": "x", "tags": ["made-up"]}).status_code == 200
+    with pytest.raises(kaal.KaalError):
+        kaal.parse_tags("made-up, " + long)
+
+
+def test_someone_from_a_new_place_always_has_a_first_try_whatever_others_have_done():
+    guard = server.SignInGuard()
+    for index in range(80):
+        guard.failed("sam", f"198.51.100.{index}")                                     # a crowd of addresses, all guessing one name
+    assert guard.wait("sam", "198.51.100.3") > 0                                      # each of them is slowed
+    assert guard.wait("sam", "203.0.113.200") == 0                                    # the person, from their own address, is not
+    guard.failed("sam", "203.0.113.200")
+    assert guard.wait("sam", "203.0.113.200") > 0                                     # until they too get it wrong
+
+
+def test_wrong_tries_from_elsewhere_do_not_stop_someone_signed_in_from_proving_who_they_are(house):
+    sam = house.signed_in("sam")
+    for index in range(60):
+        house.state.guard.failed("sam", f"198.51.100.{index}")
+    assert sam.post("/v1/account/recovery-codes", json={"password": GOOD}).status_code == 200
+    # Nothing typed is not a wrong try; a wrong one counts against the session, not the address.
+    vault = sam.get("/v1/session").json()["result"]["vault"]["id"]
+    for _ in range(3):
+        assert sam.post("/v1/account/tokens", json={"name": "made-up", "scopes": ["read"], "vault": vault}).status_code == 403
+    assert sam.post("/v1/account/recovery-codes", json={"password": "not it"}).status_code == 403
+    assert house.state.guard.wait("alex", "203.0.113.7") == 0 and not any(key[0] == "from" and key[1] == "203.0.113.7" for key in house.state.guard._seen)
+
+
+def test_a_sign_in_service_offered_again_at_another_address_keeps_nobodys_connection(house):
+    sam = house.store.add_account("sam")
+    house.store.put_service("code", "Made-up Code", "https://code.example", "made-up-client", "made-up sealed secret")
+    house.store.connect_identity(sam["id"], "code", "4821")
+    house.store.remove_service("code")
+    assert house.store.identities_of(sam["id"])                                       # kept while it is away
+    house.store.put_service("code", "Made-up Code", "https://code.example", "made-up-client", "made-up sealed secret")
+    assert house.store.identities_of(sam["id"])                                       # and when it returns at the same address
+    house.store.remove_service("code")
+    house.store.put_service("code", "Made-up Code", "https://mallory.example", "made-up-client", "made-up sealed secret")
+    assert house.store.identities_of(sam["id"]) == [] and house.store.identity_account("code", "4821") is None
+
+
+def test_devices_on_a_private_ipv6_network_are_each_a_visitor(house):
+    direct = house.build()
+    one = server.client_address(request_for(direct, "127.0.0.1", "fd7a:115c:a1e0::9a01:1234"))
+    other = server.client_address(request_for(direct, "127.0.0.1", "fd7a:115c:a1e0::5b02:9f10"))
+    assert one != other and "/" not in one
+
+
+def test_a_request_that_only_declares_a_large_body_does_not_make_the_server_collect(monkeypatch):
+    import asyncio
+
+    collected = []
+    monkeypatch.setattr(server.gc, "collect", lambda: collected.append(1))
+
+    async def inner(scope, receive, send):
+        await server._send_json(send, 404, {"error": "made-up"})
+
+    limited = server.BodyLimitMiddleware(inner, 100 * 1024 * 1024, credentials=lambda headers: "token:made-up", full=lambda needed: False)
+
+    async def ask():
+        async def receive():
+            await asyncio.sleep(3600)
+
+        async def send(message):
+            pass
+
+        await limited({"type": "http", "method": "POST", "path": "/v1/nowhere", "headers": [(b"content-length", b"2000000")]}, receive, send)
+
+    for _ in range(20):
+        asyncio.run(ask())
+    time.sleep(0.2)
+    assert collected == []

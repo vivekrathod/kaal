@@ -95,6 +95,8 @@ if [ -n "$mode" ]; then
         echo "KAAL_DOMAIN=$domain"
         echo "KAAL_LISTEN=$listen"
         echo "KAAL_COOKIE_SECURE=$secure"
+        # A domain of its own serves nothing over plain http, so browsers are told to stay on https.
+        echo "KAAL_HSTS=$([ "$mode" = domain ] && echo 1 || echo 0)"
         echo "COMPOSE_PROFILES=$profiles"
         [ -z "$image" ] || echo "KAAL_IMAGE=$image"
     } > .env
@@ -153,5 +155,6 @@ DONE
 fi
 case "$(sed -n 's/^COMPOSE_PROFILES=//p' .env)$(sed -n 's/^KAAL_COOKIE_SECURE=//p' .env)" in
 https*) printf '\nThe first visit can take a few seconds while the certificate for the domain is fetched.\n' ;;
-1) printf '\nKaal listens on 127.0.0.1:8765. Point your proxy at it; with Tailscale:\n\n  tailscale serve --bg 8765\n' ;;
+1) printf '\nKaal listens on 127.0.0.1:8765. Point your proxy at it; with Tailscale:\n\n  tailscale serve --bg 8765\n'
+   printf '\nA proxy of your own must pass on who is asking (the X-Forwarded-For header), or Kaal\ncannot tell visitors apart. Tailscale and Caddy do; for nginx add:\n\n  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n' ;;
 esac

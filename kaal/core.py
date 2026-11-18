@@ -542,8 +542,15 @@ def init_vault(args: argparse.Namespace) -> None:
     emit(result, indent=2)
 
 
+MAX_TAG_CHARS = 100
+
+
 def parse_tags(raw: str) -> list[str]:
-    return sorted({t.strip().lstrip("#") for t in raw.split(",") if t.strip()})
+    tags = sorted({t.strip().lstrip("#") for t in raw.split(",") if t.strip()})
+    # Tags live in the vault's index, which is read whole each time: a tag is a word or two, not a document.
+    if any(len(tag) > MAX_TAG_CHARS for tag in tags):
+        die(f"A tag is at most {MAX_TAG_CHARS} characters.")
+    return tags
 
 
 def sensitivity_label(requested: str | None = "auto") -> str:
@@ -965,7 +972,7 @@ SEARCH_PIECE_LIMIT = 400_000   # characters of one note or one file's text that 
 
 
 def search_memory_chars() -> int:
-    """How much decrypted text one vault keeps in memory for searching (KAAL_SEARCH_MEMORY_MB, 256).
+    """How much decrypted text, in bytes, one vault keeps in memory for searching (KAAL_SEARCH_MEMORY_MB, 256).
     Beyond it the text read longest ago is let go, and read again when it is next searched."""
     try:
         return max(1, int(os.environ.get("KAAL_SEARCH_MEMORY_MB") or 256)) * 1024 * 1024
@@ -980,7 +987,8 @@ def _forget_text(vault: Any, note_id: str) -> None:
 
 def _remember_text(vault: Any, note_id: str, stamp: Any, pieces: list[tuple[str, str, str]]) -> None:
     _forget_text(vault, note_id)
-    size = sum(len(text) for _where, _name, text in pieces)
+    # In bytes as held in memory: text with a single emoji in it takes four bytes a character.
+    size = sum(sys.getsizeof(text) for _where, _name, text in pieces)
     vault.text_cache[note_id] = (stamp, pieces)
     vault.text_sizes[note_id] = size
     vault.text_total += size

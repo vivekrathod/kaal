@@ -39,9 +39,9 @@ protects, what stays readable, and what the server records. In short:
   system or the container image updated.
 - **A determined flood.** The limits keep one visitor from getting in the way
   of the rest. Absorbing a large attack belongs to the proxy or network in
-  front. Very many addresses guessing one person's password together can make
-  that person wait up to a minute at a time to sign in; their recovery codes
-  still work.
+  front. Very many addresses guessing one person's password together are
+  slowed, and that person still gets their first try from an address of their
+  own; a typo then puts them in the same queue for up to a minute.
 - **People who share a vault with you.** Reading a file someone attached still
   happens while the vault is held, for up to a few minutes for a file made to
   be slow; others using that vault are told it is busy meanwhile.

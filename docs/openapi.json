@@ -129,6 +129,7 @@
         "properties": {
           "captured_at": {
             "default": "",
+            "maxLength": 64,
             "title": "Captured At",
             "type": "string"
           },
@@ -139,16 +140,19 @@
           },
           "source_title": {
             "default": "",
+            "maxLength": 4096,
             "title": "Source Title",
             "type": "string"
           },
           "source_url": {
             "default": "",
+            "maxLength": 4096,
             "title": "Source Url",
             "type": "string"
           },
           "title": {
             "default": "",
+            "maxLength": 500,
             "title": "Title",
             "type": "string"
           }
@@ -177,6 +181,7 @@
         "properties": {
           "captured_at": {
             "default": "",
+            "maxLength": 64,
             "title": "Captured At",
             "type": "string"
           },
@@ -187,16 +192,19 @@
           },
           "source_title": {
             "default": "",
+            "maxLength": 4096,
             "title": "Source Title",
             "type": "string"
           },
           "source_url": {
             "default": "",
+            "maxLength": 4096,
             "title": "Source Url",
             "type": "string"
           },
           "title": {
             "default": "",
+            "maxLength": 500,
             "title": "Title",
             "type": "string"
           }
@@ -216,6 +224,7 @@
           },
           "ids": {
             "items": {
+              "maxLength": 64,
               "type": "string"
             },
             "maxItems": 100,
@@ -357,6 +366,8 @@
           },
           "tags": {
             "items": {
+              "maxLength": 100,
+              "minLength": 1,
               "type": "string"
             },
             "maxItems": 100,
@@ -420,6 +431,8 @@
           },
           "tags": {
             "items": {
+              "maxLength": 100,
+              "minLength": 1,
               "type": "string"
             },
             "maxItems": 100,
@@ -489,6 +502,8 @@
           },
           "tags": {
             "items": {
+              "maxLength": 100,
+              "minLength": 1,
               "type": "string"
             },
             "maxItems": 100,
@@ -572,6 +587,7 @@
         "properties": {
           "add": {
             "items": {
+              "maxLength": 200,
               "type": "string"
             },
             "maxItems": 50,
@@ -580,6 +596,7 @@
           },
           "remove": {
             "items": {
+              "maxLength": 200,
               "type": "string"
             },
             "maxItems": 50,
@@ -650,6 +667,7 @@
         "properties": {
           "forget": {
             "items": {
+              "maxLength": 200,
               "type": "string"
             },
             "maxItems": 50,
@@ -683,9 +701,13 @@
         "properties": {
           "fields": {
             "additionalProperties": {
+              "maxLength": 500,
               "type": "string"
             },
             "maxProperties": 50,
+            "propertyNames": {
+              "maxLength": 60
+            },
             "title": "Fields",
             "type": "object"
           }
@@ -729,6 +751,7 @@
         "properties": {
           "ids": {
             "items": {
+              "maxLength": 64,
               "type": "string"
             },
             "maxItems": 100,
@@ -754,6 +777,7 @@
           },
           "ids": {
             "items": {
+              "maxLength": 64,
               "type": "string"
             },
             "maxItems": 100,
@@ -2082,7 +2106,7 @@
     },
     "/v1/app-sign-ins": {
       "post": {
-        "description": "An app collects the sign-in a browser approved for it. The session it is\ngiven is sent back as the ``kaal_session`` cookie, with ``X-Kaal-Request: 1``.",
+        "description": "An app collects the sign-in a browser approved for it. The session it is\ngiven is sent back in the ``X-Kaal-Session`` header, with ``X-Kaal-Request: 1``.",
         "operationId": "app_sign_in_finish_v1_app_sign_ins_post",
         "requestBody": {
           "content": {

@@ -389,19 +389,23 @@ proxy. What it does about strangers:
   (`KAAL_SIGN_IN_PER_MINUTE`, 30), and take small requests only. Wrong
   passwords are slowed for the name and the address together, so guessing from
   one place does not lock the real person out from another. Very many
-  addresses guessing one name together are slowed to about a try a minute,
-  which can also make the real person wait up to a minute at a time; recovery
-  codes are counted apart, so they still work. Only a few passwords are
-  checked at once (`KAAL_PASSWORD_CHECKS`, 4), and more are told to try again.
+  addresses guessing one name together are slowed to about a try a minute
+  between them, yet someone arriving from an address that has not got that
+  name wrong always has their first try; recovery codes, and proving a
+  password while already signed in, are counted apart. Only a few passwords
+  are checked at once (`KAAL_PASSWORD_CHECKS`, 4), and more are told to try
+  again.
 - The visitor's address is taken from `X-Forwarded-For` only when the request
   comes from a proxy named in `KAAL_TRUSTED_PROXIES` (this machine by default;
   `private` for a proxy in a container; `none` to believe nobody). An IPv6
   visitor is counted by their /56. A proxy of your own must send that header:
   where it does not, Kaal cannot tell visitors apart, holds nothing against
   the one address it sees, and limits them all together instead.
-- The session cookie is tied to the one host (`__Host-`), browsers are told to
-  stay on HTTPS, and nothing a visitor sends is written to the log as they
-  typed it.
+- The session cookie is tied to the one host (`__Host-`), and nothing a
+  visitor sends is written to the log as they typed it. With `KAAL_HSTS=1`
+  browsers are told to use HTTPS only for the host name, every port of it; the
+  installer sets that for a domain of Kaal's own, and it is off elsewhere,
+  since a name shared with other services over plain http would lose them.
 - Files are read by pdftotext, pdftoppm and tesseract with a time limit, a
   memory limit (`KAAL_FILE_MEMORY_MB`, 1024) and a limit on what they write
   (`KAAL_FILE_OUTPUT_MB`, 256), a few at a time (`KAAL_FILE_JOBS`, 2), with

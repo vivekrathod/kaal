@@ -33,13 +33,13 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -57,6 +57,10 @@ Sensitivity = Literal["auto", "sensitive", "public", "encrypted", "plaintext", "
 Title = Field(min_length=1, max_length=500)
 Body = Field(min_length=0, max_length=1_000_000)
 Short = Field(default="", max_length=4096)
+# Everything below ends up in a vault's index, which is read whole on every request: each has a length.
+Tag = Annotated[str, StringConstraints(min_length=1, max_length=core.MAX_TAG_CHARS)]
+Name = Annotated[str, StringConstraints(max_length=200)]
+Id = Annotated[str, StringConstraints(max_length=64)]
 
 
 class ServerConfigError(Exception):
@@ -128,6 +132,9 @@ class Settings:
     download_memory_bytes: int = 1024 * MiB
     # Nothing new is accepted, and no export is written, when the disk has less than this free (0: no floor).
     free_space_bytes: int = 1024 * MiB
+    # Tell browsers to use https only for this host name, for a year. It covers every port of the
+    # name, so it is for a name that serves nothing over plain http (KAAL_HSTS=1).
+    hsts: bool = False
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "Settings":
@@ -156,6 +163,7 @@ class Settings:
             vault_quota_bytes=max(0, int(env.get("KAAL_VAULT_QUOTA_MB") or 10 * 1024)) * MiB,
             download_memory_bytes=max(1, int(env.get("KAAL_DOWNLOAD_MEMORY_MB") or 1024)) * MiB,
             free_space_bytes=max(0, int(env.get("KAAL_FREE_SPACE_MB") or 1024)) * MiB,
+            hsts=(env.get("KAAL_HSTS") or "0").strip() == "1",
         )
 
 
@@ -204,6 +212,7 @@ def _is_trusted(address: str, listed: tuple[str, ...]) -> bool:
 
 
 SHARED = "shared"
+_OWN_IPV6 = ipaddress.ip_network("fc00::/7")
 
 
 def _bare(hop: str) -> str:
@@ -235,6 +244,10 @@ def client_address(request: Request) -> str:
     if parsed.version == 6:
         if parsed.ipv4_mapped is not None:
             return str(parsed.ipv4_mapped)
+        if parsed in _OWN_IPV6:
+            # A private network (a tailnet, a home's own range) gives each device one address
+            # out of a single block: there, each address is a visitor.
+            return str(parsed)
         return str(ipaddress.ip_network(f"{parsed}/56", strict=False))
     return str(parsed)
 
@@ -560,6 +573,7 @@ class BodyLimitMiddleware:
         self.full = full
         self._uploading: dict[str, int] = {}
         self._lock = threading.Lock()
+        self._collected = 0.0
 
     def _limit_for(self, scope: dict, headers: dict[bytes, bytes], declared: int | None) -> tuple[int, str]:
         """The most this request may send, and whose it is when it may be more than a stranger's."""
@@ -652,10 +666,14 @@ class BodyLimitMiddleware:
                         self._uploading[who] = left
                     else:
                         self._uploading.pop(who, None)
-                if not (finished and body_done):
+                if limit > JSON_BODY_BYTES and received > STRANGER_BODY_BYTES and not (finished and body_done):
                     # An upload cut off part-way leaves its temporary file open until the objects
-                    # holding it are collected; do that now rather than whenever it next happens.
-                    gc.collect()
+                    # holding it are collected. Do that soon, in a thread of its own (it can take a
+                    # moment, and must not hold up other requests), and not more than once in a while.
+                    now = time.monotonic()
+                    if now - self._collected > 5.0:
+                        self._collected = now
+                        threading.Thread(target=gc.collect, name="kaal-collect", daemon=True).start()
 
 
 async def _send_json(send: Callable, status: int, payload: dict) -> None:
@@ -880,10 +898,16 @@ class SignInGuard:
         return entry
 
     def wait(self, login: str, address: str = "") -> int:
-        """Seconds until this name may be tried again from this address; 0 means now."""
+        """Seconds until this name may be tried again from this address; 0 means now.
+
+        The wait for a name from everywhere applies only to an address that has itself got that
+        name wrong: someone arriving from a new place always has their first try, so a crowd of
+        addresses guessing a name cannot keep its owner out."""
         now = time.monotonic()
         with self._lock:
-            latest = max((self._entry(kind, key, now)[1] for kind, key in self._keys(login, address).items()), default=0.0)
+            keys = self._keys(login, address)
+            new_here = "pair" in keys and self._entry("pair", keys["pair"], now)[0] == 0
+            latest = max((self._entry(kind, key, now)[1] for kind, key in keys.items() if not (kind == "name" and new_here)), default=0.0)
         return max(0, int(latest - now + 0.999))
 
     def failed(self, login: str, address: str = "") -> None:
@@ -1178,7 +1202,7 @@ def _room_checked(request: Request, state: AppState, vault: core.Vault | None) -
     if not quota or vault is None or vault.root.resolve() == Path(state.settings.vault).expanduser().resolve():
         return
     if state.usage.used(vault.root) + incoming > quota:
-        raise HTTPException(413, f"This vault is full: it may hold {quota // MiB} MiB. Delete what you no longer need from the Trash, "
+        raise HTTPException(507, f"This vault is full: it may hold {quota // MiB} MiB. Delete what you no longer need from the Trash, "
                                  "or ask whoever runs this Kaal for more room.")
     state.usage.add(vault.root, incoming)
 
@@ -1473,7 +1497,7 @@ def _tags(tags: list[str]) -> str:
 class NoteCreate(BaseModel):
     title: str = Title
     body: str = Body
-    tags: list[str] = Field(default_factory=list, max_length=100)
+    tags: list[Tag] = Field(default_factory=list, max_length=100)
     sensitivity: Sensitivity = "auto"
 
 
@@ -1496,7 +1520,7 @@ class TextCapture(BaseModel):
 class LibraryCreate(BaseModel):
     title: str = Title
     body: str = Body
-    tags: list[str] = Field(default_factory=list, max_length=100)
+    tags: list[Tag] = Field(default_factory=list, max_length=100)
     source_url: str = Short
     source_title: str = Short
 
@@ -1511,7 +1535,7 @@ class LibrarySearch(BaseModel):
 class LibraryUpdate(BaseModel):
     title: str = Title
     body: str = Body
-    tags: list[str] = Field(default_factory=list, max_length=100)
+    tags: list[Tag] = Field(default_factory=list, max_length=100)
 
 
 class ExtractRun(BaseModel):
@@ -1524,7 +1548,7 @@ class ExtractRun(BaseModel):
 
 
 class ReceiptFields(BaseModel):
-    fields: dict[str, str] = Field(max_length=50)
+    fields: dict[Annotated[str, StringConstraints(max_length=60)], Annotated[str, StringConstraints(max_length=500)]] = Field(max_length=50)
 
 
 class ReportFilter(BaseModel):
@@ -1666,28 +1690,28 @@ class ServiceNew(BaseModel):
 
 
 class Reextract(BaseModel):
-    ids: list[str] = Field(default_factory=list, max_length=100)
+    ids: list[Id] = Field(default_factory=list, max_length=100)
     unreviewed: bool = False
 
 
 class ProviderForget(BaseModel):
-    forget: list[str] = Field(min_length=1, max_length=50)
+    forget: list[Name] = Field(min_length=1, max_length=50)
 
 
 class Reimburse(BaseModel):
-    ids: list[str] = Field(min_length=1, max_length=100)
+    ids: list[Id] = Field(min_length=1, max_length=100)
     date: str = Field(default="", max_length=32)
     note: str = Field(default="", max_length=500)
     undo: bool = False
 
 
 class PeopleChange(BaseModel):
-    add: list[str] = Field(default_factory=list, max_length=50)
-    remove: list[str] = Field(default_factory=list, max_length=50)
+    add: list[Name] = Field(default_factory=list, max_length=50)
+    remove: list[Name] = Field(default_factory=list, max_length=50)
 
 
 class BulkPurge(BaseModel):
-    ids: list[str] = Field(min_length=1, max_length=100)
+    ids: list[Id] = Field(min_length=1, max_length=100)
     confirm: bool = False
 
 
@@ -1718,6 +1742,8 @@ def create_app(settings: Settings) -> FastAPI:
     # New accounts from one address in an hour, before the allowance everyone shares is touched.
     app.state.kaal.signups_from = Hourly(3)
     app.state.kaal.usage = Usage()
+    if disk_is_full(settings):
+        log.warning("the disk has less than %d MiB free: nothing new will be stored until there is room (KAAL_FREE_SPACE_MB)", settings.free_space_bytes // MiB)
     if store.get(HOST_COOKIE_SINCE) is None:
         # From now on a browser's sign-in is accepted only in the cookie tied to this host.
         store.put(HOST_COOKIE_SINCE, accounts._now())
@@ -1784,8 +1810,9 @@ def create_app(settings: Settings) -> FastAPI:
                 trimmed.headers[name] = response.headers[name]
             response = trimmed
         if settings.cookie_secure:
-            # Browsers that have been here once never try plain http again (ignored over http).
-            response.headers["Strict-Transport-Security"] = "max-age=31536000"
+            # With KAAL_HSTS=1, browsers that have been here once never try plain http for this
+            # host name again. Without it, a browser told so earlier is told to forget it.
+            response.headers["Strict-Transport-Security"] = "max-age=31536000" if settings.hsts else "max-age=0"
         # A container's health check asks every 30 seconds; only a failing answer is worth a line.
         if not (template == "/v1/health" and response.status_code == 200):
             log.info("%s %s %s %s %dms", log_safe(request.method, 12), template, response.status_code, log_safe(token_name), (time.monotonic() - started) * 1000)
@@ -1910,8 +1937,15 @@ def create_app(settings: Settings) -> FastAPI:
         signed in who proves their password again may do so only a few times a minute, right or
         wrong: each check is real work, and a loop of right answers would otherwise go uncounted."""
         address = client_address(request)
-        if not signing_in and account is not None and not state.proofs.allow(account["id"]):
-            raise HTTPException(429, "You have entered your password several times in a minute. Wait a little and try again.", headers={"Retry-After": "30"})
+        if not signing_in:
+            if not password:
+                return False            # nothing was typed: not a wrong try, and nothing to check
+            if account is not None and not state.proofs.allow(account["id"]):
+                raise HTTPException(429, "You have entered your password several times in a minute. Wait a little and try again.", headers={"Retry-After": "30"})
+            # Counted apart from sign-in, and against this person's own session rather than the
+            # address: wrong tries from elsewhere cannot stop someone signed in from proving who
+            # they are, and their typo here does not count against the household's address.
+            login, address = f"proof:{login}", f"session:{account['id'] if account else ''}"
         with state.guard.one_at_a_time(login):
             waiting = state.guard.wait(login, address)
             if waiting:
@@ -2109,7 +2143,7 @@ def create_app(settings: Settings) -> FastAPI:
     @app.post("/v1/app-sign-ins", tags=["session"], dependencies=[STRANGERS])
     def app_sign_in_finish(request: Request, body: AppSignInFinish):
         """An app collects the sign-in a browser approved for it. The session it is
-        given is sent back as the ``kaal_session`` cookie, with ``X-Kaal-Request: 1``."""
+        given is sent back in the ``X-Kaal-Session`` header, with ``X-Kaal-Request: 1``."""
         state = S(request)
         found = state.accounts.finish_app_signin(body.code, body.verifier)
         account = state.accounts.account(found["account"]) if found else None
@@ -2779,7 +2813,7 @@ def create_app(settings: Settings) -> FastAPI:
         return Response(content=data, media_type=media_type, headers={"X-Content-Type-Options": "nosniff"})
 
     @app.post("/v1/captures", tags=["captures"], dependencies=[require("write", adds=True)])
-    def capture(request: Request, file: UploadFile = File(...), title: str = Form(""), source_url: str = Form(""), source_title: str = Form(""), captured_at: str = Form("")):
+    def capture(request: Request, file: UploadFile = File(...), title: str = Form("", max_length=500), source_url: str = Form("", max_length=4096), source_title: str = Form("", max_length=4096), captured_at: str = Form("", max_length=64)):
         with _saved_upload(S(request), file) as path:
             return _run(S(request), core.browser_capture, file=str(path), title=title, source_url=source_url, source_title=source_title, captured_at=captured_at)
 
@@ -2840,7 +2874,7 @@ def create_app(settings: Settings) -> FastAPI:
     # --- medical receipts (fields are medical data, so reading them needs reveal)
 
     @app.post("/v1/medical/receipts", tags=["medical"], dependencies=[require("write", adds=True)])
-    def medical_capture(request: Request, file: UploadFile = File(...), title: str = Form(""), source_url: str = Form(""), source_title: str = Form(""), captured_at: str = Form("")):
+    def medical_capture(request: Request, file: UploadFile = File(...), title: str = Form("", max_length=500), source_url: str = Form("", max_length=4096), source_title: str = Form("", max_length=4096), captured_at: str = Form("", max_length=64)):
         state = S(request)
         defer = state.settings.background_extraction
         with _saved_upload(state, file) as path:
