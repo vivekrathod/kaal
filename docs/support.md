@@ -10,8 +10,9 @@ Open an issue on the project's GitHub repository, under **Issues**. Say:
 - which part you are using: the server, the web app, Kaal for iPhone or Kaal
   for Chrome;
 - the versions: the web app shows Kaal's version at the bottom of Settings,
-  the iPhone app shows both its own and the server's under Settings, and
-  `deploy/docker/kaalctl status` prints the server's;
+  the iPhone app shows both its own and the server's under Settings,
+  `deploy/docker/kaalctl status` prints the server's, and the extension's is
+  on its card at `chrome://extensions`;
 - how the server was installed (the Docker install, or by hand), and where
   people open it (a domain, Tailscale, only that machine);
 - what you did, what you expected, and what happened, with the exact message
@@ -49,8 +50,9 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.24.0 or newer.
 - **"Too many tries from here. Wait a minute and try again.":** the sign-in
   pages take 30 requests a minute from one address. If everyone at your Kaal
   sees this at once, the server is behind a proxy it has not been told to
-  trust, and takes everyone for one visitor: set `KAAL_TRUSTED_PROXIES` to
-  the proxy's address (the Docker install does this by itself).
+  trust, and takes everyone for one visitor: set `KAAL_TRUSTED_PROXIES`
+  ([Installing Kaal](install.md), "Settings"; the Docker install sets it by
+  itself).
 - **Making a token asks for your password** (or, if you sign in only through
   Google, your sign-in name). That is on purpose: a token can do what you can.
 - **Signed out unexpectedly:** a browser stays signed in for 30 days and the
@@ -93,8 +95,8 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.24.0 or newer.
   cause, and the same cure.
 - **"Connecting was cancelled, or Kaal's page could not be opened":** the
   sign-in window was closed before Allow was pressed, or the address is
-  wrong. A Kaal server from before this button existed cannot answer it;
-  update the server, or paste a token.
+  wrong. The button needs a Kaal server version 0.25.0 or newer; with an
+  older one, update the server or paste a token.
 - **"Chrome wouldn't let Kaal read this page":** the developer tools are open
   on that tab, or it is one of Chrome's own pages.
 - **A file on this computer** (`file://`): turn on "Allow access to file URLs"
