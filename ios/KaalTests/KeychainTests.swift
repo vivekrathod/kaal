@@ -1,9 +1,12 @@
 import XCTest
 @testable import Kaal
 
-// Where the sign-in is kept. These run in a build that is signed (which has the keychain group
-// the app shares with its share extension) and in one that is not, as in CI (which has none),
-// and what the app itself needs has to hold in both.
+// Where the sign-in is kept. A build that is signed, if only to run locally (what Xcode does
+// for the simulator unless told otherwise), has a keychain, and in it the group the app shares
+// with its share extension. A build that is not signed at all (CODE_SIGNING_ALLOWED=NO, as in
+// CI) is given no keychain by the simulator: nothing can be kept there, by this app or by the
+// app as it was before it had an extension. So most of these run only in a signed build, and
+// the last one says what an unsigned one does instead.
 final class KeychainTests: XCTestCase {
     private let account = "test-\(UUID().uuidString)"
 
@@ -11,7 +14,18 @@ final class KeychainTests: XCTestCase {
         Keychain.remove(account)
     }
 
-    func testWhatIsKeptIsReadBackReplacedAndRemoved() {
+    /// Whether this build has a keychain at all.
+    private var hasKeychain: Bool {
+        defer { Keychain.remove(account) }
+        return Keychain.write("ks_made_up_probe", for: account)
+    }
+
+    private func needKeychain() throws {
+        try XCTSkipUnless(hasKeychain, "This build is not signed, so the simulator gives it no keychain. Run the tests without CODE_SIGNING_ALLOWED=NO to try what is kept there.")
+    }
+
+    func testWhatIsKeptIsReadBackReplacedAndRemoved() throws {
+        try needKeychain()
         XCTAssertNil(Keychain.read(account))
         XCTAssertTrue(Keychain.write("ks_made_up_one", for: account))
         XCTAssertEqual(Keychain.read(account), "ks_made_up_one")
@@ -23,13 +37,14 @@ final class KeychainTests: XCTestCase {
         XCTAssertEqual(Keychain.groups(holding: account), [])
     }
 
-    func testSharingNeverLosesTheItemAndSaysWhetherTheExtensionCanReadIt() {
+    func testSharingNeverLosesTheItemAndSaysWhetherTheExtensionCanReadIt() throws {
+        try needKeychain()
         XCTAssertFalse(Keychain.share(account), "nothing kept, nothing to share")
         XCTAssertTrue(Keychain.write("ks_made_up", for: account))
         let shared = Keychain.share(account)
         XCTAssertEqual(Keychain.read(account), "ks_made_up")
         // It is shared exactly when it is in the group both programs are entitled to. A build
-        // that is not signed names the group but may not use it, and keeps the item to itself.
+        // signed without that group may not use it, and keeps the item where only the app reads it.
         let groups = Keychain.groups(holding: account)
         XCTAssertEqual(groups.count, 1)
         XCTAssertEqual(shared, groups.first == Keychain.sharedGroup)
@@ -48,7 +63,8 @@ final class KeychainTests: XCTestCase {
         XCTAssertFalse(group.contains("$("))
     }
 
-    func testTheExtensionIsSignedInOnlyWhenBothTheAddressAndTheSessionAreKept() {
+    func testTheExtensionIsSignedInOnlyWhenBothTheAddressAndTheSessionAreKept() throws {
+        try needKeychain()
         // What the app itself keeps on this simulator is put back afterwards.
         let before = (Keychain.read(Keychain.server), Keychain.read(Keychain.session))
         defer {
@@ -66,6 +82,16 @@ final class KeychainTests: XCTestCase {
         XCTAssertEqual(kept?.server.absoluteString, "https://kaal.example.org")
         XCTAssertEqual(kept?.session, "ks_made_up_secret")
         Keychain.write("not an address", for: Keychain.server)
+        XCTAssertNil(KaalAPI.kept())
+    }
+
+    func testWithNoKeychainNothingIsKeptAndTheExtensionIsSignedOut() throws {
+        try XCTSkipIf(hasKeychain, "This build has a keychain; the tests above try it.")
+        // The app says the sign-in could not be kept, and "Save to Kaal" says to sign in first.
+        XCTAssertFalse(Keychain.write("ks_made_up", for: account))
+        XCTAssertNil(Keychain.read(account))
+        XCTAssertFalse(Keychain.share(account))
+        XCTAssertEqual(Keychain.groups(holding: account), [])
         XCTAssertNil(KaalAPI.kept())
     }
 }

@@ -8,9 +8,11 @@ import Security
 /// They are kept in the keychain group the app shares with its share extension (named in
 /// Kaal.entitlements), so that "Save to Kaal" in another app is signed in too. That group is
 /// named after the app itself, which is where the keychain put the session before there was
-/// an extension, so a phone already signed in stays signed in. A build that is not signed (as
-/// in CI) has no such group: the app then keeps them where only it can read them and works as
-/// before, and the share extension asks the person to sign in in Kaal.
+/// an extension, so a phone already signed in stays signed in. A build that may not use the
+/// group keeps them where only the app can read them: the app works as before, and the share
+/// extension asks the person to sign in in Kaal. A build that is not signed at all (as in CI)
+/// is given no keychain by the simulator, so there nothing is kept, as before there was an
+/// extension: the app says the sign-in could not be kept, and the extension says the same.
 enum Keychain {
     static let session = "session"
     static let server = "server"

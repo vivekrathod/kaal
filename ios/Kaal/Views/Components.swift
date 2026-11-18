@@ -119,7 +119,15 @@ struct ConfirmButton: View {
     @State private var working = false
 
     var body: some View {
-        Button(role: .destructive) { asking = true } label: {
+        Button(role: .destructive) {
+            // Put the keyboard away first. While a field on the same screen is being typed in,
+            // the screen scrolls back to that field as the question closes, taking this button
+            // out of sight, and the answer to the question is then lost.
+            #if canImport(UIKit)
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            #endif
+            asking = true
+        } label: {
             if working {
                 ProgressView()
             } else {

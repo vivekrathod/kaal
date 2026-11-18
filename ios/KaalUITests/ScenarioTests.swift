@@ -69,6 +69,13 @@ final class ScenarioTests: XCTestCase {
         choice.tap()
     }
 
+    /// Put the keyboard away before pressing a button on a web page: when the simulator shows
+    /// only the keyboard's bar, the bar can lie over the button and take the press.
+    func putKeyboardAway() {
+        let done = app.toolbars.buttons["Done"].firstMatch
+        if done.exists { done.tap() }
+    }
+
     // MARK: The scenario, in order
 
     func test01SignsInOnKaalsOwnPage() throws {
@@ -108,6 +115,7 @@ final class ScenarioTests: XCTestCase {
             secret.tap()
             secret.typeText(password)
             shot("02-kaal-sign-in-page")
+            putKeyboardAway()
             page.buttons["Sign in"].tap()
         }
 
@@ -130,9 +138,7 @@ final class ScenarioTests: XCTestCase {
             again.tap()
             again.typeText(password)
             shot("03a-password-again")
-            // Put the keyboard away first: its bar lies over the button and would take the press.
-            let done = app.toolbars.buttons["Done"].firstMatch
-            if done.exists { done.tap() }
+            putKeyboardAway()
             allow.tap()
             // The browser may offer to remember that password before it lets the page go on.
             let notNow = app.buttons["Not Now"]
@@ -192,7 +198,10 @@ final class ScenarioTests: XCTestCase {
         shot("10-note-in-trash")
         remove.tap()
         confirm("Delete forever")
-        appears(app.staticTexts["The Trash is empty."], "an empty Trash", timeout: 30)
+        // Back in the Trash it is no longer listed. (The Trash need not be empty: the tests
+        // after this one leave what they made there, and may have run before.)
+        appears(app.navigationBars["Notes"], "the Trash again", timeout: 30)
+        XCTAssertTrue(trashed.waitForNonExistence(timeout: 30), "the note should be gone from the Trash")
     }
 
     func test03ANoteShowsItsMarkdownAndFiles() {
@@ -448,7 +457,19 @@ final class ScenarioTests: XCTestCase {
         revoke.tap()
         confirm("Revoke")
         XCTAssertTrue(revoke.waitForNonExistence(timeout: 30), "the token should be gone from the list once it is revoked")
-        XCTAssertTrue(app.staticTexts[label].waitForNonExistence(timeout: 10), "the token's name should be gone with it")
+
+        // Ask Kaal again, from the top of the page: a row that had only gone out of sight,
+        // or a token Kaal still had, would be back.
+        app.navigationBars["Tokens"].buttons.firstMatch.tap()
+        appears(app.navigationBars["Settings"], "Settings again")
+        tokens.tap()
+        appears(app.navigationBars["Tokens"], "the Tokens page again")
+        let none = app.staticTexts["No tokens."]
+        let others = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Revoke '"))
+        let listed = expectation(for: NSPredicate { _, _ in none.exists || others.count > 0 }, evaluatedWith: nil)
+        wait(for: [listed], timeout: 30)
+        XCTAssertFalse(app.staticTexts[label].exists, "Kaal should no longer list the token")
+        shot("30a-token-revoked")
     }
 
     func test10SigningOutReturnsToTheFirstScreen() {

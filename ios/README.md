@@ -39,9 +39,13 @@ of your Kaal in a keychain group that only the two of them can read (Keychain
 Sharing, named in [`Kaal.entitlements`](Kaal.entitlements) after the app's
 own identifier). A phone signed in before the extension existed stays signed
 in: the next time it is opened, the app puts what the extension needs there. Signing
-out of the app signs the extension out too. A build that is not signed, as in
-CI, has no such group; the app then works on its own as before, and the share
-extension says "Open Kaal and sign in first".
+out of the app signs the extension out too. Whenever the extension cannot read
+a sign-in (the app is signed out, or the build has no such group) it says
+"Open Kaal and sign in first", and the app goes on working by itself. A build
+that is not signed at all (`CODE_SIGNING_ALLOWED=NO`, as in CI) is given no
+keychain by the simulator, so it cannot stay signed in, with or without the
+extension; it is good for building and for the unit tests only. A build from
+Xcode for the simulator is signed to run locally, which is enough.
 
 ## Building it
 
@@ -86,8 +90,10 @@ ios/install-on-iphone.sh
 
 ## Tests
 
-The unit tests cover the API client, signing in, the offline queue, capture
-and the Markdown reader:
+The unit tests cover the API client, signing in, where the sign-in is kept,
+the offline queue, capture, the Markdown reader, and what "Save to Kaal" makes
+of what another app shares (what each thing is taken to be, titles, the note's
+text, the receipt's PDF, and the requests it sends):
 
 ```bash
 xcodebuild test -project ios/Kaal.xcodeproj -scheme Kaal -only-testing:KaalTests \
@@ -108,6 +114,15 @@ TEST_RUNNER_KAAL_UI_LOGIN=someone TEST_RUNNER_KAAL_UI_PASSWORD=... \
 xcodebuild test -project ios/Kaal.xcodeproj -scheme Kaal -only-testing:KaalUITests \
   -destination 'platform=iOS Simulator,name=iPhone 17'
 ```
+
+They also save from other apps (`ShareScenarioTests.swift`): a web page shared
+from Safari becomes a note, two of the simulator's sample photos shared from
+Photos become one receipt of two pages, and once the app has signed out the
+sheet says to sign in first. The page shared is the Kaal being tested, or the
+one named in `TEST_RUNNER_KAAL_UI_PAGE`. They rely on the simulator's Photos
+and Safari being in English. All of `KaalUITests` needs a build that is
+signed, which Xcode's default for the simulator ("Sign to Run Locally") is:
+with `CODE_SIGNING_ALLOWED=NO` the app has no keychain to keep its sign-in in.
 
 Without `TEST_RUNNER_KAAL_UI_SERVER` those tests are skipped. In the simulator
 speech recognition is not available, so the dictation test only checks that
