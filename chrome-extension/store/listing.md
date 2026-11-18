@@ -19,26 +19,19 @@ is in it, and that its version is the one in `manifest.json`. Upload that zip.
 The zip's `manifest.json` has no `key` field: the store gives the extension an
 id of its own and does not take a key from the package. Kaal's server only
 answers an extension whose id it knows, both for saving and for "Connect with
-my Kaal sign-in", so the store's copy cannot reach any Kaal until this is
-done. Uploading a draft is enough to be given the id; do these before
-submitting it for review:
+my Kaal sign-in".
 
-1. In the dashboard, open the item's **Package** tab and copy its public key.
-   The item's id is in the dashboard's address and on that tab.
-2. On the demo server the reviewer will use, allow both ids (the setting
-   replaces the list, so name the one in this repository too), in
-   `deploy/docker/kaal.env`, then run `deploy/docker/kaalctl start`:
+The store's copy has the id `jimjfomjjedakpipjfpagdmkecjiehll`. A Kaal server
+from 1.0.0-rc2 on knows it, beside the id of the copy loaded from this folder
+(`STORE_EXTENSION_ID` and `OFFICIAL_EXTENSION_ID` in `kaal/server.py`), so
+nothing needs setting. An older server's operator lets the store's copy in by
+naming both ids (the setting replaces the list):
 
-   ```
-   KAAL_EXTENSION_IDS=ebmkcbpcihgiaoimcpncmadadogclmld,STORE-ID
-   ```
+```
+KAAL_EXTENSION_IDS=ebmkcbpcihgiaoimcpncmadadogclmld,jimjfomjjedakpipjfpagdmkecjiehll
+```
 
-3. Put the store's key in `chrome-extension/manifest.json` as `key`, so that
-   the copy loaded from this folder has the store's id too, and set
-   `OFFICIAL_EXTENSION_ID` in `kaal/server.py` to that id
-   (`tests/test_extension_access.py` checks that the two agree). Release the
-   server. Until a server has that release, its operator lets the store's
-   copy in with `KAAL_EXTENSION_IDS` as above.
+The demo server the reviewer uses must run 1.0.0-rc2 or later.
 
 ## Store listing tab
 
@@ -220,9 +213,9 @@ https://OWNER.github.io/REPO/privacy.html
 ## Test instructions (for the reviewer)
 
 The dashboard has a field for these. They need the same demo server as the
-iPhone app's review (see `ios/AppStore/review-notes.md`), with the store's id
-allowed on it as described under "The package" above; without that the
-reviewer sees "This Kaal does not know that extension". Try the steps
+iPhone app's review (see `ios/AppStore/review-notes.md`), running Kaal 1.0.0-rc2
+or later, which knows the store's copy; an older one answers "This Kaal does
+not know that extension". Try the steps
 yourself with the store's own copy (the dashboard offers the draft to its
 owner) before submitting.
 

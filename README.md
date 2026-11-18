@@ -790,12 +790,10 @@ Only the owner can do the rest:
    notes), and go through the notes' steps for the share extension, which is
    part of the app.
 4. For the Chrome Web Store: register as a developer (a one-time fee), upload
-   the zip as a draft, allow the id the store gives it on the demo server, fill
-   in the listing and privacy tabs, and submit. Then put the store's public
-   key and id into the extension and the server, as
-   [`chrome-extension/store/listing.md`](chrome-extension/store/listing.md)
-   describes, and release the server; until a server has that release, its
-   operator has to allow the store's copy by hand (`KAAL_EXTENSION_IDS`).
+   the zip, fill in the listing and privacy tabs from
+   [`chrome-extension/store/listing.md`](chrome-extension/store/listing.md),
+   and submit. The server knows the store's copy by its id from 1.0.0-rc2 on;
+   an older server's operator allows it by hand (`KAAL_EXTENSION_IDS`).
 
 ## Licence
 

@@ -67,8 +67,12 @@ class ServerConfigError(Exception):
     pass
 
 
-# The id Chrome gives Kaal's extension, which follows from the key in its manifest.
+# The id Chrome gives Kaal's extension loaded from this repository, which follows from the key
+# in its manifest, and the id the Chrome Web Store gave the copy published there (the store
+# makes a key of its own for what is uploaded). Both are Kaal's extension.
 OFFICIAL_EXTENSION_ID = "ebmkcbpcihgiaoimcpncmadadogclmld"
+STORE_EXTENSION_ID = "jimjfomjjedakpipjfpagdmkecjiehll"
+OUR_EXTENSIONS = tuple(f"chrome-extension://{known}" for known in (OFFICIAL_EXTENSION_ID, STORE_EXTENSION_ID))
 CORS_METHODS = b"GET, POST, PUT, PATCH, DELETE"
 CORS_HEADERS = b"Authorization, Content-Type, Accept, X-Kaal-Request"
 
@@ -76,13 +80,14 @@ CORS_HEADERS = b"Authorization, Content-Type, Accept, X-Kaal-Request"
 def extension_origins(environ: dict[str, str] | None = None) -> tuple[str, ...]:
     """Origins of the browser extensions allowed to call the API from their pages.
 
-    Kaal's own extension by default. KAAL_EXTENSION_IDS replaces the list (comma
-    separated ids, for a build with a different key); "none" allows no extension.
+    Kaal's own extension by default, from this repository or from the Chrome Web Store.
+    KAAL_EXTENSION_IDS replaces the list (comma separated ids, for a build with a
+    different key); "none" allows no extension.
     """
     env = os.environ if environ is None else environ
     raw = (env.get("KAAL_EXTENSION_IDS") or "").strip()
     if not raw:
-        return (f"chrome-extension://{OFFICIAL_EXTENSION_ID}",)
+        return OUR_EXTENSIONS
     if raw.lower() == "none":
         return ()
     ids = [item.strip() for item in raw.split(",") if item.strip()]
@@ -116,7 +121,7 @@ class Settings:
     # allows plain http, for development against a non-loopback address.
     cookie_secure: bool = True
     # Browser extensions whose pages may call the API (see ExtensionCorsMiddleware).
-    extension_origins: tuple[str, ...] = (f"chrome-extension://{OFFICIAL_EXTENSION_ID}",)
+    extension_origins: tuple[str, ...] = OUR_EXTENSIONS
     # The address people open Kaal at, such as https://kaal.example.org. Sign-in
     # services send the browser back to it. An administrator can also set it in the web app.
     public_url: str = ""

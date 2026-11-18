@@ -35,6 +35,14 @@ def test_the_servers_extension_id_is_the_one_the_manifest_key_gives():
     assert derived == server.OFFICIAL_EXTENSION_ID
 
 
+def test_the_copy_from_the_chrome_web_store_is_let_in_as_well():
+    assert server.extension_origins({}) == (f"chrome-extension://{server.OFFICIAL_EXTENSION_ID}", f"chrome-extension://{server.STORE_EXTENSION_ID}")
+    assert server.STORE_EXTENSION_ID != server.OFFICIAL_EXTENSION_ID and len(server.STORE_EXTENSION_ID) == 32
+    # Naming ids oneself still replaces the list, and "none" still allows nothing.
+    assert server.extension_origins({"KAAL_EXTENSION_IDS": "a" * 32}) == ("chrome-extension://" + "a" * 32,)
+    assert server.extension_origins({"KAAL_EXTENSION_IDS": "none"}) == ()
+
+
 def test_the_browser_is_told_the_extension_may_call_the_api(service):
     asked = service.client.options("/v1/medical/receipts", headers={"Origin": OURS, "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization,content-type"})
     assert asked.status_code == 204 and asked.content == b""
@@ -68,7 +76,7 @@ def test_no_other_page_is_named_and_cookies_never_cross(service):
 
 
 def test_which_extensions_are_allowed_can_be_changed_or_switched_off(service, tmp_path):
-    assert server.extension_origins({}) == (OURS,)
+    assert server.extension_origins({}) == server.OUR_EXTENSIONS and OURS in server.OUR_EXTENSIONS
     assert server.extension_origins({"KAAL_EXTENSION_IDS": " none "}) == ()
     assert server.extension_origins({"KAAL_EXTENSION_IDS": f"{'b' * 32}, {'c' * 32}"}) == (OTHER, "chrome-extension://" + "c" * 32)
     for bad in ("https://example.com", "abc", "B" * 32, f"{'b' * 32},*"):
