@@ -1,8 +1,7 @@
 # Notes for App Review
 
 A template for App Store Connect → the version → App Review Information. Fill
-in the parts in CAPITALS, delete the share-extension section if the build has
-no share extension (the app in this repository has none yet), and paste the
+in the parts in CAPITALS, and paste the
 text from "What Kaal is" down into **Notes**. The sign-in name and password
 also go in the **Sign-in required** fields above it.
 
@@ -144,13 +143,14 @@ next reviewer signs in with. (If it is deleted, we make it again.)
 
 ## The share extension
 
-DELETE THIS SECTION IF THE BUILD HAS NO SHARE EXTENSION, AND CHECK THE STEPS
-AGAINST THE BUILD IF IT HAS ONE: THEY WERE WRITTEN BEFORE IT EXISTED.
-
 Sign in to the app first. Then, in Safari, Files or Photos, tap the share
-button and choose Kaal. Choose whether to save it as a note or as a receipt,
-and tap Save. It reaches the demo server like anything added in the app, and
-shows under Notes or Receipts.
+button and choose **Save to Kaal** (under "More" the first time, as for any
+app). The sheet shows what is being saved; choose Note or Medical receipt
+(a receipt is offered for pictures and PDFs; several pictures become one
+receipt of several pages), give it a title if you like, and tap Save. It
+reaches the demo server like anything added in the app, and shows under
+Notes or Receipts. Before the app has been signed in, the sheet says to open
+Kaal and sign in first, and saves nothing.
 
 ## Permissions
 

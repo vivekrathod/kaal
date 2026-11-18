@@ -9,6 +9,9 @@ struct APIError: LocalizedError, Equatable {
     var errorDescription: String? { message }
     var isOffline: Bool { status == 0 }
     var isSignedOut: Bool { status == 401 }
+    /// Kaal has no room left: its disk is nearly full, or the vault is (which it says with the
+    /// status it gives a file that is too large). Its own words say which, and who can make room.
+    var isFull: Bool { status == 507 || (status == 413 && message.localizedCaseInsensitiveContains("is full")) }
 
     static let unreachable = APIError(status: 0, message: "Can't reach Kaal. Check your connection and try again.", kind: "unavailable")
 }
@@ -23,8 +26,10 @@ struct Upload: Equatable {
 /// Every request the app makes goes through here.
 ///
 /// The app is signed in as a person. It holds the session it was given and
-/// sends it the way a browser would, as the `kaal_session` cookie, with the
-/// header the server asks of anything that changes data.
+/// sends it in the `X-Kaal-Session` header, with the header the server asks of
+/// anything that changes data. It is never sent as a cookie: over https the
+/// server only takes a browser's cookie under a name an app has no reason to
+/// know, and a header cannot be planted by another site the way a cookie can.
 final class KaalAPI: @unchecked Sendable {
     let server: URL
     let session: String
@@ -82,7 +87,7 @@ final class KaalAPI: @unchecked Sendable {
         request.httpMethod = method
         request.setValue("1", forHTTPHeaderField: "X-Kaal-Request")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if !session.isEmpty { request.setValue("kaal_session=\(session)", forHTTPHeaderField: "Cookie") }
+        if !session.isEmpty { request.setValue(session, forHTTPHeaderField: "X-Kaal-Session") }
         return request
     }
 

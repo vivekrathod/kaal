@@ -83,6 +83,7 @@ NOTES
 • Search titles, tags, the text of every note and the text read from its PDFs and scans.
 • Notes are Markdown, shown formatted, with pictures in place and files you can open and zoom.
 • Edit, add files, move to the Trash and restore.
+• Save to Kaal from the share menu of Photos, Safari, Files and other apps.
 
 YOURS, AND PRIVATE
 • Everything is stored on your Kaal server, encrypted. Nothing goes to Kaal's authors: no analytics, no ads, no tracking.

@@ -196,27 +196,9 @@ struct QuickNote: View {
 
     private func save() {
         dictation.stop()
-        let (title, body) = Self.split(text)
-        model.outbox.addNote(title: title, body: body, tags: Self.tags(from: tags))
+        let (title, body) = NoteText.split(text)
+        model.outbox.addNote(title: title, body: body, tags: NoteText.tags(from: tags))
         dismiss()
-    }
-
-    /// The first line, shortened if need be, is the title; the whole text is the note.
-    static func split(_ text: String) -> (title: String, body: String) {
-        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let first = body.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? body
-        var title = first.trimmingCharacters(in: CharacterSet(charactersIn: "# ").union(.whitespaces))
-        if title.count > 80 {
-            let cut = title.prefix(80)
-            title = (cut.lastIndex(of: " ").map { String(cut[..<$0]) } ?? String(cut)) + "…"
-        }
-        return (title.isEmpty ? "Note" : title, body)
-    }
-
-    static func tags(from text: String) -> [String] {
-        var seen = Set<String>()
-        return text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "#")) }
-            .filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 }
 
@@ -291,7 +273,7 @@ struct FilesAsNote: View {
         let extra = words.trimmingCharacters(in: .whitespacesAndNewlines)
         if !extra.isEmpty { lines.insert(extra, at: 0) }
         let named = title.trimmingCharacters(in: .whitespaces)
-        model.outbox.addNote(title: named.isEmpty ? defaultTitle : named, body: lines.joined(separator: "\n\n"), tags: QuickNote.tags(from: tags), files: files)
+        model.outbox.addNote(title: named.isEmpty ? defaultTitle : named, body: lines.joined(separator: "\n\n"), tags: NoteText.tags(from: tags), files: files)
         dismiss()
     }
 }

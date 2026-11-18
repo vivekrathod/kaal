@@ -58,7 +58,7 @@ final class StubServer: URLProtocol {
             return
         }
         let data = payload as? Data ?? (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
-        let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json", "X-Kaal-Version": "0.24.0"])!
+        let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json", "X-Kaal-Version": "0.25.0"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
         client?.urlProtocolDidFinishLoading(self)

@@ -27,9 +27,8 @@ final class AppModel {
     private let defaults: UserDefaults
     nonisolated private static let addressKey = "kaal.server"
     nonisolated private static let whoKey = "kaal.who"
-    nonisolated private static let sessionKey = "session"
-    /// The oldest Kaal that can sign an app in.
-    static let neededVersion = [0, 24, 0]
+    /// The oldest Kaal the app can use: the first that takes an app's session in a header.
+    static let neededVersion = [0, 25, 0]
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -48,13 +47,22 @@ final class AppModel {
     /// Pick up where the app left off. It opens signed in even with no network, so a note can still be taken down.
     func start() async {
         guard phase == .starting else { return }
-        guard let url = URL(string: serverAddress), !serverAddress.isEmpty, let session = Keychain.read(Self.sessionKey) else {
+        guard let url = URL(string: serverAddress), !serverAddress.isEmpty, let session = Keychain.read(Keychain.session) else {
             phase = .signedOut
             return
         }
+        shareSignIn()
         if let kept = defaults.data(forKey: Self.whoKey) { who = JSON.parse(kept) }
         use(KaalAPI(server: url, session: session))
         await refresh()
+    }
+
+    /// Let the share extension read the sign-in too. A phone signed in before there was one has
+    /// the address only in the app's own settings, which the extension cannot read.
+    private func shareSignIn() {
+        if Keychain.read(Keychain.server) != serverAddress { Keychain.write(serverAddress, for: Keychain.server) }
+        Keychain.share(Keychain.server)
+        Keychain.share(Keychain.session)
     }
 
     private func use(_ api: KaalAPI) {
@@ -106,8 +114,9 @@ final class AppModel {
 
         let told = try await visitor.finishAppSignIn(code: code, verifier: verifier, device: Self.deviceLabel)
         guard let session = told.session.string, !session.isEmpty else { throw APIError(status: 0, message: "Kaal did not sign the app in. Try again.") }
-        guard Keychain.write(session, for: Self.sessionKey) else { throw APIError(status: 0, message: "The sign-in could not be kept on this device. Try again.") }
+        guard Keychain.write(session, for: Keychain.session) else { throw APIError(status: 0, message: "The sign-in could not be kept on this device. Try again.") }
         defaults.set(server.absoluteString, forKey: Self.addressKey)
+        Keychain.write(server.absoluteString, for: Keychain.server)
         notice = nil
         var known = told.entries
         known["session"] = nil
@@ -129,12 +138,19 @@ final class AppModel {
     /// The server no longer knows this session: it ran out, or was signed out from another device.
     func expired() {
         guard phase == .signedIn else { return }
+        // An older Kaal does not know the session as this app sends it, and so takes it for nobody's.
+        let old = api?.serverVersion.flatMap { Self.isAtLeast($0, Self.neededVersion) ? nil : $0 }
         forget()
-        notice = "You were signed out. Sign in again to carry on; anything waiting to be sent is kept."
+        if let old {
+            notice = "That Kaal is version \(old). The app needs \(Self.neededVersion.map(String.init).joined(separator: ".")) or newer: update the server, then sign in again. Anything waiting to be sent is kept."
+        } else {
+            notice = "You were signed out. Sign in again to carry on; anything waiting to be sent is kept."
+        }
     }
 
     private func forget() {
-        Keychain.remove(Self.sessionKey)
+        Keychain.remove(Keychain.session)
+        Keychain.remove(Keychain.server)
         defaults.removeObject(forKey: Self.whoKey)
         api = nil
         outbox.api = nil
@@ -147,7 +163,8 @@ final class AppModel {
     #if DEBUG
     /// Forget the sign-in and everything waiting to be sent. Only test builds can ask for this.
     nonisolated static func startFresh() {
-        Keychain.remove(sessionKey)
+        Keychain.remove(Keychain.session)
+        Keychain.remove(Keychain.server)
         UserDefaults.standard.removeObject(forKey: addressKey)
         UserDefaults.standard.removeObject(forKey: whoKey)
         let outbox = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Outbox", isDirectory: true)

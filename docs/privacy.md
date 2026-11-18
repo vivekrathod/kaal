@@ -136,6 +136,14 @@ password when you sign in. It asks for your password only in Settings, when
 you change it, make new recovery codes or a token, or delete your account; it
 sends it to your Kaal for that one request and does not keep it.
 
+**"Save to Kaal" in other apps.** The app adds itself to the iPhone's share
+menu. When you choose it there, what you chose to share (pictures, a PDF or
+other file, a web page's title and address, or some text) is sent to your
+Kaal as a note or a receipt, and to nowhere else. In Safari it reads only the
+page's title and address. It uses the session the app keeps, which the two
+share through the keychain; it works only after you have signed in to the
+app.
+
 **What it keeps on the phone:**
 
 - The session your Kaal gave it, in the iPhone's keychain, for this device

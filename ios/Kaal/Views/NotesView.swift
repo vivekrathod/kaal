@@ -291,7 +291,7 @@ struct NoteView: View {
                 status.say("Adding \(file.name) (\(index + 1) of \(files.count))…")
                 do {
                     _ = try await api.attach(to: id, file)
-                } catch let error as APIError where error.status == 413 {
+                } catch let error as APIError where error.status == 413 && !error.isFull {
                     throw APIError(status: 413, message: "\(file.name) is too large to add.")
                 }
             }

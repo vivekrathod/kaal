@@ -130,49 +130,43 @@ final class Outbox {
                     return
                 }
                 // Busy or broken for now: try again later. Anything else is a refusal the person has to see.
-                if error.status == 429 || error.status >= 500 { return }
-                update(item.id) { $0.refused = error.status == 413 ? "It is too large for Kaal to take." : error.message }
+                if error.status == 429 || (error.status >= 500 && !error.isFull) { return }
+                update(item.id) { $0.refused = error.status == 413 && !error.isFull ? "It is too large for Kaal to take." : error.message }
             } catch {
                 return
             }
         }
     }
 
-    private func send(_ start: OutboxItem, with api: KaalAPI) async throws -> String {
-        var item = start
+    private func send(_ item: OutboxItem, with api: KaalAPI) async throws -> String {
         let home = folder.appendingPathComponent(item.id.uuidString, isDirectory: true)
-        func upload(_ file: OutboxItem.File) throws -> Upload {
-            guard let data = try? Data(contentsOf: home.appendingPathComponent(file.stored)) else {
-                throw APIError(status: 400, message: "Its file is no longer on this phone.")
-            }
-            return Upload(name: file.name, data: data, type: file.type)
-        }
+        let files = item.files.map { file in { @Sendable in try Self.upload(file, from: home) } }
 
         if item.kind == .receipt {
-            guard let file = item.files.first else { throw APIError(status: 400, message: "It has no file.") }
-            return try await api.captureReceipt(try upload(file)).id.text
+            guard let file = files.first else { throw APIError(status: 400, message: "It has no file.") }
+            return try await api.captureReceipt(try file()).id.text
         }
 
-        if item.note == nil {
-            item.note = try await api.createNote(title: item.title, tags: item.tags, body: item.body).id.text
-            update(item.id) { $0.note = item.note }
-        }
-        guard let note = item.note, !note.isEmpty else { throw APIError(status: 400, message: "Kaal did not say where it kept the note.") }
-        for index in item.files.indices where item.files[index].attachment == nil {
-            let id = try await api.attach(to: note, try upload(item.files[index])).id.text
-            item.files[index].attachment = id
-            update(item.id) { $0.files[index].attachment = id }
-        }
-        if !item.textSettled, !item.files.isEmpty {
-            // The text referred to each file by a stand-in id; give it the real ones.
-            var text = item.body
-            for (index, file) in item.files.enumerated() {
-                text = text.replacingOccurrences(of: "(attachment:new\(index + 1))", with: "(attachment:\(file.attachment ?? ""))")
+        var start = NoteProgress(files: item.files.count, note: item.note)
+        start.attachments = item.files.map(\.attachment)
+        start.textSettled = item.textSettled
+        // Each step is written down as it is done, so that a try cut short carries on where it stopped.
+        return try await api.sendNote(title: item.title, tags: item.tags, body: item.body, files: files, from: start) { progress in
+            self.update(item.id) { kept in
+                kept.note = progress.note
+                for (index, attachment) in progress.attachments.enumerated() where kept.files.indices.contains(index) {
+                    kept.files[index].attachment = attachment
+                }
+                kept.textSettled = progress.textSettled
             }
-            if text != item.body { try await api.updateNote(note, title: item.title, tags: item.tags, body: text) }
-            update(item.id) { $0.textSettled = true }
         }
-        return note
+    }
+
+    nonisolated private static func upload(_ file: OutboxItem.File, from home: URL) throws -> Upload {
+        guard let data = try? Data(contentsOf: home.appendingPathComponent(file.stored)) else {
+            throw APIError(status: 400, message: "Its file is no longer on this phone.")
+        }
+        return Upload(name: file.name, data: data, type: file.type)
     }
 
     // MARK: What the person can do about a refusal

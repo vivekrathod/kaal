@@ -1,5 +1,6 @@
 #!/bin/sh
-# Build Kaal and put it on the iPhone plugged into this Mac.
+# Build Kaal and put it on the iPhone plugged into this Mac, with "Save to Kaal"
+# for other apps' share menus inside it.
 #
 # Before the first run: add your Apple ID in Xcode (Settings > Accounts), plug
 # the phone in and unlock it, and turn on Developer Mode on it (Settings >
@@ -29,13 +30,18 @@ phone=$(xcodebuild -project Kaal.xcodeproj -scheme Kaal -showdestinations 2>/dev
     | sed -n 's/.*{ platform:iOS, arch:[^,]*, id:\([0-9A-Fa-f-]*\), name:.*/\1/p' | head -1)
 [ -n "$phone" ] || stop "no iPhone found. Plug it in, unlock it, tap Trust, and turn on Developer Mode (Settings > Privacy & Security)."
 
+# The app and its share extension are built and signed together, both for the
+# team in Local.xcconfig. The extension's identifier is the app's with ".share"
+# added; Xcode registers the two with the Apple ID as it builds.
 say "Building for the iPhone"
 build="${TMPDIR:-/tmp}/kaal-ios-build"
 xcodebuild -project Kaal.xcodeproj -scheme Kaal -configuration Debug -destination "id=$phone" \
     -derivedDataPath "$build" -allowProvisioningUpdates -quiet build
+app="$build/Build/Products/Debug-iphoneos/Kaal.app"
+[ -d "$app/PlugIns/KaalShare.appex" ] || stop "the build has no share extension in it. Build the Kaal scheme of ios/Kaal.xcodeproj as it is in the repository."
 
 say "Installing"
-xcrun devicectl device install app --device "$phone" "$build/Build/Products/Debug-iphoneos/Kaal.app" >/dev/null
+xcrun devicectl device install app --device "$phone" "$app" >/dev/null
 
 say "Opening Kaal on the phone"
 xcrun devicectl device process launch --device "$phone" "$bundle" >/dev/null 2>&1 \

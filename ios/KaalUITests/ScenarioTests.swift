@@ -9,10 +9,13 @@ import XCTest
 ///     xcodebuild test -project ios/Kaal.xcodeproj -scheme Kaal -only-testing:KaalUITests -destination …
 ///
 /// The person needs a vault with at least one receipt waiting for review and a note
-/// called "Made-up house notes". `KAAL_UI_SHOTS` names a folder to keep pictures of each screen in.
+/// called "Boiler and radiators". `KAAL_UI_SHOTS` names a folder to keep pictures of each screen in.
+///
+/// The tests run in the order of their names, and each relies on the ones before it: the first
+/// signs in and the last ones sign out. Those that save from other apps are in ShareScenarioTests.swift.
 final class ScenarioTests: XCTestCase {
-    private let environment = ProcessInfo.processInfo.environment
-    private var app: XCUIApplication!
+    let environment = ProcessInfo.processInfo.environment
+    var app: XCUIApplication!
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -22,17 +25,17 @@ final class ScenarioTests: XCTestCase {
 
     // MARK: Helpers
 
-    private func launch(fresh: Bool = false) {
+    func launch(fresh: Bool = false) {
         app.launchArguments = fresh ? ["-kaal-start-fresh"] : []
         app.launch()
     }
 
-    private func shot(_ name: String) {
+    func shot(_ name: String) {
         guard let folder = environment["KAAL_UI_SHOTS"] else { return }
         try? XCUIScreen.main.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: folder).appendingPathComponent(name + ".png"))
     }
 
-    private func appears(_ element: XCUIElement, _ what: String, timeout: TimeInterval = 20, file: StaticString = #filePath, line: UInt = #line) {
+    func appears(_ element: XCUIElement, _ what: String, timeout: TimeInterval = 20, file: StaticString = #filePath, line: UInt = #line) {
         if !element.waitForExistence(timeout: timeout) {
             shot("failed-\(what.replacingOccurrences(of: " ", with: "-"))")
             if let folder = environment["KAAL_UI_SHOTS"] {
@@ -42,25 +45,35 @@ final class ScenarioTests: XCTestCase {
         }
     }
 
-    private func labelled(_ kind: XCUIElementQuery, containing text: String) -> XCUIElement {
+    func labelled(_ kind: XCUIElementQuery, containing text: String) -> XCUIElement {
         kind.matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
     }
 
-    private func tab(_ name: String) {
+    func tab(_ name: String) {
         let button = app.tabBars.buttons[name]
         appears(button, "the \(name) tab")
         button.tap()
     }
 
     /// Press the destructive choice in the question a "cannot be undone" button asks.
-    private func confirm(_ label: String) {
+    func confirm(_ label: String) {
         let choices = app.buttons.matching(NSPredicate(format: "label == %@", label))
         let asked = expectation(for: NSPredicate(format: "count >= 1"), evaluatedWith: app.sheets.buttons.matching(NSPredicate(format: "label == %@", label)), handler: nil)
-        if XCTWaiter().wait(for: [asked], timeout: 5) == .completed {
-            app.sheets.buttons[label].firstMatch.tap()
-        } else {
-            choices.element(boundBy: choices.count - 1).tap()
+        let choice = XCTWaiter().wait(for: [asked], timeout: 5) == .completed ? app.sheets.buttons[label].firstMatch : choices.element(boundBy: choices.count - 1)
+        // The question slides or pops into place, and a press before it has settled is lost.
+        var place = CGRect.null
+        for _ in 0..<10 where choice.exists && choice.frame != place {
+            place = choice.frame
+            usleep(300_000)
         }
+        choice.tap()
+    }
+
+    /// Put the keyboard away before pressing a button on a web page: when the simulator shows
+    /// only the keyboard's bar, the bar can lie over the button and take the press.
+    func putKeyboardAway() {
+        let done = app.toolbars.buttons["Done"].firstMatch
+        if done.exists { done.tap() }
     }
 
     // MARK: The scenario, in order
@@ -93,6 +106,11 @@ final class ScenarioTests: XCTestCase {
         if !allow.exists {
             name.tap()
             name.typeText(login)
+            // A simulator typing into a web page for the first time can lose letters; type it again if so.
+            for _ in 0..<2 {
+                guard let typed = name.value as? String, typed != login else { break }
+                name.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: typed.count) + login)
+            }
             let secret = page.secureTextFields["Password"]
             secret.tap()
             secret.typeText(password)
@@ -111,7 +129,26 @@ final class ScenarioTests: XCTestCase {
         shot("03-allow-the-app")
         allow.tap()
 
-        appears(app.tabBars.buttons["Receipts"], "the app's tabs", timeout: 30)
+        // A browser that signed in more than ten minutes ago is asked for the password again
+        // before it may let an app in, since what the app is given outlasts the browser's sign-in.
+        let tabs = app.tabBars.buttons["Receipts"]
+        let again = page.secureTextFields["Your password"]
+        let answered = expectation(for: NSPredicate { _, _ in tabs.exists || again.exists }, evaluatedWith: nil)
+        _ = XCTWaiter().wait(for: [answered], timeout: 30)
+        if !tabs.exists, again.exists {
+            again.tap()
+            again.typeText(password)
+            shot("03a-password-again")
+            putKeyboardAway()
+            allow.tap()
+            // The browser may offer to remember that password before it lets the page go on.
+            let notNow = app.buttons["Not Now"]
+            let moved = expectation(for: NSPredicate { _, _ in tabs.exists || notNow.exists }, evaluatedWith: nil)
+            _ = XCTWaiter().wait(for: [moved], timeout: 15)
+            if !tabs.exists, notNow.exists { notNow.tap() }
+        }
+
+        appears(tabs, "the app's tabs", timeout: 30)
         shot("04-add")
     }
 
@@ -173,13 +210,13 @@ final class ScenarioTests: XCTestCase {
     func test03ANoteShowsItsMarkdownAndFiles() {
         launch()
         tab("Notes")
-        let row = app.staticTexts["Made-up house notes"].firstMatch
+        let row = app.staticTexts["Boiler and radiators"].firstMatch
         appears(row, "the note with files", timeout: 30)
         row.tap()
         appears(app.staticTexts["Boiler"], "the heading")
         appears(labelled(app.staticTexts, containing: "Pressure should be 1.5 bar"), "bold text shown as text")
         appears(app.staticTexts["Hall"], "the table")
-        appears(labelled(app.staticTexts, containing: "northside.pdf"), "the PDF listed under the note", timeout: 30)
+        appears(labelled(app.staticTexts, containing: "boiler-manual.pdf"), "the PDF listed under the note", timeout: 30)
         sleep(2)
         shot("11-note-with-files")
         app.swipeUp()
@@ -190,16 +227,16 @@ final class ScenarioTests: XCTestCase {
         let search = app.searchFields.firstMatch
         appears(search, "the search field")
         search.tap()
-        search.typeText("radiators")
-        appears(app.staticTexts["Made-up house notes"].firstMatch, "the note found by a word in it", timeout: 30)
-        XCTAssertFalse(app.staticTexts["Made-up shopping list"].exists)
+        search.typeText("drawer")
+        appears(app.staticTexts["Boiler and radiators"].firstMatch, "the note found by a word in it", timeout: 30)
+        XCTAssertFalse(app.staticTexts["Lentil soup"].exists)
         shot("13-search")
     }
 
     func test04AReceiptIsCheckedAndMarkedReimbursed() {
         launch()
         tab("Receipts")
-        let row = app.staticTexts["$45.00"].firstMatch
+        let row = app.staticTexts["$64.50"].firstMatch
         appears(row, "a receipt waiting for review", timeout: 30)
         shot("14-receipts")
         row.tap()
@@ -219,11 +256,11 @@ final class ScenarioTests: XCTestCase {
         let reviewed = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Reviewed'")).firstMatch
         appears(reviewed, "the Reviewed list", timeout: 30)
         reviewed.tap()
-        let done = app.staticTexts["$45.00"].firstMatch
+        let done = app.staticTexts["$64.50"].firstMatch
         appears(done, "the receipt among the reviewed", timeout: 30)
         done.tap()
         appears(app.staticTexts["Reviewed"], "the reviewed receipt", timeout: 30)
-        let mark = app.buttons["Mark $45.00 reimbursed"]
+        let mark = app.buttons["Mark $64.50 reimbursed"]
         for _ in 0..<8 where !mark.exists { app.swipeUp() }
         appears(mark, "Mark reimbursed")
         mark.tap()
@@ -241,7 +278,7 @@ final class ScenarioTests: XCTestCase {
         shot("18-totals")
 
         tab("Settings")
-        appears(app.staticTexts["Jane Madeup"], "the family list", timeout: 30)
+        appears(app.staticTexts["Jane Example"], "the family list", timeout: 30)
         shot("19-settings")
         app.swipeUp()
         shot("20-settings-lower")
@@ -265,6 +302,16 @@ final class ScenarioTests: XCTestCase {
         people.tap()
         appears(app.buttons["Add and make a setup link"], "the People page", timeout: 30)
         shot("22a-people")
+        // A setup link is offered only for someone who has never signed in, which the person
+        // signed in here is not. Where the server has such a person, the link is made.
+        let link = app.buttons["New setup link"].firstMatch
+        if link.exists {
+            link.tap()
+            let made = labelled(app.staticTexts, containing: "Send them this link")
+            for _ in 0..<4 where !made.exists { app.swipeDown() }
+            appears(made, "the new setup link", timeout: 30)
+            shot("22a-setup-link")
+        }
         app.navigationBars.buttons.firstMatch.tap()
         let services = app.staticTexts["Sign-in services"]
         appears(services, "Sign-in services")
@@ -388,6 +435,61 @@ final class ScenarioTests: XCTestCase {
         if listening.exists { listening.tap() }
         app.buttons["Cancel"].tap()
         appears(speak, "the Add screen again")
+    }
+
+    func test09aATokenIsMadeOnlyWithThePassword() throws {
+        let password = try XCTUnwrap(environment["KAAL_UI_PASSWORD"])
+        launch()
+        tab("Settings")
+        let tokens = app.staticTexts["Tokens"]
+        for _ in 0..<6 where !tokens.exists { app.swipeUp() }
+        appears(tokens, "Tokens")
+        tokens.tap()
+        // A name of its own, so that a token an earlier run left behind is not taken for this one.
+        let label = "Made-up token \(Int(Date().timeIntervalSince1970) % 100_000)"
+        let name = app.textFields.firstMatch
+        appears(name, "the token's name", timeout: 30)
+        name.tap()
+        name.typeText(label)
+        let make = app.buttons["Make token"]
+        let secret = app.secureTextFields["Your password"]
+        for _ in 0..<6 where !(make.exists && make.isHittable) { app.swipeUp() }
+        appears(secret, "the password field")
+
+        // Without the password Kaal is not even asked.
+        make.tap()
+        for _ in 0..<6 where !labelled(app.staticTexts, containing: "Enter your password").exists { app.swipeDown() }
+        appears(labelled(app.staticTexts, containing: "Enter your password to make a token."), "being asked for the password")
+
+        for _ in 0..<6 where !(secret.exists && secret.isHittable) { app.swipeUp() }
+        secret.tap()
+        secret.typeText(password)
+        for _ in 0..<6 where !(make.exists && make.isHittable) { app.swipeUp() }
+        make.tap()
+        let made = labelled(app.staticTexts, containing: "Copy it now")
+        for _ in 0..<6 where !made.exists { app.swipeDown() }
+        appears(made, "the new token, shown once", timeout: 30)
+        shot("30-token-made")
+
+        let revoke = app.buttons["Revoke \(label)"]
+        for _ in 0..<6 where !(revoke.exists && revoke.isHittable) { app.swipeUp() }
+        appears(revoke, "the token in the list")
+        revoke.tap()
+        confirm("Revoke")
+        XCTAssertTrue(revoke.waitForNonExistence(timeout: 30), "the token should be gone from the list once it is revoked")
+
+        // Ask Kaal again, from the top of the page: a row that had only gone out of sight,
+        // or a token Kaal still had, would be back.
+        app.navigationBars["Tokens"].buttons.firstMatch.tap()
+        appears(app.navigationBars["Settings"], "Settings again")
+        tokens.tap()
+        appears(app.navigationBars["Tokens"], "the Tokens page again")
+        let none = app.staticTexts["No tokens."]
+        let others = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Revoke '"))
+        let listed = expectation(for: NSPredicate { _, _ in none.exists || others.count > 0 }, evaluatedWith: nil)
+        wait(for: [listed], timeout: 30)
+        XCTAssertFalse(app.staticTexts[label].exists, "Kaal should no longer list the token")
+        shot("30a-token-revoked")
     }
 
     func test10SigningOutReturnsToTheFirstScreen() {

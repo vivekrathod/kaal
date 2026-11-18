@@ -193,7 +193,9 @@ exchanges that code for a session (`POST /v1/app-sign-ins`); the code works
 once, for five minutes, and only together with a secret that never left the
 app, so a code seen by anything else is worthless. The session lasts a year,
 is listed with the person's signed-in browsers under Settings, and can be
-signed out there.
+signed out there. The app sends it in the `X-Kaal-Session` header, never as a
+cookie. "Save to Kaal" in other apps' share menus is part of the app and uses
+the same session, which the two share through the iPhone's keychain.
 
 In the web app, Settings has more pages for people signed in as
 themselves. **Vaults and sharing**: rename your vault, open another, create one,
@@ -783,17 +785,10 @@ Only the owner can do the rest:
    when the name is really tested), sign and upload a build from Xcode, fill
    in the listing, privacy and age-rating answers, add contact details, and
    submit. Before that, decide whether the app is offered on iPad (which
-   needs iPad screenshots too). **Do not upload a build that sends its
-   session as a cookie.** A server reached over https takes an app's session
-   only in the `X-Kaal-Session` header; a build whose `API.swift` still sets
-   `Cookie: kaal_session=…` signs in and is signed out again on its next
-   request, which is the first thing App Review would see. Build from a tree
-   in which the app sends the header, and sign in to the https demo server
-   with that very build first (step 4 of "Before submitting" in the review
-   notes). If the build has a share extension, go through the review notes'
-   steps for it as well, and check that
-   [`export-compliance.md`](ios/AppStore/export-compliance.md) and the privacy
-   answers still describe every target.
+   needs iPad screenshots too). Sign in to the https demo server with the
+   very build you upload first (step 4 of "Before submitting" in the review
+   notes), and go through the notes' steps for the share extension, which is
+   part of the app.
 4. For the Chrome Web Store: register as a developer (a one-time fee), upload
    the zip as a draft, allow the id the store gives it on the demo server, fill
    in the listing and privacy tabs, and submit. Then put the store's public

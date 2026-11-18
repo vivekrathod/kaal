@@ -1,4 +1,3 @@
-import PDFKit
 import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
@@ -13,7 +12,7 @@ enum CaptureSource: String, Identifiable {
     var id: String { rawValue }
 }
 
-enum Capture {
+extension Capture {
     /// Whether this device can scan pages with its camera. The simulator cannot.
     static var canScan: Bool {
         #if targetEnvironment(simulator)
@@ -27,64 +26,6 @@ enum Capture {
         #else
         return false
         #endif
-    }
-
-    /// A picture as a JPEG no larger than it needs to be to read.
-    static func jpeg(_ image: PlatformImage, maxSide: CGFloat = 2600, quality: CGFloat = 0.8) -> Data? {
-        #if os(iOS)
-        let longest = max(image.size.width, image.size.height) * image.scale
-        guard longest > maxSide else { return image.jpegData(compressionQuality: quality) }
-        let ratio = maxSide / longest
-        let size = CGSize(width: image.size.width * image.scale * ratio, height: image.size.height * image.scale * ratio)
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        return UIGraphicsImageRenderer(size: size, format: format).jpegData(withCompressionQuality: quality) { _ in
-            image.draw(in: CGRect(origin: .zero, size: size))
-        }
-        #else
-        guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
-        return bitmap.representation(using: .jpeg, properties: [.compressionFactor: quality])
-        #endif
-    }
-
-    /// A picked photo, whatever its format, as a JPEG Kaal can show.
-    static func photo(_ data: Data, name: String) -> Upload? {
-        guard let image = PlatformImage(data: data), let jpeg = jpeg(image) else { return nil }
-        return Upload(name: name, data: jpeg, type: "image/jpeg")
-    }
-
-    /// Several pages as one PDF, so that a receipt of two pages is one receipt.
-    static func pdf(of pages: [Upload], name: String) -> Upload? {
-        let document = PDFDocument()
-        for page in pages {
-            guard let image = PlatformImage(data: page.data), let made = PDFPage(image: image) else { return nil }
-            document.insert(made, at: document.pageCount)
-        }
-        guard document.pageCount > 0, let data = document.dataRepresentation() else { return nil }
-        return Upload(name: name, data: data, type: "application/pdf")
-    }
-
-    /// What to send for a receipt: the file itself, or its pages as one PDF.
-    static func receipt(from files: [Upload]) -> Upload? {
-        guard let first = files.first else { return nil }
-        if files.count == 1 { return first }
-        return pdf(of: files, name: "Receipt \(stamp()).pdf") ?? first
-    }
-
-    static func stamp(_ date: Date = Date()) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd HH.mm"
-        return formatter.string(from: date)
-    }
-
-    static func read(_ url: URL) -> Upload? {
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        let name = url.lastPathComponent
-        if FileKind.ext(name) == "heic", let converted = photo(data, name: (name as NSString).deletingPathExtension + ".jpg") { return converted }
-        return Upload(name: name, data: data, type: FileKind.mime(name))
     }
 }
 

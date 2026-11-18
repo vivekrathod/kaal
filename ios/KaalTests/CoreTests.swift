@@ -45,11 +45,35 @@ final class APITests: XCTestCase {
         let api = StubServer.api(session: "ks_abc_secret")
         _ = try await api.result("POST", "/v1/library/notes", json: ["title": "T"])
         let asked = try XCTUnwrap(StubServer.asked.first)
-        XCTAssertEqual(asked.headers["Cookie"], "kaal_session=ks_abc_secret")
+        // In a header of its own, never a cookie, which a server reached over https would not take.
+        XCTAssertEqual(asked.headers["X-Kaal-Session"], "ks_abc_secret")
+        XCTAssertNil(asked.headers["Cookie"])
         XCTAssertEqual(asked.headers["X-Kaal-Request"], "1")
         XCTAssertNil(asked.headers["Authorization"])
         XCTAssertEqual(asked.json.title.text, "T")
-        XCTAssertEqual(api.serverVersion, "0.24.0")
+        XCTAssertEqual(api.serverVersion, "0.25.0")
+    }
+
+    func testATokenIsAskedForWithThePasswordOrTheSignInNameOfSomeoneWhoHasNone() async throws {
+        StubServer.reset { _ in (200, ["result": ["token": ["name": "backup"], "secret": "kaal_made_up"]]) }
+        let api = StubServer.api()
+        _ = try await api.createToken(name: "backup", scopes: ["read"], vault: "v1", password: "made-up password")
+        _ = try await api.createToken(name: "backup", scopes: ["read"], vault: "v1", confirm: "jane")
+        let asked = StubServer.asked
+        XCTAssertEqual(asked.map(\.path), ["/v1/account/tokens", "/v1/account/tokens"])
+        XCTAssertEqual(asked[0].json.password.text, "made-up password")
+        XCTAssertTrue(asked[0].json.confirm.isNull)
+        XCTAssertEqual(asked[1].json.confirm.text, "jane")
+        XCTAssertTrue(asked[1].json.password.isNull)
+        XCTAssertEqual(asked[1].json.scopes.strings, ["read"])
+    }
+
+    func testASetupLinkIsOfferedOnlyForSomeoneWhoHasNeverSignedIn() {
+        func person(_ text: String) -> JSON { JSON.parse(Data(text.utf8)) }
+        XCTAssertTrue(PeopleView.maySetUp(person(#"{"has_password": false, "services": []}"#)))
+        XCTAssertTrue(PeopleView.maySetUp(person(#"{"has_password": false, "link_waiting": true}"#)))
+        XCTAssertFalse(PeopleView.maySetUp(person(#"{"has_password": true, "services": []}"#)))
+        XCTAssertFalse(PeopleView.maySetUp(person(#"{"has_password": false, "services": ["google"]}"#)))
     }
 
     func testSearchWordsGoInTheBodyNeverTheAddress() async throws {
@@ -122,6 +146,9 @@ final class SignInTests: XCTestCase {
         XCTAssertTrue(AppModel.isAtLeast("1.0", [0, 24, 0]))
         XCTAssertFalse(AppModel.isAtLeast("0.23.9", [0, 24, 0]))
         XCTAssertTrue(AppModel.isAtLeast("0.24.0-dev", [0, 24, 0]))
+        // The app sends its session in a header, which Kaal takes from 0.25.0.
+        XCTAssertFalse(AppModel.isAtLeast("0.24.0", AppModel.neededVersion))
+        XCTAssertTrue(AppModel.isAtLeast("0.25.0", AppModel.neededVersion))
     }
 }
 
@@ -231,18 +258,19 @@ final class MarkdownTests: XCTestCase {
     }
 }
 
-final class QuickNoteTests: XCTestCase {
+final class NoteTextTests: XCTestCase {
     func testTheFirstLineBecomesTheTitle() {
-        XCTAssertEqual(QuickNote.split("  Milk and eggs\nfor Saturday  ").title, "Milk and eggs")
-        XCTAssertEqual(QuickNote.split("Milk and eggs\nfor Saturday").body, "Milk and eggs\nfor Saturday")
-        XCTAssertEqual(QuickNote.split("# Heading\ntext").title, "Heading")
-        let long = QuickNote.split(String(repeating: "word ", count: 40)).title
+        XCTAssertEqual(NoteText.split("  Milk and eggs\nfor Saturday  ").title, "Milk and eggs")
+        XCTAssertEqual(NoteText.split("Milk and eggs\nfor Saturday").body, "Milk and eggs\nfor Saturday")
+        XCTAssertEqual(NoteText.split("# Heading\ntext").title, "Heading")
+        XCTAssertEqual(NoteText.split("  \n ").title, "Note")
+        let long = NoteText.split(String(repeating: "word ", count: 40)).title
         XCTAssertLessThanOrEqual(long.count, 81)
         XCTAssertTrue(long.hasSuffix("…"))
     }
 
     func testTags() {
-        XCTAssertEqual(QuickNote.tags(from: " home, #taxes ,home,, "), ["home", "taxes"])
+        XCTAssertEqual(NoteText.tags(from: " home, #taxes ,home,, "), ["home", "taxes"])
     }
 }
 
