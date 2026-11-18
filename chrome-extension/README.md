@@ -117,8 +117,10 @@ run `bin/sync-extension-web.py`. The icons in `icons/` are drawn by
 `bin/make-icons.py`.
 
 `bin/package-extension.py` builds the zip for the Chrome Web Store from the
-files the extension uses, and [`store/`](store/listing.md) holds the store's
-text and pictures (`store/make-screenshots.sh` takes them again).
+files the extension uses, then unpacks it and checks that every file it names
+is in it. [`store/`](store/listing.md) holds the store's text and pictures
+(`store/make-screenshots.sh` takes them again). The store's copy has an id of
+its own, which a Kaal server has to be told about: see the listing.
 
 `tests/test_extension_e2e.py` drives the extension in a real browser against a
 throwaway server and a made-up receipt page: connect, save a page, save a

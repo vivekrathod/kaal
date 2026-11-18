@@ -34,6 +34,17 @@ final class StoreScreenshots: XCTestCase {
         }
     }
 
+    /// Waits for something that is not one element appearing, and keeps a picture of the screen if it never happens.
+    private func happens(_ what: String, timeout: TimeInterval, file: StaticString = #filePath, line: UInt = #line, _ condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            usleep(300_000)
+        }
+        shot("failed-\(what.replacingOccurrences(of: " ", with: "-"))")
+        XCTFail("\(what) did not happen", file: file, line: line)
+    }
+
     private func labelled(_ kind: XCUIElementQuery, containing text: String) -> XCUIElement {
         kind.matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
     }
@@ -54,21 +65,19 @@ final class StoreScreenshots: XCTestCase {
         address.tap()
         address.typeText(server)
         // The field can lag behind the keys; pressing Sign in before it has caught up signs in somewhere else.
-        let typed = expectation(for: NSPredicate(format: "value == %@", server), evaluatedWith: address)
-        wait(for: [typed], timeout: 10)
+        happens("the address being typed", timeout: 10) { address.value as? String == server }
         app.buttons["Sign in"].tap()
         // iOS asks once whether the app may use that address to sign in. On a simulator
         // that has only just started, the question can take half a minute to appear.
         let allowed = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Continue"]
         let page = app.webViews.firstMatch
-        let asked = expectation(for: NSPredicate { _, _ in allowed.exists || page.exists }, evaluatedWith: nil)
-        wait(for: [asked], timeout: 60)
+        happens("the sign-in sheet opening", timeout: 60) { allowed.exists || page.exists }
         if allowed.exists { allowed.tap() }
         appears(page, "Kaal's sign-in page")
         let name = page.textFields["Sign-in name"]
         let allow = page.buttons["Allow"]
-        let ready = expectation(for: NSPredicate { _, _ in name.exists || allow.exists }, evaluatedWith: nil)
-        wait(for: [ready], timeout: 30)
+        // A simulator that has only just started can take a while over its first web page.
+        happens("the sign-in page loading", timeout: 90) { name.exists || allow.exists }
         if !allow.exists {
             name.tap()
             name.typeText(login)

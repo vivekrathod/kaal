@@ -12,19 +12,33 @@ bin/package-extension.py
 
 writes `dist/kaal-chrome-VERSION.zip` from exactly the files the extension
 uses (it follows them from `manifest.json`), leaving out the README and this
-folder, and prints what went in. Upload that zip.
+folder, and prints what went in. `bin/package-extension.py --check FILE.zip`
+unpacks a zip and checks that every file its manifest, pages and scripts name
+is in it, and that its version is the one in `manifest.json`. Upload that zip.
 
-The zip's `manifest.json` has no `key` field: the store refuses one, and gives
-the extension an id of its own. Kaal's server only answers the extension whose
-id it knows, so after the first upload:
+The zip's `manifest.json` has no `key` field: the store gives the extension an
+id of its own and does not take a key from the package. Kaal's server only
+answers an extension whose id it knows, both for saving and for "Connect with
+my Kaal sign-in", so the store's copy cannot reach any Kaal until this is
+done. Uploading a draft is enough to be given the id; do these before
+submitting it for review:
 
 1. In the dashboard, open the item's **Package** tab and copy its public key.
-2. Put that key in `chrome-extension/manifest.json` as `key`, so that the copy
-   loaded from this folder has the store's id too.
-3. Set `OFFICIAL_EXTENSION_ID` in `kaal/server.py` to the id the dashboard
-   shows (`tests/test_extension_access.py` checks that the two agree), and
-   release the server. Until a server has that release, its operator can let
-   the store's copy in with `KAAL_EXTENSION_IDS=STORE-ID`.
+   The item's id is in the dashboard's address and on that tab.
+2. On the demo server the reviewer will use, allow both ids (the setting
+   replaces the list, so name the one in this repository too), in
+   `deploy/docker/kaal.env`, then run `deploy/docker/kaalctl start`:
+
+   ```
+   KAAL_EXTENSION_IDS=ebmkcbpcihgiaoimcpncmadadogclmld,STORE-ID
+   ```
+
+3. Put the store's key in `chrome-extension/manifest.json` as `key`, so that
+   the copy loaded from this folder has the store's id too, and set
+   `OFFICIAL_EXTENSION_ID` in `kaal/server.py` to that id
+   (`tests/test_extension_access.py` checks that the two agree). Release the
+   server. Until a server has that release, its operator lets the store's
+   copy in with `KAAL_EXTENSION_IDS` as above.
 
 ## Store listing tab
 
@@ -62,11 +76,12 @@ Saving a medical receipt opens Chrome's side panel beside the page, with the val
 Notes, totals per person and year, reimbursements, the Trash and settings are in Kaal's web app, and in Kaal for iPhone.
 
 PRIVATE BY DESIGN
-• What you save goes only to the Kaal server you connect, with a token you create there. Nothing goes to Kaal's authors: no analytics, no ads, no tracking.
+• What you save goes only to the Kaal server you connect. Nothing goes to Kaal's authors: no analytics, no ads, no tracking.
+• You connect it by signing in on your Kaal's own page. The extension never sees your password, and gets a token of its own that you can revoke.
 • The extension holds no access to any website. It reads the page you save through that tab, at the moment you save, and nothing else.
 • If a file cannot be read that way, it offers to ask Chrome for access to that one site, and only if you press the button.
 
-Setting up: in the extension's Settings, enter your Kaal's address and a token made in the web app under Settings → Tokens.
+Setting up: in the extension's Settings, enter your Kaal's address and press "Connect with my Kaal sign-in". Kaal's own sign-in page opens; sign in as you usually do and press Allow. (Or paste a token made in the web app under Settings → Tokens.) Whoever runs your Kaal server may need to allow this extension first: see the support page.
 
 Kaal is free and open source under the Apache License 2.0.
 ```
@@ -139,6 +154,12 @@ Adds two right-click entries, "Save to Kaal" and "Save as medical receipt", for 
 Chrome gives an extension no other way to save a page as a true PDF: the extension attaches to the one tab the user is saving, only when they press Save, and calls Page.printToPDF. The same route fetches a PDF or linked file through that tab, so the user's own sign-in to that site applies. It detaches as soon as the save is done; Chrome shows its "debugging this browser" bar meanwhile. It never attaches to any other tab, never runs on its own, and is used for nothing else.
 ```
 
+**identity**
+
+```text
+Used for one thing: the "Connect with my Kaal sign-in" button on the settings page calls chrome.identity.launchWebAuthFlow to open the sign-in page of the user's own Kaal server (the address they typed) in a window of its own, and to receive the single-use code that server sends back to the extension's own chromiumapp.org address. The extension exchanges the code, with a secret that never left it (PKCE), for a token for that server. It never calls getAuthToken or getProfileUserInfo, has no "oauth2" section and no "identity.email" permission, and gets no access to the user's Google account, Chrome profile or email address.
+```
+
 **sidePanel**
 
 ```text
@@ -148,14 +169,17 @@ After the user saves a medical receipt, shows Kaal's review screen in the side p
 **storage**
 
 ```text
-Keeps, on this computer, the address of the user's Kaal server, the token they entered, the host names of sites they have saved receipts from, and the progress of a save under way (session storage, cleared when Chrome closes).
+Keeps, on this computer, the address of the user's Kaal server, the token that server gave the extension (or one the user pasted), the host names of sites they have saved receipts from, and the progress of a save under way (session storage, cleared when Chrome closes).
 ```
 
-**Host permission (optional_host_permissions, \*://\*/\*)**
+**Host permission (optional_host_permissions)**
 
 ```text
 Not requested at install, and the extension holds no access to any website. Only when a file cannot be read through the tab, and the user presses "Let Kaal fetch from <that site>", does the extension ask Chrome for access to that one site, so it can fetch the file directly. The user answers Chrome's own prompt, and can take the access back on the extension's page.
 ```
+
+(The manifest names every site, `*://*/*`, as *optional*. That grants nothing
+by itself; it only lets the extension ask for one site at a time.)
 
 ### Remote code
 
@@ -171,8 +195,9 @@ nowhere else):
   saved pages and receipts.
 - **Health information**: medical receipts.
 - **Financial and payment information**: amounts paid, on receipts.
-- **Authentication information**: the token the user enters, sent only to
-  their own server.
+- **Authentication information**: the token for the user's Kaal server, sent
+  only to that server. The user's password is typed into their server's own
+  page and never reaches the extension.
 - **Website content**: the pages, files and text the user saves, with each
   page's title and address.
 
@@ -193,17 +218,18 @@ https://OWNER.github.io/REPO/privacy.html
 ## Test instructions (for the reviewer)
 
 The dashboard has a field for these. They need the same demo server as the
-iPhone app's review (see `ios/AppStore/review-notes.md`), and a token for its
-`appreview` account: sign in to the web app as `appreview`, Settings →
-Tokens, a token with read, reveal and write. Keep that token for as long as
-the extension is in review.
+iPhone app's review (see `ios/AppStore/review-notes.md`), with the store's id
+allowed on it as described under "The package" above; without that the
+reviewer sees "This Kaal does not know that extension". Try the steps
+yourself with the store's own copy (the dashboard offers the draft to its
+owner) before submitting.
 
 ```text
 Kaal for Chrome needs a Kaal server. Use our demo server, which holds only made-up data.
-1. Open the extension's Settings (the button in its popup). Address: DEMO-ADDRESS. Token: DEMO-TOKEN. Press "Save and test"; it says "Connected as …".
-2. Open any web page and click the Kaal icon, then "Save to Kaal". The popup says "Saved to Kaal." with a link to the note.
+1. Open the extension's Settings (the button in its popup). Type the address DEMO-ADDRESS and press "Connect with my Kaal sign-in". The demo server's sign-in page opens in a window: sign in with the name appreview and the password DEMO-PASSWORD, then press Allow. The settings page says "Connected as …". (The identity permission is used only for this window.)
+2. Open any web page and click the Kaal icon, then "Save to Kaal". Chrome shows its debugging bar for a moment while the page is printed to a PDF. The popup says "Saved to Kaal." with a link to the note.
 3. To try a receipt: open a page with a receipt or invoice on it (any page will do), click the Kaal icon, then "Save as a medical receipt instead". The side panel opens with what Kaal read; press "Looks right" or "Save for later".
-4. To see everything saved: open DEMO-ADDRESS in a tab and sign in with the name appreview and the password DEMO-PASSWORD.
+4. To see everything saved: open DEMO-ADDRESS in a tab and, if it asks, sign in with the same name and password.
 ```
 
 ## Distribution tab

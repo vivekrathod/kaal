@@ -714,40 +714,48 @@ is in the repository:
 - [`docs/`](docs/index.md): a small website for GitHub Pages, with the
   [privacy policy](docs/privacy.md) and [where to get help](docs/support.md)
   that both stores link to.
-- [`ios/AppStore/`](ios/AppStore/listing.md): the listing (and what the App
-  Store search showed about the name), the privacy answers, notes for App
-  Review, why the app needs no export documents, and the screenshots
+- [`ios/AppStore/`](ios/AppStore/listing.md): the
+  [listing](ios/AppStore/listing.md) (and what the App Store search showed
+  about the name), the [privacy answers](ios/AppStore/privacy-labels.md),
+  [notes for App Review](ios/AppStore/review-notes.md), why the app needs no
+  [export documents](ios/AppStore/export-compliance.md), and the screenshots
   (`make-screenshots.sh` takes them again). The app's privacy manifest is
   `ios/Kaal/PrivacyInfo.xcprivacy`.
 - [`chrome-extension/store/`](chrome-extension/store/listing.md): the listing,
   why each permission is needed, the data disclosures, and the screenshots and
   promo tile (`make-screenshots.sh`). `bin/package-extension.py` builds the
-  zip to upload.
+  zip to upload, and checks it.
 - `bin/demo-data.py`: a Kaal holding only made-up notes and receipts, for the
   screenshots and for the reviewers' demo account.
 
 `tests/test_store_material.py` checks the text against each store's limits,
-the pictures against its sizes, and the privacy manifest against the code.
+the pictures against its sizes, the zip against the extension, and the
+privacy manifest against the code.
 
 Only the owner can do the rest:
 
-1. Turn on GitHub Pages for `docs/` (Settings → Pages), and put the real
-   addresses where the listings say `OWNER.github.io/REPO`. Turn on private
-   vulnerability reporting (Security tab), which the help page points to.
+1. Turn on GitHub Pages for `docs/` (Settings → Pages, "Deploy from a
+   branch", folder `/docs`), check that the three pages open (the site has
+   not been built anywhere yet), and use their real addresses wherever the
+   listings say `OWNER.github.io/REPO`. Turn on private vulnerability
+   reporting (Security tab), which the help page points to.
 2. Run a demo server on a domain, with an `appreview` account filled with
    made-up data, and keep it running ([`review-notes.md`](ios/AppStore/review-notes.md)).
 3. For the App Store: join the Apple Developer Program, register the bundle
-   identifier under that team, create the app in App Store Connect, sign and
-   upload a build from Xcode, fill in the listing, privacy and age-rating
-   answers, add contact details, and submit. Before that, decide whether the
-   app is offered on iPad (which needs iPad screenshots too), and whether to
-   add a way to delete an account from the app: Apple requires one in apps
-   that can create accounts, and Kaal has none yet.
-4. For the Chrome Web Store: register as a developer, upload the zip, fill in
-   the listing and privacy tabs, and submit. After the first upload, put the
-   store's public key and id into the extension and the server, as
+   identifier under that team, create the app in App Store Connect (which is
+   when the name is really tested), sign and upload a build from Xcode, fill
+   in the listing, privacy and age-rating answers, add contact details, and
+   submit. Before that, decide whether the app is offered on iPad (which
+   needs iPad screenshots too), and read "Deleting the account" in the review
+   notes: an account is deleted in the web app, and the iPhone app has no
+   button of its own for it, which App Review may ask about.
+4. For the Chrome Web Store: register as a developer (a one-time fee), upload
+   the zip as a draft, allow the id the store gives it on the demo server, fill
+   in the listing and privacy tabs, and submit. Then put the store's public
+   key and id into the extension and the server, as
    [`chrome-extension/store/listing.md`](chrome-extension/store/listing.md)
-   describes, and release the server, or the store's copy cannot reach Kaal.
+   describes, and release the server; until a server has that release, its
+   operator has to allow the store's copy by hand (`KAAL_EXTENSION_IDS`).
 
 ## Licence
 

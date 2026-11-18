@@ -31,8 +31,8 @@ server, not in the app.
 So in App Store Connect, if it is ever asked by hand: *Does your app use
 encryption?* Yes. *Does it qualify for any of the exemptions?* Yes: it uses
 only encryption within Apple's operating system, and a hash for
-authentication. No documentation upload, and no separate declaration for
-France, is needed.
+authentication. App Store Connect then asks for no documents. (If it asks
+about distributing in France, the same facts apply; answer from them.)
 
 ## When to look again
 
@@ -45,7 +45,9 @@ Change the answer, and expect to provide documents, if the app ever:
   `URLSession` and the system's TLS.
 
 Adding a share extension or a widget that also uses only `URLSession`, the
-keychain and Data Protection changes nothing.
+keychain and Data Protection changes nothing, but each new target has an
+Info.plist of its own: `tests/test_store_material.py` fails if any Swift file
+under `ios/` starts using a cipher.
 
 ## The server
 

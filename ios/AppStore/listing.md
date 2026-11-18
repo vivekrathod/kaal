@@ -6,25 +6,35 @@ each block fits it.
 
 ## The name
 
-### What the App Store already has (checked 17 November 2026)
+### What the App Store already has (checked 18 November 2026)
 
 Apple's public iTunes Search API was asked for `kaal` and for `kaal vault`
-(United States store, apps, up to 50 results each; 46 and 47 came back):
+(`https://itunes.apple.com/search?term=…&entity=software&limit=50`: the
+United States store, apps, up to 50 results each; 46 and 48 came back):
 
 - **No app is called just "Kaal".** Three use it as the first word of a longer
   name: "Kaal : Divine Watch Faces" (Graphics & Design), "Kaal: Hindu Panchang
   Calendar" (Book) and "Kaal -Todo Focus & TaskPlanner" (Productivity, the
   same category as this app, released in September 2026). A news app is
-  called "KAAL ABC 6 NEWS Minnesota Iowa", after a television station.
+  called "KAAL ABC 6 NEWS Minnesota Iowa", after a television station, and
+  two calendar apps have the word inside their names ("RahuKaalApp",
+  "Muhurta: Rahu Kaal & Muhurat").
 - **Nothing is called "Kaal Vault"** or anything close. That search returns
   other vault apps (photo vaults, document vaults, calculator lockers), none
   of them named Kaal.
+- **None of the names suggested below** appears in either list.
+
+So the name is not taken outright, but it is crowded: "Kaal" is a common
+Hindi and Sanskrit word for time, which is what most of those apps mean by
+it.
 
 App Store names are unique across every country and include names reserved by
 apps that are not out yet, which the search cannot see, so "Kaal" on its own
-may still be refused. It would also be hard to find among those apps and the
-station. Use a longer name; the name under the icon on the phone stays
-"Kaal" (`CFBundleDisplayName`), whatever the store shows.
+may still be refused when the app is created in App Store Connect; that is
+the only real test, and only the owner's account can make it. On its own it
+would also be hard to find among those apps and the station. Use a longer
+name; the name under the icon on the phone stays "Kaal"
+(`CFBundleDisplayName`), whatever the store shows.
 
 ### App name (30 characters)
 

@@ -63,8 +63,11 @@ TEST_RUNNER_KAAL_STORE_SHOTS="$WORK/shots" \
 xcodebuild test -project "$ROOT/ios/Kaal.xcodeproj" -scheme Kaal -only-testing:KaalUITests/StoreScreenshots \
   -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath "$WORK/DerivedData" \
   CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= >"$WORK/xcodebuild.log" 2>&1 || {
-  tail -40 "$WORK/xcodebuild.log"
-  ls "$WORK/shots"
+  grep -E "error:|did not" "$WORK/xcodebuild.log" | tail -10
+  # What was on screen when it stopped, and the log, are kept; everything else is deleted.
+  KEPT=$(mktemp -d "${TMPDIR:-/tmp}/kaal-store-shots-failed.XXXXXX")
+  cp "$WORK/xcodebuild.log" "$WORK"/shots/*.png "$KEPT"/ 2>/dev/null || true
+  echo "The pictures were not taken. The log and the screen as it was are in $KEPT"
   exit 1
 }
 

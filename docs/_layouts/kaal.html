@@ -10,3 +10,9 @@ layout: default
 {%- assign branch = site.github.source.branch | default: "HEAD" -%}
 {%- capture repository -%}href="{{ site.github.repository_url }}/blob/{{ branch }}/{%- endcapture -%}
 {{ content | replace: 'href="../', repository }}
+{%- comment -%}
+  On GitHub the reader is already in the repository. Here they are not, so
+  every page ends with the way back to it and to its issues.
+{%- endcomment %}
+<hr>
+<p><small><a href="{{ site.github.repository_url }}">Kaal on GitHub</a> · <a href="{{ site.github.repository_url }}/issues">Ask a question or report a problem</a></small></p>

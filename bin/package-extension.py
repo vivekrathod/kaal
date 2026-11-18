@@ -4,6 +4,7 @@
     bin/package-extension.py                  # writes dist/kaal-chrome-<version>.zip
     bin/package-extension.py --output FILE
     bin/package-extension.py --list           # only say what would go in
+    bin/package-extension.py --check FILE     # unpack a zip and check it is whole
 
 It starts from chrome-extension/manifest.json and follows every file named
 from there: the pages, worker and icons in the manifest, the styles and
@@ -15,6 +16,10 @@ named but missing stops the build.
 The Web Store gives an extension an id of its own and refuses a manifest with
 a "key" field, so the manifest in the zip has none. Everything else is the
 folder as it is: there is no build step.
+
+A zip that has been built is checked before it is reported: it is unpacked
+into a temporary folder, every file its manifest, pages and scripts name must
+be there, nothing else may be, and its version must be the folder's.
 """
 from __future__ import annotations
 
@@ -23,6 +28,7 @@ import json
 import posixpath
 import re
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -108,21 +114,61 @@ def build(output: Path, folder: Path = EXTENSION) -> list[str]:
     return needed
 
 
+def check(archive_path: Path, folder: Path = EXTENSION) -> list[str]:
+    """Unpack a built zip and check it as Chrome would find it: every file its manifest, pages and
+    scripts name is there, nothing else is, and it is the version in the folder's manifest."""
+    wanted = json.loads((folder / "manifest.json").read_text())
+    with tempfile.TemporaryDirectory(prefix="kaal-extension-check-") as unpacked, zipfile.ZipFile(archive_path) as archive:
+        broken = archive.testzip()
+        if broken:
+            raise PackageError(f"{broken} in the zip is damaged.")
+        names = sorted(archive.namelist())
+        if any(name.startswith(("/", "..")) or "/../" in name or name.endswith("/") for name in names):
+            raise PackageError("The zip holds a path that is not a plain file inside the extension.")
+        archive.extractall(unpacked)
+        try:
+            manifest = json.loads((Path(unpacked) / "manifest.json").read_text())
+        except (OSError, ValueError):
+            raise PackageError("The zip has no manifest.json that can be read.") from None
+        if manifest.get("manifest_version") != 3 or not manifest.get("name"):
+            raise PackageError("The zip's manifest is not a Manifest V3 extension's.")
+        if manifest.get("version") != wanted["version"]:
+            raise PackageError(f"The zip is version {manifest.get('version')}; {folder.name}/manifest.json says {wanted['version']}.")
+        if "key" in manifest:
+            raise PackageError("The zip's manifest has a key; the Web Store's copy must not.")
+        if {name: value for name, value in wanted.items() if name != "key"} != manifest:
+            raise PackageError("The zip's manifest differs from the folder's in more than the key.")
+        needed = needed_files(Path(unpacked))   # stops at a file that is named but not in the zip
+        if needed != names:
+            raise PackageError(f"The zip holds files the extension does not use: {', '.join(sorted(set(names) - set(needed)))}.")
+        for name in needed:
+            if name != "manifest.json" and (Path(unpacked) / name).read_bytes() != (folder / name).read_bytes():
+                raise PackageError(f"{name} in the zip is not the file in {folder.name}/.")
+    return names
+
+
 def main() -> int:
     version = json.loads((EXTENSION / "manifest.json").read_text())["version"]
     parser = argparse.ArgumentParser(description="Build the Chrome Web Store zip of the extension.")
     parser.add_argument("--output", type=Path, default=ROOT / "dist" / f"kaal-chrome-{version}.zip")
     parser.add_argument("--list", action="store_true", help="Only print the files that would go in")
+    parser.add_argument("--check", type=Path, metavar="FILE", help="Unpack this zip and check it holds everything it names, at this version")
     args = parser.parse_args()
     try:
+        if args.check:
+            names = check(args.check)
+            print(f"{args.check} is whole: {len(names)} files, version {version}, every file it names is in it.")
+            return 0
         needed = needed_files() if args.list else build(args.output)
-    except PackageError as problem:
+        if not args.list:
+            check(args.output)
+    except (PackageError, OSError, zipfile.BadZipFile) as problem:
         print(f"Not built: {problem}", file=sys.stderr)
         return 1
     print("\n".join(needed))
     print(f"\nLeft out: {', '.join(left_out(EXTENSION, needed)) or 'nothing'}")
     if not args.list:
-        print(f"Wrote {args.output} ({args.output.stat().st_size // 1024} KB, version {version}).")
+        print(f"Wrote {args.output} ({args.output.stat().st_size // 1024} KB, version {version}), unpacked it and checked it.")
     return 0
 
 

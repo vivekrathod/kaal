@@ -2,9 +2,9 @@
 
 A template for App Store Connect → the version → App Review Information. Fill
 in the parts in CAPITALS, delete the share-extension section if the build has
-no share extension, and paste the text from "What Kaal is" down into
-**Notes**. The sign-in name and password also go in the **Sign-in required**
-fields above it.
+no share extension (the app in this repository has none yet), and paste the
+text from "What Kaal is" down into **Notes**. The sign-in name and password
+also go in the **Sign-in required** fields above it.
 
 ## Before submitting: the demo server
 
@@ -34,8 +34,9 @@ needs one it can reach from the internet, over HTTPS, holding nothing real.
 
 3. Fill its vault with the made-up notes and receipts the screenshots show.
    Sign in to the web app as `appreview`, make a token under Settings →
-   Tokens with read, reveal and write, save it to a file, and on any computer
-   with this repository and Python with Pillow:
+   Tokens with read, reveal and write (it asks for the account's password),
+   save it to a file, and on any computer with this repository and Python
+   with Pillow:
 
    ```bash
    bin/demo-data.py fill --url https://DEMO-ADDRESS --token-file appreview.token
@@ -49,6 +50,19 @@ needs one it can reach from the internet, over HTTPS, holding nothing real.
 Keep the server running until the review is finished, and for later versions
 too. Nothing in it is real: every name, receipt and address is made up and
 marked SAMPLE.
+
+Three things to know about that server:
+
+- The reviewer can change and delete what is in it, and can delete the
+  `appreview` account itself (see "Deleting the account" below). Before each
+  submission, sign in as `appreview` and look; if the account is gone, make
+  it again from step 2. The demo server's daily backups keep the last 14
+  days (`deploy/docker/kaalctl backups`, `restore`).
+- The sign-in pages take 30 requests a minute from one address
+  (`KAAL_SIGN_IN_PER_MINUTE`), and five wrong passwords for a name slow
+  further tries down. A reviewer signing in by hand never comes near either.
+- The same server serves the Chrome extension's review; it needs the store's
+  extension id allowed (`chrome-extension/store/listing.md`).
 
 ## What Kaal is
 
@@ -81,6 +95,17 @@ analytics.
 Accounts are made only by the person who runs a Kaal server, by invitation;
 the demo server offers no way to create one, so neither does the app.
 
+## Deleting the account
+
+The app creates no accounts, so it has no account-deletion screen of its own.
+An account on a Kaal server is deleted by its owner in that server's web app:
+open DEMO-ADDRESS in Safari, sign in, and choose Settings → Delete my account.
+It shows what would be deleted (the account, its tokens, and every vault only
+that person belongs to), asks for the password, and deletes it for good. The
+app is then signed out the next time it talks to the server. Please do not
+finish that step on the demo account; the page before the password is enough
+to see it.
+
 ## What to try
 
 - **Write a note:** Add → Write a note. Type a few lines and tap Save. It
@@ -103,15 +128,18 @@ the demo server offers no way to create one, so neither does the app.
   with a picture in it.
 - **Settings:** the account, the vault and who shares it, signed-in browsers
   and apps, and "Sign out of this app".
+- **Without a connection:** turn on Airplane Mode and write a note. It waits
+  on the Add screen, and is sent when the connection is back.
 
 ## The share extension
 
-DELETE THIS SECTION IF THE BUILD HAS NO SHARE EXTENSION.
+DELETE THIS SECTION IF THE BUILD HAS NO SHARE EXTENSION, AND CHECK THE STEPS
+AGAINST THE BUILD IF IT HAS ONE: THEY WERE WRITTEN BEFORE IT EXISTED.
 
-In Safari, Files or Photos, tap the share button and choose Kaal. Choose
-whether to save it as a note or as a receipt, and tap Save. It reaches the
-demo server like anything added in the app, and shows under Notes or
-Receipts.
+Sign in to the app first. Then, in Safari, Files or Photos, tap the share
+button and choose Kaal. Choose whether to save it as a note or as a receipt,
+and tap Save. It reaches the demo server like anything added in the app, and
+shows under Notes or Receipts.
 
 ## Permissions
 

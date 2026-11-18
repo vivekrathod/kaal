@@ -39,10 +39,20 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.24.0 or newer.
 ### Signing in
 
 - **Forgotten password:** use one of the recovery codes you were given when
-  you chose it (the sign-in page offers "Forgot your password?"), or ask
-  whoever runs your Kaal for a new setup link.
+  you chose it (the sign-in page offers "Forgot your password?"). With no
+  codes left, ask whoever runs your Kaal's server for a new setup link
+  (`kaal-server account setup-link NAME`, or `deploy/docker/kaalctl setup-link
+  NAME`). An administrator cannot make one in the web app for an account that
+  is already in use.
 - **"Too many wrong tries":** after five wrong passwords for one sign-in
   name, each further try has to wait, from one minute up to fifteen.
+- **"Too many tries from here. Wait a minute and try again.":** the sign-in
+  pages take 30 requests a minute from one address. If everyone at your Kaal
+  sees this at once, the server is behind a proxy it has not been told to
+  trust, and takes everyone for one visitor: set `KAAL_TRUSTED_PROXIES` to
+  the proxy's address (the Docker install does this by itself).
+- **Making a token asks for your password** (or, if you sign in only through
+  Google, your sign-in name). That is on purpose: a token can do what you can.
 - **Signed out unexpectedly:** a browser stays signed in for 30 days and the
   iPhone app for a year, unless the session is signed out under Settings, the
   password is changed, or a recovery code is used.
@@ -71,10 +81,20 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.24.0 or newer.
 ### Kaal for Chrome
 
 - **"Kaal isn't connected yet"** or **"didn't accept this extension's
-  token":** open the extension's Settings and enter Kaal's address and a
-  current token. Make the token in the web app under Settings → Tokens.
+  token":** open the extension's Settings, enter Kaal's address and press
+  "Connect with my Kaal sign-in". Or paste a token made in the web app under
+  Settings → Tokens.
 - **"Can't reach Kaal":** this computer is not on a network that can reach
-  your Kaal server.
+  your Kaal server; or the server does not allow this copy of the extension.
+  A Kaal server answers only the extensions it knows: whoever runs it lists
+  their ids in `KAAL_EXTENSION_IDS` (the id is on the extension's card at
+  `chrome://extensions`).
+- **"This Kaal does not know that extension"** when connecting: the same
+  cause, and the same cure.
+- **"Connecting was cancelled, or Kaal's page could not be opened":** the
+  sign-in window was closed before Allow was pressed, or the address is
+  wrong. A Kaal server from before this button existed cannot answer it;
+  update the server, or paste a token.
 - **"Chrome wouldn't let Kaal read this page":** the developer tools are open
   on that tab, or it is one of Chrome's own pages.
 - **A file on this computer** (`file://`): turn on "Allow access to file URLs"
@@ -91,6 +111,15 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.24.0 or newer.
 - **Kaal says its key is missing:** put back the copy you saved with
   `deploy/docker/kaalctl key-restore`. Without the key nothing in Kaal can be
   read, by anyone; Kaal never makes a new key over existing data.
+
+### Leaving
+
+- **Taking everything with you:** Settings → Vaults and sharing → Download a
+  copy, in the web app, gives an owner of a vault a zip of it that needs no
+  Kaal to read.
+- **Deleting your account or a vault:** Settings → Delete my account, and
+  Settings → Vaults and sharing → Delete this vault, in the web app. The
+  [privacy policy](privacy.md) says exactly what goes and what stays.
 
 More answers are in [Installing Kaal](install.md). How Kaal treats your data
 is in the [privacy policy](privacy.md).

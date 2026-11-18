@@ -57,8 +57,17 @@ def test_the_web_store_text_fits_and_matches_the_manifest():
     # The store takes the name and the summary from the manifest itself.
     assert found["Name"][1] == manifest["name"] and found["Summary"][1] == manifest["description"]
     listing = (WEB_STORE / "listing.md").read_text()
-    for permission in [*manifest["permissions"], "optional_host_permissions"]:
-        assert f"**{permission}" in listing or f"({permission}" in listing, f"no justification for {permission}"
+    # One justification for each permission the manifest asks for, and none for one it does not.
+    reasons = dict(re.findall(r"^\*\*([A-Za-z]+)[^*\n]*\*\*\n\n```text\n(.*?)\n```", listing, re.M | re.S))
+    assert sorted(reasons) == sorted([*manifest["permissions"], "Host"]) and manifest["optional_host_permissions"] == ["*://*/*"]
+    for permission, reason in reasons.items():
+        assert 0 < len(reason) <= 1000, f"the reason for {permission} is {len(reason)} characters; the store takes 1000"
+    purpose = re.search(r"### Single purpose\n\n```text\n(.*?)\n```", listing, re.S)[1]
+    assert 0 < len(purpose) <= 1000
+    # What the identity permission is said to be for stays true: one call, to open Kaal's own sign-in page.
+    scripts = "\n".join(path.read_text() for path in EXT.glob("*.js"))
+    assert re.findall(r"chrome\.identity\.(\w+)", scripts) == ["launchWebAuthFlow"]
+    assert "oauth2" not in manifest and "identity.email" not in manifest["permissions"]
 
 
 def test_the_screenshots_are_the_sizes_each_store_takes_without_transparency():
@@ -94,6 +103,40 @@ def test_the_package_holds_exactly_what_the_extension_uses(tmp_path):
     assert (tmp_path / "kaal.zip").read_bytes() == (tmp_path / "again.zip").read_bytes()
 
 
+def test_a_built_package_is_unpacked_and_checked(tmp_path):
+    package = package_module()
+    built = package.build(tmp_path / "kaal.zip")
+    assert package.check(tmp_path / "kaal.zip") == built
+    version = json.loads((EXT / "manifest.json").read_text())["version"]
+
+    def rebuilt(name, change):
+        """The good zip with one thing wrong."""
+        with zipfile.ZipFile(tmp_path / "kaal.zip") as good, zipfile.ZipFile(tmp_path / name, "w") as bad:
+            for entry in good.namelist():
+                data = change(entry, good.read(entry))
+                if data is not None:
+                    bad.writestr(entry, data)
+            for entry, data in (change(None, None) or {}).items():
+                bad.writestr(entry, data)
+        return tmp_path / name
+
+    def older(entry, data):
+        return data.replace(f'"version": "{version}"'.encode(), b'"version": "0.0.1"') if entry == "manifest.json" else data
+
+    def with_key(entry, data):
+        return data.replace(b'"manifest_version": 3,', b'"manifest_version": 3, "key": "abc",') if entry == "manifest.json" else data
+
+    for name, change, told in (
+            ("missing.zip", lambda entry, data: None if entry == "lib.js" else data, "lib.js"),
+            ("no-icon.zip", lambda entry, data: None if entry == "icons/icon-48.png" else data, "icon-48.png"),
+            ("older.zip", older, "version"),
+            ("keyed.zip", with_key, "key"),
+            ("extra.zip", lambda entry, data: {"store/listing.md": b"x"} if entry is None else data, "store/listing.md"),
+            ("changed.zip", lambda entry, data: data + b"\n// changed" if entry == "popup.js" else data, "popup.js")):
+        with pytest.raises(package.PackageError, match=told):
+            package.check(rebuilt(name, change))
+
+
 def test_a_missing_file_stops_the_package(tmp_path):
     package = package_module()
     folder = tmp_path / "extension"
@@ -114,6 +157,35 @@ def test_the_website_pages_link_only_to_what_exists():
             if not target.startswith(("http://", "https://", "mailto:")):
                 assert (ROOT / "docs" / target).exists(), f"{page} links {target}, which does not exist"
     assert "layout: kaal" in (ROOT / "docs" / "_config.yml").read_text() and (ROOT / "docs" / "_layouts" / "kaal.html").exists()
+    # The stores are given these three addresses; the listings name them the same way.
+    for listing in (APP_STORE / "listing.md", WEB_STORE / "listing.md"):
+        text = listing.read_text()
+        assert "https://OWNER.github.io/REPO/privacy.html" in text and "https://OWNER.github.io/REPO/support.html" in text
+
+
+def test_the_privacy_policy_covers_what_each_part_asks_for():
+    policy = (ROOT / "docs" / "privacy.md").read_text()
+    manifest = json.loads((EXT / "manifest.json").read_text())
+    # Each permission of the extension, by the name Chrome shows for it.
+    shown = {"activeTab": "Active tab", "alarms": "alarms", "contextMenus": "context menus", "debugger": "Debugger",
+             "identity": "Identity", "sidePanel": "Side panel", "storage": "storage"}
+    assert sorted(shown) == sorted(manifest["permissions"]), "a permission was added or removed: say so in docs/privacy.md"
+    for permission, name in shown.items():
+        assert f"**{name}**" in policy, f"docs/privacy.md does not explain {permission}"
+    # Each thing the iPhone app asks permission for.
+    project = (ROOT / "ios" / "Kaal.xcodeproj" / "project.pbxproj").read_text()
+    asked = set(re.findall(r"INFOPLIST_KEY_NS(\w+)UsageDescription", project))
+    assert asked == {"Camera", "Microphone", "SpeechRecognition"}, "the app asks for something new: say so in docs/privacy.md and ios/AppStore/"
+    for name in ("**Camera**", "**Microphone and Speech Recognition**", "**Photos and files**"):
+        assert name in policy
+    # The session cookie by the name the server gives it, and the ways out that the web app offers.
+    from kaal import server
+    assert f"`{server.HOST_SESSION_COOKIE}`" in policy and f"`{server.SESSION_COOKIE}`" in policy
+    settings = (ROOT / "kaal" / "web" / "views" / "settings.js").read_text() + (ROOT / "kaal" / "web" / "views" / "access.js").read_text()
+    for offered in ("Delete my account", "Delete this vault", "Download a copy"):
+        assert offered in settings and offered in policy, offered
+    for choice in ("ollama", "anthropic", "claude-cli", "openai"):
+        assert f"`{choice}`" in policy
 
 
 def test_the_privacy_manifest_declares_every_api_the_app_must_give_a_reason_for():
