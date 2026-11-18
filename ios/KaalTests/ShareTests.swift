@@ -350,3 +350,14 @@ final class ShareReaderTests: XCTestCase {
     }
 }
 #endif
+
+final class RefusalTests: XCTestCase {
+    func testARefusalNamesWhatToChangeAndTagsAreKeptToWhatKaalTakes() {
+        XCTAssertEqual(NoteText.refused(["body.title"]), "Kaal did not take the title: it is too long, or not as Kaal expects it. Shorten it and try again.")
+        XCTAssertEqual(NoteText.refused(["body.tags.0", "body.body"]), "Kaal did not take a tag or the text: it is too long, or not as Kaal expects it. Shorten it and try again.")
+        XCTAssertNil(NoteText.refused([]))
+        XCTAssertNil(NoteText.refused(["query.limit"]))
+        let long = String(repeating: "x", count: 300)
+        XCTAssertEqual(NoteText.tags(from: "home, \(long)").map(\.count), [4, NoteText.tagLimit])
+    }
+}

@@ -40,7 +40,7 @@ struct NoteEditor: View {
                 StatusLine(status: status)
                 if status.message == nil { ProgressView().frame(maxWidth: .infinity) }
             } else {
-                Section("Title") { TextField("Title", text: $title) }
+                Section("Title") { TextField("Title", text: $title).onChange(of: title) { _, typed in if typed.count > NoteText.titleLimit { title = String(typed.prefix(NoteText.titleLimit)) } } }
                 Section("Tags") { TextField("home, taxes", text: $tags).typedExactly() }
                 Section {
                     Picker("Mode", selection: $previewing) {

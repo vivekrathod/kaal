@@ -53,6 +53,53 @@ final class KeychainTests: XCTestCase {
         XCTAssertEqual(Keychain.read(account), "ks_made_up")
     }
 
+    func testASignInKeptBeforeThereWasAnExtensionIsFoundAndNeverLostWhenShared() throws {
+        try needKeychain()
+        // As the app kept it before it had an extension: added with no group named.
+        let item: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "app.kaal.session",
+                                   kSecAttrAccount as String: account, kSecValueData as String: Data("ks_made_up_old".utf8),
+                                   kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
+        XCTAssertEqual(SecItemAdd(item as CFDictionary, nil), errSecSuccess)
+        XCTAssertEqual(Keychain.read(account), "ks_made_up_old", "found wherever the keychain put it")
+        let shared = Keychain.share(account)
+        XCTAssertEqual(Keychain.read(account), "ks_made_up_old", "moved or left, never lost")
+        let groups = Keychain.groups(holding: account)
+        XCTAssertEqual(groups.count, 1, "one copy afterwards, not one in each group")
+        XCTAssertEqual(shared, groups.first == Keychain.sharedGroup)
+    }
+
+    func testTheExtensionInsideTheAppNamesTheSameGroupAsTheApp() throws {
+        let plugIns = try XCTUnwrap(Bundle.main.builtInPlugInsURL)
+        let info = try XCTUnwrap(NSDictionary(contentsOf: plugIns.appendingPathComponent("KaalShare.appex/Info.plist")))
+        let theirs = try XCTUnwrap(info["KaalKeychainGroup"] as? String)
+        let ours = try XCTUnwrap(Bundle.main.object(forInfoDictionaryKey: "KaalKeychainGroup") as? String)
+        XCTAssertEqual(theirs, ours, "the extension would look for the sign-in where the app does not keep it")
+    }
+
+    @MainActor
+    func testAnAppThatKnowsOfNoKaalRemovesWhatAnEarlierInstallationLeft() async throws {
+        try needKeychain()
+        // What the app itself keeps on this simulator is put back afterwards.
+        let before = (Keychain.read(Keychain.server), Keychain.read(Keychain.session))
+        defer {
+            Keychain.remove(Keychain.server)
+            Keychain.remove(Keychain.session)
+            if let server = before.0 { Keychain.write(server, for: Keychain.server) }
+            if let session = before.1 { Keychain.write(session, for: Keychain.session) }
+        }
+        // iOS keeps the keychain when an app is deleted: a new installation finds these there.
+        Keychain.write("https://kaal.example", for: Keychain.server)
+        Keychain.write("ks_made_up_left_behind", for: Keychain.session)
+        XCTAssertNotNil(KaalAPI.kept(), "the extension would be signed in")
+        let name = "kaal-new-installation-\(UUID().uuidString)"
+        let model = AppModel(defaults: try XCTUnwrap(UserDefaults(suiteName: name)))
+        defer { UserDefaults().removePersistentDomain(forName: name) }
+        await model.start()
+        XCTAssertEqual(model.phase, .signedOut)
+        XCTAssertNil(Keychain.read(Keychain.session))
+        XCTAssertNil(KaalAPI.kept(), "and now it is not")
+    }
+
     func testTheGroupIsNamedAfterTheAppNotTheProgramAsking() throws {
         // The app and its extension must name the same group, which is the app's own identifier
         // behind whatever prefix signing gives it, so that a sign-in kept before there was an

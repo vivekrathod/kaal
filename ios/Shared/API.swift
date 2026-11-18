@@ -125,7 +125,9 @@ final class KaalAPI: @unchecked Sendable {
         let (data, response) = try await send(request)
         let answer = JSON.parse(data)
         guard (200..<300).contains(response.statusCode) else {
-            throw APIError(status: response.statusCode, message: answer.error.string ?? "Something went wrong (\(response.statusCode)).", kind: answer.kind.text)
+            // "The request is not valid" does not say what to change; the fields Kaal names do.
+            let named = response.statusCode == 400 ? NoteText.refused(answer.details.fields.strings) : nil
+            throw APIError(status: response.statusCode, message: named ?? answer.error.string ?? "Something went wrong (\(response.statusCode)).", kind: answer.kind.text)
         }
         return answer
     }

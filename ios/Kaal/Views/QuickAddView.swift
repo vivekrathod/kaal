@@ -232,7 +232,7 @@ struct FilesAsNote: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Title") { TextField(defaultTitle, text: $title) }
+                Section("Title") { TextField(defaultTitle, text: $title).onChange(of: title) { _, typed in if typed.count > NoteText.titleLimit { title = String(typed.prefix(NoteText.titleLimit)) } } }
                 Section("Tags") { TextField("home, taxes", text: $tags).typedExactly() }
                 Section("Anything to add?") { TextField("Optional", text: $words, axis: .vertical).lineLimit(2...6) }
                 Section(Format.plural(files.count, "file")) {

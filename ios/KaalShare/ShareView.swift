@@ -77,6 +77,14 @@ final class ShareModel {
         }
     }
 
+    /// What Save does, kept so that Cancel can stop it part-way.
+    private var saving: Task<Void, Never>?
+
+    func startSaving() {
+        guard canSave else { return }
+        saving = Task { await save() }
+    }
+
     func save() async {
         guard canSave, let api else { return }
         phase = .saving
@@ -89,6 +97,10 @@ final class ShareModel {
             tidy()
             try? await Task.sleep(for: .milliseconds(800))
             close(true)
+        } catch is CancellationError {
+            // Cancel was pressed while it was sending: cancel() closes the sheet.
+            phase = .ready
+            busy(false)
         } catch {
             // The sheet stays open, with what was typed, to try again or cancel.
             problem = Sharing.problem(error)
@@ -98,6 +110,8 @@ final class ShareModel {
     }
 
     func cancel() {
+        // A send that is under way is stopped: nobody is held in the sheet by a slow connection.
+        saving?.cancel()
         tidy()
         // A note is made first and given its files after. One that was made and then given up on
         // would stay in Kaal with some of its files and text pointing at the rest: it goes to
@@ -156,11 +170,11 @@ struct ShareView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(cannot == nil ? "Cancel" : "Close") { model.cancel() }.disabled(working)
+                    Button(cannot == nil ? "Cancel" : "Close") { model.cancel() }.disabled(model.phase == .saved)
                 }
                 if cannot == nil {
                     ToolbarItem(placement: .confirmationAction) {
-                        Button(model.problem == nil ? "Save" : "Try again") { Task { await model.save() } }
+                        Button(model.problem == nil ? "Save" : "Try again") { model.startSaving() }
                             .bold()
                             .disabled(!model.canSave)
                     }
@@ -191,6 +205,9 @@ struct ShareView: View {
             Section {
                 TextField(model.savingAs == .receipt ? "Optional" : model.sharing.suggestedTitle, text: $model.title)
                     .disabled(working)
+                    .onChange(of: model.title) { _, typed in
+                        if typed.count > NoteText.titleLimit { model.title = String(typed.prefix(NoteText.titleLimit)) }
+                    }
             } header: {
                 Text("Title")
             } footer: {
