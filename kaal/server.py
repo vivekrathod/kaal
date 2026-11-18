@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import contextlib
+import functools
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -112,6 +114,12 @@ class Settings:
     # The address people open Kaal at, such as https://kaal.example.org. Sign-in
     # services send the browser back to it. An administrator can also set it in the web app.
     public_url: str = ""
+    # Proxies whose X-Forwarded-For is believed, so limits apply per visitor rather than per proxy.
+    trusted_proxies: tuple[str, ...] = ("127.0.0.1/32", "::1/128")
+    # Requests a minute one address may make to the routes that need no sign-in.
+    strangers_per_minute: int = 30
+    # Passwords checked at the same moment; more wait briefly, then are told to try again.
+    password_checks: int = 4
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "Settings":
@@ -134,7 +142,78 @@ class Settings:
             cookie_secure=(env.get("KAAL_COOKIE_SECURE") or "1").strip() != "0",
             extension_origins=extension_origins(env),
             public_url=(env.get("KAAL_PUBLIC_URL") or "").strip().rstrip("/"),
+            trusted_proxies=trusted_proxy_list(env.get("KAAL_TRUSTED_PROXIES") or ""),
+            strangers_per_minute=int(env.get("KAAL_SIGN_IN_PER_MINUTE") or 30),
+            password_checks=int(env.get("KAAL_PASSWORD_CHECKS") or 4),
         )
+
+
+PRIVATE_NETWORKS = ("127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "fc00::/7", "fe80::/10")
+STRANGER_BODY_BYTES = 1 * 1024 * 1024
+MAX_TOKENS_PER_PERSON = 50
+JSON_BODY_BYTES = 8 * 1024 * 1024
+
+
+def trusted_proxy_list(text: str) -> tuple[str, ...]:
+    """KAAL_TRUSTED_PROXIES: addresses or networks, comma-separated; "private" for every private
+    network (right when only a proxy on the same machine or network can reach Kaal); "none"."""
+    if not text.strip():
+        return ("127.0.0.1/32", "::1/128")
+    chosen: list[str] = []
+    for part in (item.strip().lower() for item in text.split(",")):
+        if not part:
+            continue
+        if part == "none":
+            return ()
+        if part == "private":
+            chosen += PRIVATE_NETWORKS
+            continue
+        try:
+            ipaddress.ip_network(part, strict=False)
+        except ValueError:
+            raise ValueError(f"KAAL_TRUSTED_PROXIES: {part!r} is not an address or network") from None
+        chosen.append(part)
+    return tuple(chosen)
+
+
+@functools.lru_cache(maxsize=16)
+def _networks(listed: tuple[str, ...]) -> tuple[Any, ...]:
+    return tuple(ipaddress.ip_network(item, strict=False) for item in listed)
+
+
+def _is_trusted(address: str, listed: tuple[str, ...]) -> bool:
+    try:
+        parsed = ipaddress.ip_address(address.strip("[]"))
+    except ValueError:
+        return False
+    return any(parsed in network for network in _networks(listed))
+
+
+def client_address(request: Request) -> str:
+    """Who is asking: the connecting address, or, behind a trusted proxy, the first address in
+    X-Forwarded-For that is not a trusted proxy. An IPv6 address counts as its /64."""
+    listed = request.app.state.kaal.settings.trusted_proxies
+    address = request.client.host if request.client else ""
+    if _is_trusted(address, listed):
+        hops = [hop.strip() for hop in request.headers.get("x-forwarded-for", "").split(",") if hop.strip()]
+        for hop in reversed(hops):
+            address = hop
+            if not _is_trusted(hop, listed):
+                break
+    try:
+        parsed = ipaddress.ip_address(address.strip("[]"))
+    except ValueError:
+        return "unknown"
+    if parsed.version == 6:
+        if parsed.ipv4_mapped is not None:
+            return str(parsed.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{parsed}/64", strict=False))
+    return str(parsed)
+
+
+def log_safe(text: str, limit: int = 80) -> str:
+    """Text from outside (a token's name, a method, a provider's message) made safe for one log line."""
+    return re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]", "?", str(text))[:limit]
 
 
 class ExtractionWorker:
@@ -199,9 +278,16 @@ class RateLimiter:
         self._buckets: dict[str, tuple[float, float]] = {}
         self._lock = threading.Lock()
 
+    REMEMBERED = 20_000
+
     def allow(self, key: str) -> bool:
         now = time.monotonic()
         with self._lock:
+            if len(self._buckets) >= self.REMEMBERED and key not in self._buckets:
+                # A bucket untouched for a minute is full again; forgetting it changes nothing.
+                self._buckets = {name: entry for name, entry in self._buckets.items() if now - entry[1] < 60}
+                if len(self._buckets) >= self.REMEMBERED:
+                    self._buckets.pop(next(iter(self._buckets)))
             tokens_left, last = self._buckets.get(key, (float(self.per_minute), now))
             tokens_left = min(float(self.per_minute), tokens_left + (now - last) * self.per_minute / 60.0)
             if tokens_left < 1:
@@ -255,18 +341,34 @@ class ExtensionCorsMiddleware:
 
 
 class BodyLimitMiddleware:
-    """Reject request bodies over a byte limit, declared or streamed."""
+    """Reject request bodies over a byte limit, declared or streamed.
 
-    def __init__(self, app: Any, limit: int) -> None:
+    Only an upload from someone signed in may be large. Anything else (a JSON body, or any body
+    from a request that carries no valid credential) is held to a small limit, checked before
+    the body is read, so strangers cannot make the server read or store large bodies."""
+
+    def __init__(self, app: Any, limit: int, credentials: Callable[[dict[bytes, bytes]], bool] | None = None) -> None:
         self.app = app
         self.limit = limit
+        self.credentials = credentials
+
+    def _limit_for(self, headers: dict[bytes, bytes], declared: int | None) -> int:
+        limit = self.limit
+        if not headers.get(b"content-type", b"").lower().startswith(b"multipart/"):
+            limit = min(limit, JSON_BODY_BYTES)
+        if (declared is None or declared > STRANGER_BODY_BYTES) and self.credentials is not None and not self.credentials(headers):
+            limit = min(limit, STRANGER_BODY_BYTES)
+        return limit
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        declared = dict(scope.get("headers") or []).get(b"content-length")
-        if declared and declared.isdigit() and int(declared) > self.limit:
+        headers = dict(scope.get("headers") or [])
+        raw = headers.get(b"content-length")
+        declared = int(raw) if raw and raw.isdigit() else None
+        limit = self._limit_for(headers, declared)
+        if declared is not None and declared > limit:
             await _send_json(send, 413, {"error": "Request is too large.", "kind": "too_large"})
             return
         received = 0
@@ -277,7 +379,7 @@ class BodyLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.limit:
+                if received > limit:
                     raise _TooLarge()
             return message
 
@@ -447,35 +549,67 @@ def create_vault(store: accounts.AccountStore, name: str, owner: str) -> dict[st
 
 
 class SignInGuard:
-    """Slows password guessing. After five wrong tries for one sign-in name the
-    next try must wait: a minute at first, doubling to fifteen. A correct
-    sign-in clears it. Kept in memory; a restart clears everything."""
+    """Slows password guessing without letting anyone lock a person out.
 
-    FREE_TRIES, FIRST_WAIT, LONGEST_WAIT, REMEMBERED = 5, 60.0, 900.0, 5000
+    Three counts of wrong tries, kept in memory (a restart clears them):
+    a sign-in name tried from one address (five free, then a minute, doubling to fifteen);
+    one address across every name (twenty free, then the same); and a sign-in name from
+    everywhere together (fifty free, then at most a minute, so many addresses together
+    cannot guess fast, but neither can they keep the person out for long). A correct
+    sign-in clears its name's counts. Tries for one name are checked one at a time, so
+    parallel guesses cannot slip past a count.
+    """
+
+    RULES = {"pair": (5, 60.0, 900.0), "from": (20, 60.0, 900.0), "name": (50, 5.0, 60.0)}
+    REMEMBERED = 20_000
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._seen: dict[str, tuple[int, float]] = {}   # failures so far, time the next try is allowed
+        self._seen: dict[tuple[str, str], tuple[int, float, float]] = {}   # failures, next try allowed at, last failure
+        self._names = [threading.Lock() for _ in range(64)]
 
-    def wait(self, login: str) -> int:
-        """Seconds until this sign-in name may be tried again; 0 means now."""
-        with self._lock:
-            _count, allowed_at = self._seen.get(login.lower(), (0, 0.0))
-        return max(0, int(allowed_at - time.monotonic() + 0.999))
+    def one_at_a_time(self, login: str) -> threading.Lock:
+        """Hold this while checking a password for ``login``."""
+        return self._names[int(hashlib.sha256(login.lower().encode()).hexdigest()[:8], 16) % len(self._names)]
 
-    def failed(self, login: str) -> None:
-        key = login.lower()
-        with self._lock:
-            count = self._seen.get(key, (0, 0.0))[0] + 1
-            over = count - self.FREE_TRIES
-            pause = min(self.LONGEST_WAIT, self.FIRST_WAIT * 2 ** (over - 1)) if over > 0 else 0.0
-            if len(self._seen) >= self.REMEMBERED and key not in self._seen:
-                self._seen.pop(next(iter(self._seen)))
-            self._seen[key] = (count, time.monotonic() + pause)
+    @staticmethod
+    def _keys(login: str, address: str) -> dict[str, tuple[str, str]]:
+        name = login.lower()
+        return {"pair": ("pair", f"{name}\n{address}"), "from": ("from", address), "name": ("name", name)}
 
-    def succeeded(self, login: str) -> None:
+    def wait(self, login: str, address: str = "") -> int:
+        """Seconds until this name may be tried again from this address; 0 means now."""
+        now = time.monotonic()
         with self._lock:
-            self._seen.pop(login.lower(), None)
+            latest = max((self._seen.get(key, (0, 0.0, 0.0))[1] for key in self._keys(login, address).values()), default=0.0)
+        return max(0, int(latest - now + 0.999))
+
+    def failed(self, login: str, address: str = "") -> None:
+        now = time.monotonic()
+        with self._lock:
+            for kind, key in self._keys(login, address).items():
+                free, first, longest = self.RULES[kind]
+                count = self._seen.get(key, (0, 0.0, 0.0))[0] + 1
+                over = count - free
+                pause = min(longest, first * 2 ** min(over - 1, 20)) if over > 0 else 0.0
+                if key not in self._seen and len(self._seen) >= self.REMEMBERED:
+                    self._forget_some(now)
+                self._seen[key] = (count, now + pause, now)
+
+    def _forget_some(self, now: float) -> None:
+        # First what no longer holds anyone back and has been quiet for fifteen minutes; then, oldest
+        # first, what holds nobody back now; a count that is holding someone back goes only as a last resort.
+        self._seen = {key: entry for key, entry in self._seen.items() if entry[1] > now or now - entry[2] < 900}
+        while len(self._seen) >= self.REMEMBERED:
+            idle = [key for key, entry in self._seen.items() if entry[1] <= now]
+            pool = idle or list(self._seen)
+            self._seen.pop(min(pool, key=lambda key: self._seen[key][2]))
+
+    def succeeded(self, login: str, address: str = "") -> None:
+        keys = self._keys(login, address)
+        with self._lock:
+            self._seen.pop(keys["pair"], None)
+            self._seen.pop(keys["name"], None)
 
 
 def device_label(user_agent: str) -> str:
@@ -559,11 +693,51 @@ def viewable_type(name: str, data: bytes) -> str | None:
 
 
 SESSION_COOKIE = "kaal_session"
+# Over https the browser cookie is "__Host-" prefixed: only this exact host can set it, so another
+# site under the same domain (a sibling on a tailnet, say) cannot plant a session in your browser.
+HOST_SESSION_COOKIE = "__Host-kaal_session"
+# Apps (the iPhone app) send their session in this header instead of a cookie.
+SESSION_HEADER = "x-kaal-session"
 SESSION_SECONDS = 30 * 24 * 3600
 # Held by the browser for one trip to a sign-in service and back, so the trip
 # can only be finished by the browser that started it.
 FLOW_COOKIE = "kaal_signin"
+HOST_FLOW_COOKIE = "__Host-kaal_signin"
 FLOW_PATH = "/v1/sign-in/with"
+
+
+def session_cookie_name(settings: "Settings") -> str:
+    return HOST_SESSION_COOKIE if settings.cookie_secure else SESSION_COOKIE
+
+
+def flow_cookie_name(settings: "Settings") -> str:
+    return HOST_FLOW_COOKIE if settings.cookie_secure else FLOW_COOKIE
+
+
+def presented_session(request: Request) -> str:
+    """The session (or, from older sign-ins, the token) a request carries: the app's header, or the
+    browser's cookie. The un-prefixed cookie is believed over https only from a client that is not a
+    browser (one sending no Sec-Fetch-Site), which is what an app installed before the change sends."""
+    settings = request.app.state.kaal.settings
+    header = request.headers.get(SESSION_HEADER, "").strip()
+    if header:
+        return header
+    cookie = request.cookies.get(session_cookie_name(settings), "").strip()
+    if cookie or not settings.cookie_secure:
+        return cookie
+    return request.cookies.get(SESSION_COOKIE, "").strip() if not request.headers.get("sec-fetch-site") else ""
+
+
+def set_session_cookie(response: Response, settings: "Settings", value: str) -> None:
+    response.set_cookie(session_cookie_name(settings), value, max_age=SESSION_SECONDS, path="/", httponly=True, secure=settings.cookie_secure, samesite="strict")
+
+
+def clear_session_cookie(response: Response, settings: "Settings") -> None:
+    response.delete_cookie(session_cookie_name(settings), path="/", httponly=True, secure=settings.cookie_secure, samesite="strict")
+    if settings.cookie_secure:
+        response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=True, samesite="strict")
+
+
 _ADDRESS = re.compile(r"https://[A-Za-z0-9.-]+(?::\d{1,5})?|http://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?")
 
 
@@ -607,15 +781,31 @@ def _from_cookie_checked(request: Request) -> None:
         raise HTTPException(403, "This request did not come from the Kaal web app.")
 
 
-def _refuse_unknown(state: AppState) -> None:
-    if not state.limiter.allow("unauthenticated"):
+def refused_too_often(request: Request, state: Any) -> bool:
+    """Count one refused credential from this address; True when it has had too many this minute."""
+    return not state.limiter.allow(f"refused:{client_address(request)}")
+
+
+def _refuse_unknown(request: Request, state: AppState) -> None:
+    if refused_too_often(request, state):
         raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
     raise HTTPException(401, "A valid bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
 
 
+def stranger_gate(request: Request) -> None:
+    """Routes that need no sign-in do real work (checking a password, starting a trip to Google);
+    each address may call them only so often, so one client cannot crowd everyone else out."""
+    state = request.app.state.kaal
+    if not state.strangers.allow(f"addr:{client_address(request)}"):
+        raise HTTPException(429, "Too many tries from here. Wait a minute and try again.", headers={"Retry-After": "60"})
+
+
+STRANGERS = Depends(stranger_gate)
+
+
 def _signed_in_person(request: Request, state: AppState) -> dict[str, Any] | None:
-    """The person a session cookie belongs to; None when the cookie is not a live session."""
-    presented = request.cookies.get(SESSION_COOKIE, "").strip()
+    """The person a session belongs to; None when the request carries no live session."""
+    presented = presented_session(request)
     if not presented.startswith(accounts.SESSION_PREFIX + "_"):
         return None
     session = state.accounts.session(presented)
@@ -645,12 +835,12 @@ def require(*scopes: str) -> Callable:
                     raise HTTPException(403, f"Your role in this vault does not allow that (it needs {', '.join(missing)}).")
                 request.state.vault = state.vaults.get(person["vault"]) if person["vault"] else None
                 return person
-            presented, from_cookie = request.cookies.get(SESSION_COOKIE, ""), True
+            presented, from_cookie = presented_session(request), True
         record = state.tokens.authenticate(presented.strip()) if presented.strip() else None
         if record is not None and from_cookie:
             _from_cookie_checked(request)
         if record is None:
-            _refuse_unknown(state)
+            _refuse_unknown(request, state)
         request.state.token_name = record["name"]
         if not state.limiter.allow(record["id"]):
             raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
@@ -678,9 +868,9 @@ def require_person() -> Callable:
         state: AppState = request.app.state.kaal
         person = _signed_in_person(request, state)
         if person is None:
-            if state.tokens.authenticate(request.cookies.get(SESSION_COOKIE, "").strip()) or request.headers.get("authorization"):
+            if state.tokens.authenticate(presented_session(request)) or request.headers.get("authorization"):
                 raise HTTPException(403, "Sign in with your own password to manage your account; a token cannot.")
-            _refuse_unknown(state)
+            _refuse_unknown(request, state)
         return person
 
     return Depends(dependency)
@@ -735,6 +925,35 @@ def _run(state: AppState, handler: Callable[[Any], None], *, exact_note: str | N
             return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind, error.details)
     meta = options.pop("meta", None)
     return JSONResponse({"result": result, "format": options, **({"meta": meta} if meta else {})})
+
+
+META_ATTACHMENT_KEYS = ("id", "name", "size", "storage", "sensitivity", "extracted_markdown", "extracted_at")
+
+
+def metadata_only(note: dict[str, Any]) -> dict[str, Any]:
+    """What the read scope may see of a note: its title, tags, times and files' names. Not a
+    receipt's values (names, amounts, dates) and not the full address it was saved from."""
+    shown = {key: value for key, value in note.items() if key not in {"receipt", "source"}}
+    source = note.get("source")
+    if isinstance(source, dict):
+        host = core.urlsplit(str(source.get("url") or "")).hostname
+        shown["source"] = {key: value for key, value in {"type": source.get("type"), "host": host}.items() if value}
+    if "attachments" in note:
+        shown["attachments"] = [{key: entry[key] for key in META_ATTACHMENT_KEYS if key in entry} for entry in note.get("attachments", []) if isinstance(entry, dict)]
+    return shown
+
+
+def _metadata_answer(response: JSONResponse, caller: dict[str, Any]) -> JSONResponse:
+    """Trim a note list (or {"note": ...}) to metadata for a caller without the reveal scope."""
+    if "reveal" in caller.get("scopes", []) or response.status_code != 200:
+        return response
+    payload = json.loads(response.body)
+    found = payload.get("result")
+    if isinstance(found, list):
+        payload["result"] = [metadata_only(entry) if isinstance(entry, dict) else entry for entry in found]
+    elif isinstance(found, dict) and isinstance(found.get("note"), dict):
+        payload["result"] = {**found, "note": metadata_only(found["note"])}
+    return JSONResponse(payload, status_code=response.status_code)
 
 
 def _upload_name(raw: str | None) -> str:
@@ -945,6 +1164,8 @@ class TokenNew(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     scopes: list[str] = Field(min_length=1, max_length=5)
     vault: str = Field(min_length=1, max_length=64)
+    password: str = Field(default="", max_length=1024)
+    confirm: str = Field(default="", max_length=200)
 
 
 class VaultChoice(BaseModel):
@@ -962,6 +1183,15 @@ class ConnectStart(BaseModel):
 class AppSignInStart(BaseModel):
     # The SHA-256 of a secret only the app holds, base64url without padding.
     challenge: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$")
+    kind: Literal["app", "extension"] = "app"
+    # For the browser extension: its id, which must be one this Kaal lets call it.
+    extension: str = Field(default="", pattern=r"^[a-p]{0,32}$")
+
+
+class ExtensionSignInFinish(BaseModel):
+    code: str = Field(min_length=1, max_length=200)
+    verifier: str = Field(min_length=43, max_length=128, pattern=r"^[A-Za-z0-9._~-]+$")
+    name: str = Field(default="Chrome extension", max_length=60)
 
 
 class Proof(BaseModel):
@@ -1035,7 +1265,33 @@ def create_app(settings: Settings) -> FastAPI:
                                signups=SignUpGuard(settings.signups_per_hour))
     app.state.kaal.worker = ExtractionWorker(registry.all)
     app.state.kaal.services = oidc.Services()
-    app.add_middleware(BodyLimitMiddleware, limit=settings.max_upload_bytes + MiB)
+    app.state.kaal.strangers = RateLimiter(settings.strangers_per_minute)
+    passwords.set_concurrency(settings.password_checks)
+
+    def holds_credential(headers: dict[bytes, bytes]) -> bool:
+        """Whether a request carries a credential that works; checked only before reading a large body."""
+        state = app.state.kaal
+        scheme, _, presented = headers.get(b"authorization", b"").decode("latin-1").partition(" ")
+        if scheme.lower() == "bearer":
+            return state.tokens.authenticate(presented.strip()) is not None
+        offered = headers.get(SESSION_HEADER.encode(), b"").decode("latin-1").strip()
+        if not offered:
+            from http.cookies import SimpleCookie
+
+            jar = SimpleCookie()
+            try:
+                jar.load(headers.get(b"cookie", b"").decode("latin-1"))
+            except Exception:
+                return False
+            for name in (session_cookie_name(settings), SESSION_COOKIE):
+                if name in jar:
+                    offered = jar[name].value.strip()
+                    break
+        if not offered:
+            return False
+        return state.accounts.session(offered) is not None or state.tokens.authenticate(offered) is not None
+
+    app.add_middleware(BodyLimitMiddleware, limit=settings.max_upload_bytes + MiB, credentials=holds_credential)
 
     @app.middleware("http")
     async def access_log(request: Request, call_next: Callable) -> Response:
@@ -1047,10 +1303,17 @@ def create_app(settings: Settings) -> FastAPI:
         route = request.scope.get("route")
         template = getattr(route, "path", "(unmatched)")
         token_name = getattr(request.state, "token_name", "-")
+        if settings.cookie_secure:
+            # Browsers that have been here once never try plain http again (ignored over http).
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
         # A container's health check asks every 30 seconds; only a failing answer is worth a line.
         if not (template == "/v1/health" and response.status_code == 200):
-            log.info("%s %s %s %s %dms", request.method, template, response.status_code, token_name, (time.monotonic() - started) * 1000)
+            log.info("%s %s %s %s %dms", log_safe(request.method, 12), template, response.status_code, log_safe(token_name), (time.monotonic() - started) * 1000)
         return response
+
+    @app.exception_handler(passwords.PasswordBusy)
+    async def password_busy(_request: Request, _exc: passwords.PasswordBusy) -> JSONResponse:
+        return _error(503, "Kaal is busy checking other sign-ins. Try again in a moment.", "busy", headers={"Retry-After": "5"})
 
     # Added last so that it is the outermost layer: the browser's permission
     # check is answered without touching the vault, the log or the rate limit.
@@ -1113,12 +1376,12 @@ def create_app(settings: Settings) -> FastAPI:
 
     # --- browser sign-in: a device token, pasted once, kept in a cookie scripts cannot read
 
-    @app.post("/v1/session", tags=["session"])
+    @app.post("/v1/session", tags=["session"], dependencies=[STRANGERS])
     def sign_in(request: Request, body: SignIn):
         state = S(request)
         record = state.tokens.authenticate(body.token.strip())
         if record is None:
-            if not state.limiter.allow("unauthenticated"):
+            if refused_too_often(request, state):
                 raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
             raise HTTPException(401, "That token is not valid.")
         account, _vault_id, role = who_may(state._state, record)
@@ -1127,14 +1390,14 @@ def create_app(settings: Settings) -> FastAPI:
         request.state.token_name = record["name"]
         allowed = [scope for scope in record.get("scopes", []) if scope in accounts.ROLE_SCOPES[role]]
         response = JSONResponse({"result": {"name": record["name"], "scopes": allowed}, "format": {}})
-        response.set_cookie(SESSION_COOKIE, body.token.strip(), max_age=SESSION_SECONDS, path="/", httponly=True, secure=state.settings.cookie_secure, samesite="strict")
+        set_session_cookie(response, state.settings, body.token.strip())
         return response
 
     def answer(result: Any) -> JSONResponse:
         return JSONResponse({"result": result, "format": {}})
 
     def with_cookie(response: JSONResponse, state: Any, value: str) -> JSONResponse:
-        response.set_cookie(SESSION_COOKIE, value, max_age=SESSION_SECONDS, path="/", httponly=True, secure=state.settings.cookie_secure, samesite="strict")
+        set_session_cookie(response, state.settings, value)
         return response
 
     def who(record: dict[str, Any]) -> dict[str, Any]:
@@ -1160,17 +1423,20 @@ def create_app(settings: Settings) -> FastAPI:
         session_record, cookie = open_session(request, state, account)
         return with_cookie(answer({**who(person_record(state, session_record)), **also}), state, cookie)
 
-    def checked_password(state: Any, account: dict[str, Any] | None, password: str, login: str) -> bool:
-        """One password attempt for a sign-in name, counted by the guard either way."""
-        waiting = state.guard.wait(login)
-        if waiting:
-            raise HTTPException(429, "Too many wrong tries. Wait a little and try again.", headers={"Retry-After": str(waiting)})
-        usable = account is not None and not account["disabled_at"]
-        correct = passwords.verify_password(state.accounts.password_hash(account["id"]) if usable else None, password)
-        if correct:
-            state.guard.succeeded(login)
-        else:
-            state.guard.failed(login)
+    def checked_password(request: Request, state: Any, account: dict[str, Any] | None, password: str, login: str) -> bool:
+        """One password attempt for a sign-in name, counted by the guard either way. Attempts for
+        one name are checked one at a time, so parallel guesses all see the count."""
+        address = client_address(request)
+        with state.guard.one_at_a_time(login):
+            waiting = state.guard.wait(login, address)
+            if waiting:
+                raise HTTPException(429, "Too many wrong tries. Wait a little and try again.", headers={"Retry-After": str(waiting)})
+            usable = account is not None and not account["disabled_at"]
+            correct = passwords.verify_password(state.accounts.password_hash(account["id"]) if usable else None, password)
+            if correct:
+                state.guard.succeeded(login, address)
+            else:
+                state.guard.failed(login, address)
         return correct
 
     @app.get("/v1/session", tags=["session"])
@@ -1180,11 +1446,11 @@ def create_app(settings: Settings) -> FastAPI:
     @app.delete("/v1/session", tags=["session"])
     def sign_out(request: Request):
         state = S(request)
-        live = state.accounts.session(request.cookies.get(SESSION_COOKIE, "").strip())
+        live = state.accounts.session(presented_session(request))
         if live:
             state.accounts.end_session(live["id"])
         response = JSONResponse({"result": {"status": "signed_out"}, "format": {}})
-        response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=state.settings.cookie_secure, samesite="strict")
+        clear_session_cookie(response, state.settings)
         return response
 
     @app.post("/v1/session/vault", tags=["session"])
@@ -1198,7 +1464,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     # --- signing in as a person
 
-    @app.post("/v1/sign-in", tags=["session"])
+    @app.post("/v1/sign-in", tags=["session"], dependencies=[STRANGERS])
     def sign_in_with_password(request: Request, body: PasswordSignIn):
         state = S(request)
         try:
@@ -1206,8 +1472,8 @@ def create_app(settings: Settings) -> FastAPI:
         except accounts.AccountError:
             login = body.login.strip().lower()[:64]
         account = state.accounts.account(login)
-        if not checked_password(state, account, body.password, login):
-            if not state.limiter.allow("unauthenticated"):
+        if not checked_password(request, state, account, body.password, login):
+            if refused_too_often(request, state):
                 raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
             raise HTTPException(401, "That sign-in name and password do not match.")
         stored = state.accounts.password_hash(account["id"])
@@ -1215,45 +1481,52 @@ def create_app(settings: Settings) -> FastAPI:
             state.accounts.set_password(account["id"], passwords.hash_password(body.password))
         return start_session(request, state, account)
 
-    @app.post("/v1/sign-in/recover", tags=["session"])
+    @app.post("/v1/sign-in/recover", tags=["session"], dependencies=[STRANGERS])
     def recover(request: Request, body: Recover):
-        """Use a recovery code to choose a new password. Signs every other browser out."""
+        """Use a recovery code to choose a new password. Signs every other browser out and
+        ends the account's tokens, since whoever forgot the password may not be the only one using it."""
         state = S(request)
         login = body.login.strip().lower()[:64]
-        account = state.accounts.account(login)
-        waiting = state.guard.wait(login)
-        if waiting:
-            raise HTTPException(429, "Too many wrong tries. Wait a little and try again.", headers={"Retry-After": str(waiting)})
+        address = client_address(request)
         try:
             passwords.check_new(body.password, login=login)
         except passwords.PasswordError as error:
             return _error(400, str(error), "invalid")
-        if account is None or account["disabled_at"] or not state.accounts.use_recovery_code(account["id"], body.code):
-            state.guard.failed(login)
-            raise HTTPException(401, "That sign-in name and recovery code do not match.")
-        state.guard.succeeded(login)
+        with state.guard.one_at_a_time(login):
+            waiting = state.guard.wait(login, address)
+            if waiting:
+                raise HTTPException(429, "Too many wrong tries. Wait a little and try again.", headers={"Retry-After": str(waiting)})
+            account = state.accounts.account(login)
+            usable = account is not None and not account["disabled_at"]
+            # The code is checked the same way whether or not the name exists, so timing says nothing.
+            matched = state.accounts.use_recovery_code(account["id"] if usable else "no-such-account", body.code)
+            if not usable or not matched:
+                state.guard.failed(login, address)
+                raise HTTPException(401, "That sign-in name and recovery code do not match.")
+            state.guard.succeeded(login, address)
         state.accounts.set_password(account["id"], passwords.hash_password(body.password))
         state.accounts.end_sessions(account["id"])
+        state.tokens.revoke_where(account=account["id"])
         return start_session(request, state, account)
 
-    @app.post("/v1/setup/check", tags=["session"])
+    @app.post("/v1/setup/check", tags=["session"], dependencies=[STRANGERS])
     def setup_check(request: Request, body: SetupCode):
         """Whose setup link this is, so the page can greet them. Uses nothing up."""
         state = S(request)
         account = state.accounts.setup_account(body.code)
         if account is None:
-            if not state.limiter.allow("unauthenticated"):
+            if refused_too_often(request, state):
                 raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
             return _error(404, "This setup link has been used or has run out. Ask for a new one.", "not_found")
         return answer({"login": account["login"], "name": account["name"]})
 
-    @app.post("/v1/setup", tags=["session"])
+    @app.post("/v1/setup", tags=["session"], dependencies=[STRANGERS])
     def setup_finish(request: Request, body: SetupFinish):
         """Choose a password with a setup link, then sign in. The link works once."""
         state = S(request)
         account = state.accounts.setup_account(body.code)
         if account is None:
-            if not state.limiter.allow("unauthenticated"):
+            if refused_too_often(request, state):
                 raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
             return _error(404, "This setup link has been used or has run out. Ask for a new one.", "not_found")
         try:
@@ -1275,11 +1548,49 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.post("/v1/account/app-sign-ins", tags=["account"])
     def app_sign_in_start(request: Request, body: AppSignInStart, person: dict[str, Any] = require_person()):
-        """Approve signing an app in as oneself. Answers a code that works once, for five minutes."""
+        """Approve signing an app (or this browser's Kaal extension) in as oneself. Answers a code that
+        works once, for five minutes, and where to send it: the app's own address, or the extension's.
+        Kaal decides where it goes, so a page cannot be talked into handing a code to anyone else."""
         state = S(request)
-        return answer({"code": state.accounts.start_app_signin(person["account"], person["vault"], body.challenge)})
+        if body.kind == "extension":
+            if not body.extension or f"chrome-extension://{body.extension}" not in state.settings.extension_origins:
+                return _error(400, "This Kaal does not know that extension.", "invalid")
+            code = state.accounts.start_app_signin(person["account"], person["vault"], body.challenge, kind="extension")
+            return answer({"code": code, "redirect": f"https://{body.extension}.chromiumapp.org/kaal?code={quote(code)}"})
+        code = state.accounts.start_app_signin(person["account"], person["vault"], body.challenge)
+        return answer({"code": code, "redirect": f"kaal://signed-in?code={quote(code)}"})
 
-    @app.post("/v1/app-sign-ins", tags=["session"])
+    @app.post("/v1/extension-sign-ins", tags=["session"], dependencies=[STRANGERS])
+    def extension_sign_in_finish(request: Request, body: ExtensionSignInFinish):
+        """The browser extension collects the sign-in a browser approved for it, as a token of its own
+        for the vault that was open: read, reveal and write, as far as the person's role there allows."""
+        state = S(request)
+        found = state.accounts.finish_app_signin(body.code, body.verifier, kind="extension")
+        account = state.accounts.account(found["account"]) if found else None
+        if account is None or account["disabled_at"]:
+            if refused_too_often(request, state):
+                raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
+            return _error(401, "That sign-in has been used or has run out. Start again from the extension.")
+        theirs = state.accounts.vaults_of(account["id"])
+        vault = next((entry for entry in theirs if entry["id"] == found["vault"]), theirs[0] if theirs else None)
+        if vault is None:
+            return _error(403, "You do not belong to a vault yet.", "forbidden")
+        if sum(1 for token in state.tokens.list() if token.get("account") == account["id"] and not token.get("revoked_at")) >= MAX_TOKENS_PER_PERSON:
+            return _error(409, f"You have {MAX_TOKENS_PER_PERSON} tokens already. Revoke one you no longer use first.", "conflict")
+        scopes = [scope for scope in ("read", "reveal", "write") if scope in accounts.ROLE_SCOPES[vault["role"]]]
+        base = body.name.strip() or "Chrome extension"
+        for number in range(1, 100):
+            try:
+                record, secret = state.tokens.create(base if number == 1 else f"{base} {number}", scopes, account=account["id"], vault=vault["id"])
+                break
+            except tokens.TokenError:
+                continue
+        else:
+            return _error(409, "Could not choose a name for the token. Revoke an older one first.", "conflict")
+        request.state.token_name = record["name"]
+        return answer({"token": secret, "name": record["name"], "scopes": scopes, "account": account["login"], "vault": vault["name"]})
+
+    @app.post("/v1/app-sign-ins", tags=["session"], dependencies=[STRANGERS])
     def app_sign_in_finish(request: Request, body: AppSignInFinish):
         """An app collects the sign-in a browser approved for it. The session it is
         given is sent back as the ``kaal_session`` cookie, with ``X-Kaal-Request: 1``."""
@@ -1287,7 +1598,7 @@ def create_app(settings: Settings) -> FastAPI:
         found = state.accounts.finish_app_signin(body.code, body.verifier)
         account = state.accounts.account(found["account"]) if found else None
         if account is None or account["disabled_at"]:
-            if not state.limiter.allow("unauthenticated"):
+            if refused_too_often(request, state):
                 raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
             return _error(401, "That sign-in has been used or has run out. Start again from the app.")
         theirs = state.accounts.vaults_of(account["id"])
@@ -1309,7 +1620,7 @@ def create_app(settings: Settings) -> FastAPI:
         """Delete one's own account for good, with the vaults only one belongs to.
         Needs the password, or, for an account without one, the sign-in name typed."""
         state = S(request)
-        if not proved(state, person, body, person["person"]["login"]):
+        if not proved(request, state, person, body, person["person"]["login"]):
             return _error(403, "That is not right, so nothing was deleted.", "forbidden")
         try:
             done = remove_account(state.settings, state.accounts, state.tokens, person["account"], state.vaults)
@@ -1317,7 +1628,7 @@ def create_app(settings: Settings) -> FastAPI:
             return _error(409, str(error), "conflict")
         log.info("account deleted by its owner")
         response = answer({"status": "removed", "vaults_deleted": done["vaults_deleted"]})
-        response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=state.settings.cookie_secure, samesite="strict")
+        clear_session_cookie(response, state.settings)
         return response
 
     @app.get("/v1/account", tags=["account"])
@@ -1336,7 +1647,7 @@ def create_app(settings: Settings) -> FastAPI:
     def account_password(request: Request, body: PasswordChange, person: dict[str, Any] = require_person()):
         """Change one's password. Every other browser is signed out."""
         state = S(request)
-        if not checked_password(state, person["person"], body.current, person["name"]):
+        if not checked_password(request, state, person["person"], body.current, person["name"]):
             return _error(403, "Your current password is not right.", "forbidden")
         try:
             passwords.check_new(body.new, login=person["name"])
@@ -1349,7 +1660,7 @@ def create_app(settings: Settings) -> FastAPI:
     def account_recovery_codes(request: Request, body: PasswordProof, person: dict[str, Any] = require_person()):
         """Replace one's recovery codes. The new ones are shown this once."""
         state = S(request)
-        if not checked_password(state, person["person"], body.password, person["name"]):
+        if not checked_password(request, state, person["person"], body.password, person["name"]):
             return _error(403, "Your password is not right.", "forbidden")
         return answer({"recovery_codes": state.accounts.new_recovery_codes(person["account"])})
 
@@ -1381,11 +1692,20 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.post("/v1/account/tokens", tags=["account"])
     def account_token_create(request: Request, body: TokenNew, person: dict[str, Any] = require_person()):
-        """Make a token for a script or the extension. Its secret is in this answer and nowhere else, ever."""
+        """Make a token for a script or the extension. Its secret is in this answer and nowhere else, ever.
+        Needs the password (or, for an account without one, the sign-in name typed), so a borrowed
+        browser cannot leave a lasting way in behind."""
         state = S(request)
+        if state.accounts.password_hash(person["account"]) is not None:
+            if not checked_password(request, state, person["person"], body.password, person["name"]):
+                return _error(403, "Your password is not right, so no token was made.", "forbidden")
+        elif body.confirm.strip() != person["person"]["login"]:
+            return _error(403, "Type your sign-in name to make a token.", "forbidden")
         vault = next((entry for entry in person["vaults"] if entry["id"] == body.vault), None)
         if vault is None:
             return _error(404, "You do not belong to that vault.", "not_found")
+        if sum(1 for token in state.tokens.list() if token.get("account") == person["account"] and not token.get("revoked_at")) >= MAX_TOKENS_PER_PERSON:
+            return _error(409, f"You have {MAX_TOKENS_PER_PERSON} tokens already. Revoke one you no longer use first.", "conflict")
         beyond = [scope for scope in body.scopes if scope not in accounts.ROLE_SCOPES[vault["role"]]]
         if beyond:
             return _error(400, f"Your role in that vault does not allow: {', '.join(beyond)}.", "invalid")
@@ -1430,10 +1750,10 @@ def create_app(settings: Settings) -> FastAPI:
             return _error(400, str(error), "invalid")
         return answer({"vault": {"id": vault["id"], "name": vault["name"], "role": "owner"}})
 
-    def proved(state: Any, person: dict[str, Any], body: Proof, name: str) -> bool:
+    def proved(request: Request, state: Any, person: dict[str, Any], body: Proof, name: str) -> bool:
         """Whether a person confirmed with their password, or, having none, by typing ``name``."""
         if state.accounts.password_hash(person["account"]) is not None:
-            return checked_password(state, person["person"], body.password, person["name"])
+            return checked_password(request, state, person["person"], body.password, person["name"])
         return body.confirm.strip() == name
 
     @app.get("/v1/vault/export", tags=["account"], dependencies=[require("read", "reveal", "admin")], response_class=Response)
@@ -1458,7 +1778,7 @@ def create_app(settings: Settings) -> FastAPI:
         vault = next((entry for entry in person["vaults"] if entry["id"] == person["vault"]), None)
         if vault is None:
             return _error(404, "You do not belong to that vault.", "not_found")
-        if not proved(state, person, body, vault["name"]):
+        if not proved(request, state, person, body, vault["name"]):
             return _error(403, "That is not right, so nothing was deleted.", "forbidden")
         try:
             done = delete_vault(state.settings, state.accounts, state.tokens, vault["id"], state.vaults)
@@ -1522,12 +1842,18 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.post("/v1/admin/people/{account_id}/setup-link", tags=["admin"])
     def admin_person_link(request: Request, account_id: str, person: dict[str, Any] = require_admin()):
-        """A new single-use link for someone who has not chosen a password yet, or has lost theirs."""
+        """A new single-use link for someone who has never signed in. An administrator cannot make one
+        for an account already in use: whoever uses a setup link signs in as that person, so that would
+        let an administrator into other people's vaults. For someone who has lost every way in, whoever
+        runs the server makes the link (kaal-server account setup-link LOGIN)."""
         state = S(request)
-        try:
-            return answer({"setup_path": setup_path(state, account_id)})
-        except accounts.AccountError:
+        target = state.accounts.account(account_id)
+        if target is None:
             return _error(404, "No such account.", "not_found")
+        if state.accounts.password_hash(target["id"]) is not None or state.accounts.identities_of(target["id"]):
+            return _error(409, "This person has already set up their account, so only whoever runs the server can make a new link for them "
+                               "(kaal-server account setup-link). They can also use one of their recovery codes.", "conflict")
+        return answer({"setup_path": setup_path(state, account_id)})
 
     @app.post("/v1/admin/people/{account_id}/disabled", tags=["admin"])
     def admin_person_disable(request: Request, account_id: str, body: Flag, person: dict[str, Any] = require_admin()):
@@ -1606,19 +1932,19 @@ def create_app(settings: Settings) -> FastAPI:
             flow = state.accounts.start_flow(service_id, purpose, nonce=nonce, verifier=verifier, redirect=redirect, account_id=account_id, setup_code=setup_code)
             url = state.services.address_to_visit(service, redirect=redirect, state=flow, nonce=nonce, verifier=verifier)
         except oidc.SignInServiceError as error:
-            log.warning("sign-in with %s could not start: %s", service_id, error)
+            log.warning("sign-in with %s could not start: %s", log_safe(service_id, 32), log_safe(str(error), 120))
             return _error(503, f"{service['name']} could not be reached just now. Try again, or sign in another way.", "unavailable")
         response = answer({"url": url})
-        response.set_cookie(FLOW_COOKIE, flow, max_age=accounts.FLOW_MINUTES * 60, path=FLOW_PATH, httponly=True, secure=state.settings.cookie_secure, samesite="lax")
+        # Host-only over https (which needs the path to be /), so no other site under the domain can plant one.
+        response.set_cookie(flow_cookie_name(state.settings), flow, max_age=accounts.FLOW_MINUTES * 60, path="/" if state.settings.cookie_secure else FLOW_PATH,
+                            httponly=True, secure=state.settings.cookie_secure, samesite="lax")
         return response
 
-    @app.post("/v1/sign-in/with/{service_id}", tags=["session"])
+    @app.post("/v1/sign-in/with/{service_id}", tags=["session"], dependencies=[STRANGERS])
     def sign_in_with_service(request: Request, service_id: str, body: ServiceStart):
         """Start signing in through a service. With a setup link's code, the service becomes how that account signs in."""
         state = S(request)
         _from_cookie_checked(request)
-        if not state.limiter.allow("signin-start"):
-            raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
         if body.setup_code and state.accounts.setup_account(body.setup_code) is None:
             return _error(404, "This setup link has been used or has run out. Ask for a new one.", "not_found")
         return begin(request, state, service_id, "setup" if body.setup_code else "sign-in", setup_code=body.setup_code or None)
@@ -1627,7 +1953,7 @@ def create_app(settings: Settings) -> FastAPI:
     def account_connect(request: Request, service_id: str, body: ConnectStart, person: dict[str, Any] = require_person()):
         """Start connecting a sign-in service to one's account. Someone with a password proves it first."""
         state = S(request)
-        if state.accounts.password_hash(person["account"]) is not None and not checked_password(state, person["person"], body.password, person["name"]):
+        if state.accounts.password_hash(person["account"]) is not None and not checked_password(request, state, person["person"], body.password, person["name"]):
             return _error(403, "Your password is not right.", "forbidden")
         return begin(request, state, service_id, "connect", account_id=person["account"])
 
@@ -1640,7 +1966,7 @@ def create_app(settings: Settings) -> FastAPI:
             return _error(409, str(error), "conflict")
         return answer({"status": "disconnected", "service": service_id})
 
-    @app.get("/v1/sign-in/with/{service_id}/callback", tags=["session"], response_class=Response)
+    @app.get("/v1/sign-in/with/{service_id}/callback", tags=["session"], response_class=Response, dependencies=[STRANGERS])
     def sign_in_callback(request: Request, service_id: str, code: str = Query("", max_length=4096), state: str = Query("", max_length=200),
                          error: str = Query("", max_length=200)):
         """Where a sign-in service sends the browser back to. Answers by sending the browser on into the web app."""
@@ -1648,13 +1974,14 @@ def create_app(settings: Settings) -> FastAPI:
 
         def onward(path: str, cookie: str | None = None) -> Response:
             response = Response(status_code=303, headers={"Location": f"/#/{path}"})
-            response.delete_cookie(FLOW_COOKIE, path=FLOW_PATH, httponly=True, secure=kaal_state.settings.cookie_secure, samesite="lax")
+            response.delete_cookie(flow_cookie_name(kaal_state.settings), path="/" if kaal_state.settings.cookie_secure else FLOW_PATH,
+                                   httponly=True, secure=kaal_state.settings.cookie_secure, samesite="lax")
             return with_cookie(response, kaal_state, cookie) if cookie else response
 
-        presented = request.cookies.get(FLOW_COOKIE, "")
+        presented = request.cookies.get(flow_cookie_name(kaal_state.settings), "")
         flow = kaal_state.accounts.finish_flow(state) if state and presented and secrets.compare_digest(presented.encode(), state.encode()) else None
         if flow is None or flow["service"] != service_id:
-            if not kaal_state.limiter.allow("unauthenticated"):
+            if refused_too_often(request, kaal_state):
                 raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
             return onward("sign-in-problem/expired")
         problem = "settings?problem=" if flow["purpose"] == "connect" else "sign-in-problem/"
@@ -1667,7 +1994,7 @@ def create_app(settings: Settings) -> FastAPI:
             claims = kaal_state.services.who_signed_in(service, oidc.open_secret(core.installation_key(), service["secret"]),
                                                        code=code, redirect=flow["redirect"], nonce=flow["nonce"], verifier=flow["verifier"])
         except (oidc.SignInServiceError, core.KaalError) as failure:
-            log.warning("sign-in with %s failed: %s", service_id, failure)
+            log.warning("sign-in with %s failed: %s", log_safe(service_id, 32), log_safe(str(failure), 120))
             return onward(problem + "failed")
         subject = claims["sub"]
         email = str(claims.get("email") or "")[:254] if claims.get("email_verified") in (True, "true") else ""
@@ -1753,17 +2080,20 @@ def create_app(settings: Settings) -> FastAPI:
             return _error(404, "No such sign-in service.", "not_found")
         return answer(services_told(state))
 
-    @app.post("/v1/sign-up", tags=["session"])
+    @app.post("/v1/sign-up", tags=["session"], dependencies=[STRANGERS])
     def sign_up(request: Request, body: SignUp):
         """Create one's own account, where the administrator has left sign-up open."""
         state = S(request)
         if signup_setting(state) != "open":
             return _error(403, "Accounts here are created by an administrator. Ask them for a setup link.", "forbidden")
-        if not state.limiter.allow("unauthenticated") or not state.signups.allow():
-            raise HTTPException(429, "Too many new accounts just now. Try again later.", headers={"Retry-After": "600"})
         try:
             login = accounts.clean_login(body.login)
             passwords.check_new(body.password, login=login)
+            if state.accounts.account(login) is not None:
+                raise accounts.AccountError("already taken")
+            # Only a request that would really make an account uses up the hourly allowance.
+            if not state.signups.allow():
+                raise HTTPException(429, "Too many new accounts just now. Try again later.", headers={"Retry-After": "600"})
             made = state.accounts.add_account(login, body.name)
         except passwords.PasswordError as error:
             return _error(400, str(error), "invalid")
@@ -1778,8 +2108,11 @@ def create_app(settings: Settings) -> FastAPI:
     def status(request: Request):
         return _run(S(request), core.status)
 
-    @app.get("/v1/verify", tags=["service"], dependencies=[require("read")])
-    def verify(request: Request, deep: bool = False):
+    @app.get("/v1/verify", tags=["service"])
+    def verify(request: Request, deep: bool = False, caller: dict[str, Any] = require("read")):
+        # A deep check decrypts the whole vault while holding it; that is for its owners.
+        if deep and "admin" not in caller.get("scopes", []):
+            return _error(403, "A deep check needs the admin scope (a vault owner).", "forbidden")
         return _run(S(request), core.verify_vault, deep=deep)
 
     @app.get("/v1/export", tags=["service"], dependencies=[require("read", "reveal", "admin")], response_class=Response)
@@ -1798,21 +2131,21 @@ def create_app(settings: Settings) -> FastAPI:
 
     # --- notes
 
-    @app.get("/v1/notes", tags=["notes"], dependencies=[require("read")])
-    def list_notes(request: Request, tag: str = Query("", max_length=200)):
-        return _run(S(request), core.list_notes, tag=tag, json=True)
+    @app.get("/v1/notes", tags=["notes"])
+    def list_notes(request: Request, tag: str = Query("", max_length=200), caller: dict[str, Any] = require("read")):
+        return _metadata_answer(_run(S(request), core.list_notes, tag=tag, json=True), caller)
 
     @app.post("/v1/notes", tags=["notes"], dependencies=[require("write")])
     def add_note(request: Request, note: NoteCreate):
         return _run(S(request), core.add_note, title=note.title, tags=_tags(note.tags), body=note.body, body_file=None, sensitivity=note.sensitivity)
 
-    @app.post("/v1/notes/search", tags=["notes"], dependencies=[require("read")])
-    def search_notes(request: Request, body: QueryBody):
-        return _run(S(request), core.search_notes, query=body.query)
+    @app.post("/v1/notes/search", tags=["notes"])
+    def search_notes(request: Request, body: QueryBody, caller: dict[str, Any] = require("read")):
+        return _metadata_answer(_run(S(request), core.search_notes, query=body.query), caller)
 
-    @app.post("/v1/notes/lookup", tags=["notes"], dependencies=[require("read")])
-    def lookup_note(request: Request, body: QueryBody):
-        return _run(S(request), _lookup, query=body.query)
+    @app.post("/v1/notes/lookup", tags=["notes"])
+    def lookup_note(request: Request, body: QueryBody, caller: dict[str, Any] = require("read")):
+        return _metadata_answer(_run(S(request), _lookup, query=body.query), caller)
 
     @app.post("/v1/notes/extract", tags=["notes"], dependencies=[require("write")])
     def extract_attachments(request: Request, run: ExtractRun):
@@ -1899,9 +2232,10 @@ def create_app(settings: Settings) -> FastAPI:
 
     # --- library (non-medical notes for the dashboard)
 
-    @app.get("/v1/library/notes", tags=["library"], dependencies=[require("read")])
-    def library_list(request: Request, trash: bool = False, limit: int = Query(100, ge=0, le=100), offset: int = Query(0, ge=0), q: str = Query("", max_length=200)):
-        return _run(S(request), core.library_list, trash=trash, limit=limit, offset=offset, q=q)
+    @app.get("/v1/library/notes", tags=["library"])
+    def library_list(request: Request, trash: bool = False, limit: int = Query(100, ge=0, le=100), offset: int = Query(0, ge=0), q: str = Query("", max_length=200),
+                     caller: dict[str, Any] = require("read")):
+        return _metadata_answer(_run(S(request), core.library_list, trash=trash, limit=limit, offset=offset, q=q), caller)
 
     # The words searched for travel in the request body, not the address, and
     # what comes back quotes note text, so this needs reveal.

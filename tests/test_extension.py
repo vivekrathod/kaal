@@ -23,7 +23,7 @@ def manifest():
 def test_the_extension_asks_for_what_it_uses_and_nothing_from_the_old_design():
     data = manifest()
     assert data["manifest_version"] == 3
-    assert sorted(data["permissions"]) == ["activeTab", "alarms", "contextMenus", "debugger", "sidePanel", "storage"]
+    assert sorted(data["permissions"]) == ["activeTab", "alarms", "contextMenus", "debugger", "identity", "sidePanel", "storage"]
     # No access to any website: pages are read through the tab, and the server names the extension.
     assert "host_permissions" not in data and "optional_permissions" not in data
     # One site at a time may be granted, by the person, when a file cannot be read through the tab.

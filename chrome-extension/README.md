@@ -33,21 +33,26 @@ Notes, totals, the Trash and settings are in Kaal's web app.
    the Kaal popup and press **Finish updating** (or press the reload arrow on
    the extension's card). Restarting Chrome is not enough: it reads the new
    manifest but keeps running the old background worker.
-2. On the server, create a token for this browser (skip this if you already
-   have one for it):
+2. Open the extension's **Settings** (the button in the popup), enter Kaal's
+   address (for example `https://kaal.example.ts.net`) and press **Connect
+   with my Kaal sign-in**. Kaal's own page opens in a window of its own: sign
+   in as you usually do (password or Google) and press **Allow**. The
+   extension gets a token of its own for the vault you had open, allowed to
+   read, reveal and write as far as your role there allows. It appears under
+   Settings, Tokens, in the web app, where you can revoke it.
 
-   ```bash
-   kaal-server token create chrome-extension --scopes read,reveal,write
-   ```
+   The single-use code Kaal hands back goes only to this extension's own
+   address, which Kaal chooses itself, and is useless without a secret the
+   extension made and never sends anywhere else.
 
-3. Open the extension's **Settings** (the button in the popup), enter Kaal's
-   address (for example `https://kaal.example.ts.net`) and paste the token.
-   "Save and test" says who the server thinks you are.
+   You can still paste a token instead (under "Or paste a token"), for
+   example one made on the server with
+   `kaal-server token create chrome-extension --scopes read,reveal,write`.
 
 The address and token are kept in this Chrome profile's extension storage, on
 this computer only, readable by anything that can read the profile's files.
-"Disconnect" removes them. Revoke the token on the server
-(`kaal-server token revoke chrome-extension`) if the computer is lost.
+"Disconnect" removes them. Revoke the token (web app: Settings, Tokens; server:
+`kaal-server token revoke NAME`) if the computer is lost.
 
 ## What Chrome will ask for, and why
 
@@ -67,6 +72,10 @@ The extension holds **no access to any website**. It asks for:
 - **Side panel, context menus, storage, alarms.** The review panel, the two
   right-click entries, the saved address and token, and the periodic refresh of
   the number on the icon and the list of receipt sites.
+- **Identity.** Only for "Connect with my Kaal sign-in": it lets the extension
+  open Kaal's own sign-in page in a window of its own and receive the
+  single-use code at the extension's own address. It gives no access to your
+  Google or Chrome account.
 
 If a file cannot be read through the tab (a site that refuses, or a file on
 another site), nothing is saved and the panel offers **"Let Kaal fetch from
@@ -77,7 +86,7 @@ card at `chrome://extensions`.
 
 It reaches your Kaal server because the server names this extension as allowed
 to call it (see `KAAL_EXTENSION_IDS` in the main README). The server must be
-version 0.19 or later.
+version 0.19 or later, and 0.25 or later for "Connect with my Kaal sign-in".
 
 ## When something goes wrong
 

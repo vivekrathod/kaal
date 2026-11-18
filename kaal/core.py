@@ -36,7 +36,7 @@ from typing import Any, Callable, Iterator, NoReturn
 from urllib.parse import urlsplit, urlunsplit
 
 from kaal import keys as key_providers
-from kaal import receipt_ai, receipts
+from kaal import receipt_ai, receipts, tools
 
 VAULT = Path(os.environ.get("KAAL_VAULT") or str(Path.home() / ".kaal")).expanduser()
 NOTES_DIR = VAULT / "notes"
@@ -573,8 +573,8 @@ def run_tesseract(path: Path) -> str:
     tesseract = shutil.which("tesseract")
     if not tesseract:
         return ""
-    proc = subprocess.run([tesseract, str(path), "stdout"], text=True, capture_output=True)
-    return proc.stdout if proc.returncode == 0 else ""
+    proc = tools.run([tesseract, str(path), "stdout"], text=True, timeout=120)
+    return proc.stdout if proc is not None and proc.returncode == 0 else ""
 
 
 def run_pdftotext(path: Path) -> str:
@@ -583,8 +583,8 @@ def run_pdftotext(path: Path) -> str:
         return ""
     # Preserve column alignment: medical receipt labels and values frequently
     # share a visual row but are separated by whitespace rather than a colon.
-    proc = subprocess.run([pdftotext, "-layout", str(path), "-"], text=True, capture_output=True)
-    return proc.stdout if proc.returncode == 0 else ""
+    proc = tools.run([pdftotext, "-layout", "-l", "50", str(path), "-"], text=True, timeout=60)
+    return proc.stdout if proc is not None and proc.returncode == 0 else ""
 
 
 def run_pdf_ocr(path: Path, *, max_pages: int = 10) -> str:
@@ -593,8 +593,10 @@ def run_pdf_ocr(path: Path, *, max_pages: int = 10) -> str:
         return ""
     with tempfile.TemporaryDirectory(prefix="kaal-pdf-ocr-") as td:
         prefix = Path(td) / "page"
-        proc = subprocess.run([pdftoppm, "-png", "-r", "300", "-f", "1", "-l", str(max_pages), str(path), str(prefix)], text=True, capture_output=True)
-        if proc.returncode != 0:
+        # 3000 pixels on the longest side reads as well as 300 dpi for a letter page, and a
+        # page drawn absurdly large cannot turn into an absurdly large picture.
+        proc = tools.run([pdftoppm, "-png", "-scale-to", "3000", "-f", "1", "-l", str(max_pages), str(path), str(prefix)], text=True, timeout=180)
+        if proc is None or proc.returncode != 0:
             return ""
         return "\n\n".join(text for image in sorted(Path(td).glob("page-*.png")) if (text := run_tesseract(image)).strip())
 
@@ -1668,7 +1670,15 @@ def sanitized_capture_url(value: str) -> str:
         return ""
     if not parsed.scheme:
         return ""
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    # No query, fragment or user name and password: those can hold one-time secrets.
+    try:
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+    except ValueError:
+        return ""
+    if ":" in host:
+        host = f"[{host}]"
+    return urlunsplit((parsed.scheme, f"{host}{port}", parsed.path, "", ""))
 
 
 def browser_capture(args: argparse.Namespace) -> None:
@@ -1783,7 +1793,7 @@ def medical_capture(args: argparse.Namespace) -> None:
     src = Path(args.file).expanduser().resolve()
     if not src.exists() or not src.is_file():
         die(f"Receipt file not found: {src}")
-    source_url = (getattr(args, "source_url", "") or "").strip()
+    source_url = sanitized_capture_url(getattr(args, "source_url", "") or "")
     source_title = (getattr(args, "source_title", "") or "").strip()
     captured_at = (getattr(args, "captured_at", "") or "").strip() or now_iso()
     title = (getattr(args, "title", "") or "").strip() or source_title or src.stem.replace("_", " ").replace("-", " ")

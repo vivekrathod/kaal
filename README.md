@@ -197,6 +197,12 @@ an account off or on, share the administrator's job, and choose whether
 strangers may create accounts. **Sign-in services**, for administrators: offer
 Google or another OpenID Connect service, or stop offering one.
 
+An administrator can make a setup link only for someone who has never signed
+in: whoever opens a setup link signs in as that person, so a link for an
+account in use would let an administrator into its vaults. For someone who has
+lost their password and their recovery codes, whoever runs the server makes the
+link with `kaal-server account setup-link`.
+
 Accounts are by invitation unless an administrator opens sign-up, in which
 case the sign-in page offers "Create an account". Open sign-up is capped at
 ten new accounts an hour (`KAAL_SIGNUPS_PER_HOUR`), and a person may own at
@@ -204,7 +210,10 @@ most ten vaults (`KAAL_VAULTS_PER_PERSON`). An administrator manages who has
 an account, and cannot see into anyone's vault by being one.
 
 A token can never change the password, codes or sessions of the account it
-acts for, so a script's token cannot be turned into its owner's sign-in.
+acts for, so a script's token cannot be turned into its owner's sign-in. Making
+a token needs the password (or, for an account without one, the sign-in name
+typed), and choosing a new password with a recovery code ends every token the
+account made.
 Tokens remain the way for scripts, the command-line client and the browser
 extension to connect.
 

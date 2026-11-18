@@ -93,9 +93,11 @@ def test_a_new_link_replaces_the_old_and_resets_a_lost_password(house):
     assert again != made["setup_path"]
     assert house.browser().post("/v1/setup/check", json={"code": made["setup_path"].rsplit("/", 1)[1]}).status_code == 404
     sam = house.use_link(again)
-    # Later Sam forgets the password and has no codes: a fresh link sets a new one and signs old browsers out.
-    reset = admin.post(f"/v1/admin/people/{made['account']['id']}/setup-link").json()["result"]["setup_path"]
-    house.use_link(reset, "a different password")
+    # Later Sam forgets the password and has no codes. An administrator cannot make the link any more
+    # (it would let them into Sam's vaults); whoever runs the server can, and it signs old browsers out.
+    refused = admin.post(f"/v1/admin/people/{made['account']['id']}/setup-link")
+    assert refused.status_code == 409 and "kaal-server account setup-link" in refused.json()["error"]
+    house.use_link(f"/#/setup/{house.store.new_setup_code('sam')}", "a different password")
     assert sam.get("/v1/session").status_code == 401
     assert house.browser().post("/v1/sign-in", json={"login": "sam", "password": GOOD}).status_code == 401
     assert house.browser().post("/v1/sign-in", json={"login": "sam", "password": "a different password"}).status_code == 200
@@ -240,7 +242,7 @@ def test_a_person_makes_and_revokes_tokens_for_their_own_scripts(house):
     # The first account also sees the tokens from before accounts existed.
     assert [(t["name"], t["vault_name"]) for t in owner.get("/v1/account/tokens").json()["result"]["tokens"]] == [("old-token", "Main")]
 
-    made = owner.post("/v1/account/tokens", json={"name": "backup-script", "scopes": ["read", "reveal", "admin"], "vault": main}).json()["result"]
+    made = owner.post("/v1/account/tokens", json={"name": "backup-script", "scopes": ["read", "reveal", "admin"], "vault": main, "password": GOOD}).json()["result"]
     assert made["token"]["scopes"] == ["read", "reveal", "admin"] and made["secret"].startswith("kaal_")
     bearer = {"Authorization": f"Bearer {made['secret']}"}
     script = TestClient(house.app, base_url="https://testserver")
@@ -249,9 +251,9 @@ def test_a_person_makes_and_revokes_tokens_for_their_own_scripts(house):
     listed = owner.get("/v1/account/tokens").json()["result"]["tokens"]
     assert [t["name"] for t in listed] == ["old-token", "backup-script"] and made["secret"] not in str(listed)
 
-    assert owner.post("/v1/account/tokens", json={"name": "backup-script", "scopes": ["read"], "vault": main}).status_code == 400, "name already in use"
-    assert owner.post("/v1/account/tokens", json={"name": "x", "scopes": ["read", "fly"], "vault": main}).status_code == 400
-    assert owner.post("/v1/account/tokens", json={"name": "x", "scopes": ["read"], "vault": "not-mine"}).status_code == 404
+    assert owner.post("/v1/account/tokens", json={"name": "backup-script", "scopes": ["read"], "vault": main, "password": GOOD}).status_code == 400, "name already in use"
+    assert owner.post("/v1/account/tokens", json={"name": "x", "scopes": ["read", "fly"], "vault": main, "password": GOOD}).status_code == 400
+    assert owner.post("/v1/account/tokens", json={"name": "x", "scopes": ["read"], "vault": "not-mine", "password": GOOD}).status_code == 404
 
     assert owner.delete(f"/v1/account/tokens/{made['token']['id']}").status_code == 200
     assert script.get("/v1/export", headers=bearer).status_code == 401
@@ -269,12 +271,12 @@ def test_tokens_are_each_persons_own_and_cannot_exceed_their_role(house):
 
     assert sam.get("/v1/account/tokens").json()["result"]["tokens"] == [], "Sam does not see the owner's tokens"
     # The same name as one of the owner's is fine: names are per person.
-    mine = sam.post("/v1/account/tokens", json={"name": "old-token", "scopes": ["read", "write"], "vault": own}).json()["result"]
+    mine = sam.post("/v1/account/tokens", json={"name": "old-token", "scopes": ["read", "write"], "vault": own, "password": GOOD}).json()["result"]
     assert mine["token"]["vault_name"] == "Sam's notes"
     # In the shared vault Sam is a viewer, so no token of Sam's may write there.
-    refused = sam.post("/v1/account/tokens", json={"name": "sneaky", "scopes": ["read", "write"], "vault": main})
+    refused = sam.post("/v1/account/tokens", json={"name": "sneaky", "scopes": ["read", "write"], "vault": main, "password": GOOD})
     assert refused.status_code == 400 and "write" in refused.json()["error"]
-    reading = sam.post("/v1/account/tokens", json={"name": "reader", "scopes": ["read", "reveal"], "vault": main}).json()["result"]
+    reading = sam.post("/v1/account/tokens", json={"name": "reader", "scopes": ["read", "reveal"], "vault": main, "password": GOOD}).json()["result"]
     script = TestClient(house.app, base_url="https://testserver")
     assert script.get("/v1/library/notes", headers={"Authorization": f"Bearer {reading['secret']}"}).status_code == 200
 

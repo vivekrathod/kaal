@@ -87,8 +87,11 @@ export const api = {
   signInWith: (service, setupCode = "") => result(request("POST", `/v1/sign-in/with/${id(service)}`, { json: { setup_code: setupCode } })).then((data) => data.url),
   connect: (service, password = "") => result(request("POST", `/v1/account/connections/${id(service)}`, { json: { password } })).then((data) => data.url),
   disconnect: (service) => result(request("DELETE", `/v1/account/connections/${id(service)}`)),
-  // Approve signing in an app on this device; answers the code to hand it.
-  appSignIn: (challenge) => result(request("POST", "/v1/account/app-sign-ins", { json: { challenge } })).then((data) => data.code),
+  // Approve signing in an app on this device, or this browser's Kaal extension; answers
+  // { code, redirect }, where redirect is the only place the code may be sent.
+  // The browser extension collecting its own token with the code the person's sign-in page handed it.
+  extensionSignIn: (code, verifier, name) => result(request("POST", "/v1/extension-sign-ins", { json: { code, verifier, name } })),
+  appSignIn: (challenge, kind = "app", extension = "") => result(request("POST", "/v1/account/app-sign-ins", { json: { challenge, kind, extension } })),
   signInServices: () => result(request("GET", "/v1/admin/sign-in-services")),
   addSignInService: (service) => result(request("POST", "/v1/admin/sign-in-services", { json: service })),
   removeSignInService: (service) => result(request("DELETE", `/v1/admin/sign-in-services/${id(service)}`)),
@@ -96,7 +99,8 @@ export const api = {
 
   account: () => result(request("GET", "/v1/account")),
   tokens: () => result(request("GET", "/v1/account/tokens")).then((data) => data.tokens),
-  createToken: (name, scopes, vault) => result(request("POST", "/v1/account/tokens", { json: { name, scopes, vault } })),
+  // Making a token needs the password, or, for an account without one, the sign-in name typed.
+  createToken: (name, scopes, vault, password = "", confirm = "") => result(request("POST", "/v1/account/tokens", { json: { name, scopes, vault, password, confirm } })),
   revokeToken: (tokenId) => result(request("DELETE", `/v1/account/tokens/${id(tokenId)}`)),
   createVault: (name) => result(request("POST", "/v1/account/vaults", { json: { name } })).then((data) => data.vault),
   renameVault: (name) => result(request("POST", "/v1/vault/name", { json: { name } })).then((data) => data.vault),

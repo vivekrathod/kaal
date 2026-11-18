@@ -165,8 +165,66 @@ def test_an_installation_from_before_app_sign_ins_gains_the_table(tmp_path):
     with sqlite3.connect(tmp_path / "accounts.db") as db:
         db.execute("DROP TABLE app_signins")
         db.execute("PRAGMA user_version = 3")
+    # (layout 4 made the table; layout 5 gave it a kind)
     again = accounts.AccountStore(tmp_path / "accounts.db", tmp_path)
     code = again.start_app_signin(made["id"], None, challenge_for(VERIFIER))
     assert again.finish_app_signin(code, VERIFIER) == {"account": made["id"], "vault": None}
     with sqlite3.connect(tmp_path / "accounts.db") as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == accounts.SCHEMA_VERSION == 4
+        assert db.execute("PRAGMA user_version").fetchone()[0] == accounts.SCHEMA_VERSION == 5
+
+
+# --- the browser extension, through the same hand-over
+
+EXTENSION = server.OFFICIAL_EXTENSION_ID
+
+
+def approve_extension(client, verifier=VERIFIER, extension=EXTENSION):
+    return client.post("/v1/account/app-sign-ins", json={"challenge": challenge_for(verifier), "kind": "extension", "extension": extension})
+
+
+def test_the_extension_is_connected_with_a_token_capped_by_the_persons_role(house):
+    owner = house.signed_in("owner")
+    approved = approve_extension(owner)
+    assert approved.status_code == 200, approved.text
+    handed = approved.json()["result"]
+    assert handed["redirect"] == f"https://{EXTENSION}.chromiumapp.org/kaal?code={handed['code']}"
+    got = house.phone().post("/v1/extension-sign-ins", json={"code": handed["code"], "verifier": VERIFIER})
+    assert got.status_code == 200, got.text
+    result = got.json()["result"]
+    assert result["scopes"] == ["read", "reveal", "write"] and result["name"] == "Chrome extension" and result["account"] == "owner"
+    script = TestClient(house.app, base_url=HERE, headers={"Authorization": f"Bearer {result['token']}"})
+    assert script.get("/v1/medical/receipts").status_code == 200
+    assert house.phone().post("/v1/extension-sign-ins", json={"code": handed["code"], "verifier": VERIFIER}).status_code == 401
+    # A second connection gets a name of its own.
+    again = approve_extension(owner).json()["result"]["code"]
+    assert house.phone().post("/v1/extension-sign-ins", json={"code": again, "verifier": VERIFIER}).json()["result"]["name"] == "Chrome extension 2"
+
+
+def test_a_viewer_connects_the_extension_only_to_read(house):
+    owner = house.signed_in("owner")
+    house.store.add_account("sam")
+    owner.post("/v1/vault/members", json={"login": "sam", "role": "viewer"})
+    sam = house.signed_in("sam")
+    vault = owner.get("/v1/session").json()["result"]["vault"]["id"]
+    sam.post("/v1/session/vault", json={"vault": vault})
+    code = approve_extension(sam).json()["result"]["code"]
+    assert house.phone().post("/v1/extension-sign-ins", json={"code": code, "verifier": VERIFIER}).json()["result"]["scopes"] == ["read", "reveal"]
+
+
+def test_an_unknown_extension_is_never_handed_a_code(house):
+    owner = house.signed_in("owner")
+    assert approve_extension(owner, extension="a" * 32).status_code == 400
+    assert approve_extension(owner, extension="not-an-id").status_code == 400
+
+
+def test_a_code_made_for_the_app_does_not_connect_the_extension_or_the_other_way_round(house):
+    owner = house.signed_in("owner")
+    for_app = approve(owner)
+    assert house.phone().post("/v1/extension-sign-ins", json={"code": for_app, "verifier": VERIFIER}).status_code == 401
+    for_extension = approve_extension(owner).json()["result"]["code"]
+    assert collect(house, for_extension).status_code == 401
+
+
+def test_the_app_is_told_its_own_address(house):
+    answer = house.signed_in("owner").post("/v1/account/app-sign-ins", json={"challenge": challenge_for(VERIFIER)}).json()["result"]
+    assert answer["redirect"] == f"kaal://signed-in?code={answer['code']}"

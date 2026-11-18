@@ -138,6 +138,10 @@ _MIGRATIONS: tuple[str, ...] = (
         expires TEXT NOT NULL
     );
     """,
+    # 5: the same hand-over also signs in the browser extension, which gets a token instead of a session.
+    """
+    ALTER TABLE app_signins ADD COLUMN kind TEXT NOT NULL DEFAULT 'app';
+    """,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 SESSION_PREFIX = "ks"
@@ -145,6 +149,7 @@ SESSION_DAYS = 30
 SESSION_TOUCH_SECONDS = 300   # how stale "last seen" may get before it is written again
 SETUP_HOURS = 24
 RECOVERY_CODE_COUNT = 8
+MAX_SESSIONS_PER_PERSON = 50
 FLOW_MINUTES = 10             # how long a trip to a sign-in service and back may take
 APP_SIGNIN_MINUTES = 5        # how long an app has to collect the sign-in a browser approved for it
 APP_SESSION_DAYS = 365        # an app stays signed in longer than a browser: there is no sign-in page on it to return to
@@ -530,6 +535,13 @@ class AccountStore:
         session_id, secret = secrets.token_hex(8), secrets.token_urlsafe(32)
         now = _now()
         with self._db(write=True) as db:
+            # Sessions that ended or ran out a month ago are of no use to anyone; forget them.
+            db.execute("DELETE FROM sessions WHERE expires < ? OR (ended_at IS NOT NULL AND ended_at < ?)", (_later(days=-30), _later(days=-30)))
+            # One person may stay signed in on at most this many browsers and apps; the oldest ends first.
+            live = [row["id"] for row in db.execute("SELECT id FROM sessions WHERE account_id = ? AND ended_at IS NULL AND expires > ? ORDER BY last_seen",
+                                                    (account_id, now))]
+            for old in live[: max(0, len(live) - (MAX_SESSIONS_PER_PERSON - 1))]:
+                db.execute("UPDATE sessions SET ended_at = ? WHERE id = ?", (now, old))
             db.execute("INSERT INTO sessions (id, secret_sha256, account_id, vault_id, label, created, last_seen, expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                        (session_id, _sha(secret), account_id, vault_id, (label or "")[:80], now, now, _later(days=days)))
             row = db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
@@ -573,17 +585,17 @@ class AccountStore:
 
     # --- app sign-ins: a browser the person is signed in on lets an app on their device in
 
-    def start_app_signin(self, account_id: str, vault_id: str | None, challenge: str) -> str:
+    def start_app_signin(self, account_id: str, vault_id: str | None, challenge: str, kind: str = "app") -> str:
         """Approve one app sign-in. Returns a code that works once, for a few minutes, and
         only together with the secret whose SHA-256 (base64url, unpadded) is ``challenge``."""
         code = secrets.token_urlsafe(32)
         with self._db(write=True) as db:
             db.execute("DELETE FROM app_signins WHERE expires <= ?", (_now(),))
-            db.execute("INSERT INTO app_signins (code_sha256, account_id, vault_id, challenge, created, expires) VALUES (?, ?, ?, ?, ?, ?)",
-                       (_sha(code), account_id, vault_id, challenge, _now(), _later(minutes=APP_SIGNIN_MINUTES)))
+            db.execute("INSERT INTO app_signins (code_sha256, account_id, vault_id, challenge, created, expires, kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                       (_sha(code), account_id, vault_id, challenge, _now(), _later(minutes=APP_SIGNIN_MINUTES), kind))
         return code
 
-    def finish_app_signin(self, code: str, verifier: str) -> dict[str, Any] | None:
+    def finish_app_signin(self, code: str, verifier: str, kind: str = "app") -> dict[str, Any] | None:
         """Whose sign-in a code is, used up by asking. None when the code is unknown,
         too old, or the app does not hold the secret the challenge was made from."""
         with self._db(write=True) as db:
@@ -592,7 +604,7 @@ class AccountStore:
                 return None
             db.execute("DELETE FROM app_signins WHERE code_sha256 = ?", (row["code_sha256"],))
         made = base64.urlsafe_b64encode(hashlib.sha256((verifier or "").encode()).digest()).decode().rstrip("=")
-        if row["expires"] <= _now() or not hmac.compare_digest(made, row["challenge"]):
+        if row["expires"] <= _now() or not hmac.compare_digest(made, row["challenge"]) or row["kind"] != kind:
             return None
         return {"account": row["account_id"], "vault": row["vault_id"]}
 

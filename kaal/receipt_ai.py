@@ -38,11 +38,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from kaal import tools
+
 FIELDS = ("patient_name", "provider", "insurer", "service_date", "paid_date", "amount", "amount_due")
 MAX_TEXT_CHARS = 20_000
 MAX_VALUE_CHARS = 200
 MAX_PAGES = 2
 MAX_IMAGE_EDGE = 1568
+MAX_PICTURE_PIXELS = 50_000_000
 # A larger file, once base64-encoded, is refused by the API.
 MAX_IMAGE_BYTES = 3_500_000
 DIRECT_IMAGE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
@@ -247,21 +250,36 @@ def _count_one(limit: int) -> None:
         _usage["count"] += 1
 
 
+class _Unreadable(Exception):
+    """Pillow is installed and could not, or would not, read the picture."""
+
+
 def _shrunk(data: bytes) -> tuple[str, bytes] | None:
-    """Re-encode an image as an upright JPEG no larger than the model reads, if Pillow is installed."""
+    """Re-encode an image as an upright JPEG no larger than the model reads.
+
+    None when Pillow is not installed; _Unreadable when it is and the picture is broken or far too large."""
     try:
         from PIL import Image, ImageOps
     except ImportError:
         return None
+    import warnings
+
     try:
-        with Image.open(io.BytesIO(data)) as image:
+        with warnings.catch_warnings():
+            # A picture claiming tens of thousands of pixels a side is a trap, not a receipt.
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            image = Image.open(io.BytesIO(data))
+            if image.width * image.height > MAX_PICTURE_PIXELS:
+                raise _Unreadable
+            image.load()
+        with image:
             image = ImageOps.exif_transpose(image).convert("RGB")
             image.thumbnail((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE))
             out = io.BytesIO()
             image.save(out, format="JPEG", quality=85)
             return "image/jpeg", out.getvalue()
     except Exception:
-        return None
+        raise _Unreadable from None
 
 
 def receipt_images(path: Path) -> list[tuple[str, bytes]]:
@@ -273,11 +291,9 @@ def receipt_images(path: Path) -> list[tuple[str, bytes]]:
             return []
         with tempfile.TemporaryDirectory(prefix="kaal-receipt-pages-") as directory:
             prefix = Path(directory) / "page"
-            try:
-                done = subprocess.run([pdftoppm, "-r", "100", "-png", "-f", "1", "-l", str(MAX_PAGES), str(path), str(prefix)], capture_output=True, timeout=60)
-            except (OSError, subprocess.TimeoutExpired):
-                return []
-            if done.returncode != 0:
+            # A size on the longest side, not a resolution: a page drawn absurdly large stays a normal picture.
+            done = tools.run([pdftoppm, "-scale-to", str(MAX_IMAGE_EDGE), "-png", "-f", "1", "-l", str(MAX_PAGES), str(path), str(prefix)], timeout=60)
+            if done is None or done.returncode != 0:
                 return []
             pages = [page.read_bytes() for page in sorted(Path(directory).glob("page*.png"))]
         return [("image/png", page) for page in pages if 0 < len(page) <= MAX_IMAGE_BYTES]
@@ -287,7 +303,11 @@ def receipt_images(path: Path) -> list[tuple[str, bytes]]:
         data = path.read_bytes()
     except OSError:
         return []
-    shrunk = _shrunk(data)
+    try:
+        shrunk = _shrunk(data)
+    except _Unreadable:
+        # Broken, or far too many pixels: nothing is sent.
+        return []
     if shrunk:
         return [shrunk]
     if suffix in DIRECT_IMAGE_TYPES and 0 < len(data) <= MAX_IMAGE_BYTES:

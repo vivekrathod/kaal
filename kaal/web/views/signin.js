@@ -168,7 +168,7 @@ export function signInView({ onSignedIn, problem = "" }) {
       done: onSignedIn,
       wrong: (error) => tooMany(error) || (error.status === 401 ? "That sign-in name and recovery code don't match." : error.message),
       footer: [
-        h("p", { class: "muted small" }, "No codes left? Whoever runs this Kaal can send you a new setup link."),
+        h("p", { class: "muted small" }, "No codes left? Ask whoever runs this Kaal's server for a new setup link."),
         h("p", { class: "muted small choices" }, link("Back to sign in", withPassword)),
       ],
     }));
@@ -211,17 +211,19 @@ export function setupView(code, { onSignedIn }) {
   return page;
 }
 
-// An app on this device (the iPhone app) asked to be signed in as this person.
-// Allowing it hands the app a code through its own address; the code is worth
-// nothing without a secret that never left the app.
+// An app on this device (the iPhone app), or the Kaal extension in this browser,
+// asked to be signed in as this person. Allowing it hands it a code through an
+// address Kaal chooses; the code is worth nothing without a secret that never left it.
 export const APP_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
-const APP_ADDRESS = "kaal://signed-in";
+export const EXTENSION_ID = /^[a-p]{32}$/;
 
-export function appSignInView(challenge, { session, onDone, signOut }) {
+export function appSignInView(asked, { session, onDone, signOut }) {
+  const { challenge, kind, extension } = typeof asked === "string" ? { challenge: asked, kind: "app", extension: "" } : asked;
+  const forExtension = kind === "extension" && EXTENSION_ID.test(extension || "");
   const problem = h("div", {});
   const leave = (query) => {
     onDone();
-    location.assign(`${APP_ADDRESS}?${query}`);
+    location.assign(forExtension ? `https://${extension}.chromiumapp.org/kaal?${query}` : `kaal://signed-in?${query}`);
   };
   const cancel = h("button", { type: "button", class: "button" }, "Cancel");
   cancel.addEventListener("click", () => leave("cancelled=1"));
@@ -236,15 +238,19 @@ export function appSignInView(challenge, { session, onDone, signOut }) {
     problem.replaceChildren();
     allow.disabled = true;
     try {
-      leave(`code=${encodeURIComponent(await api.appSignIn(challenge))}`);
+      const handed = await api.appSignIn(challenge, forExtension ? "extension" : "app", forExtension ? extension : "");
+      onDone();
+      location.assign(handed.redirect);
     } catch (error) {
       allow.disabled = false;
       problem.append(notice(error.message, "error"));
     }
   });
   return h("main", { class: "page narrow" }, h("div", { class: "card form" },
-    h("h1", {}, "Sign in the Kaal app?"),
-    h("p", { class: "muted" }, `The Kaal app on this device will be signed in as “${session.account.login}” and can do everything you can here. Allow this only if you opened the app yourself just now.`),
+    h("h1", {}, forExtension ? "Connect the Kaal extension?" : "Sign in the Kaal app?"),
+    h("p", { class: "muted" }, forExtension
+      ? `The Kaal extension in this browser will get a token for “${(session.vault || {}).name || "your vault"}” as “${session.account.login}”, to save pages and receipts and to check them. You can revoke it under Settings, Tokens. Allow this only if you pressed Connect in the extension just now.`
+      : `The Kaal app on this device will be signed in as “${session.account.login}” and can do everything you can here. Allow this only if you opened the app yourself just now.`),
     problem, allow, cancel,
     h("p", { class: "muted small choices" }, link("Not you? Sign out", signOut))));
 }

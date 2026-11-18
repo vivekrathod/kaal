@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hmac
 import secrets
+import threading
 
 # OWASP's recommended Argon2id setting: 19 MiB of memory, two passes, one lane.
 MEMORY_KIB, ITERATIONS, LANES, LENGTH = 19456, 2, 1, 32
@@ -28,10 +29,31 @@ def _unb64(text: str) -> bytes:
     return base64.b64decode(text + "=" * (-len(text) % 4), validate=True)
 
 
+class PasswordBusy(Exception):
+    """Too many passwords are being checked at once; the caller should say so and let the person try again."""
+
+
+# Each check takes about 20 MiB and a core for a moment. Only a few run at once, so a flood of
+# sign-in attempts slows sign-in down instead of taking the whole server's memory and threads.
+_checks = threading.BoundedSemaphore(4)
+WAIT_SECONDS = 3.0
+
+
+def set_concurrency(count: int) -> None:
+    global _checks
+    _checks = threading.BoundedSemaphore(max(1, count))
+
+
 def _derive(password: str, salt: bytes, memory: int, iterations: int, lanes: int, length: int) -> bytes:
     from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 
-    return Argon2id(salt=salt, length=length, iterations=iterations, lanes=lanes, memory_cost=memory).derive(password.encode("utf-8"))
+    gate = _checks
+    if not gate.acquire(timeout=WAIT_SECONDS):
+        raise PasswordBusy()
+    try:
+        return Argon2id(salt=salt, length=length, iterations=iterations, lanes=lanes, memory_cost=memory).derive(password.encode("utf-8"))
+    finally:
+        gate.release()
 
 
 def check_new(password: str, *, login: str = "") -> None:

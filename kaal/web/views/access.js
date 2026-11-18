@@ -59,20 +59,24 @@ export function tokensView(container, _params, context) {
       const box = h("input", { type: "checkbox", id: `scope-${scope}`, value: scope, checked: scope === "read" || scope === "reveal" });
       return [box, h("label", { for: `scope-${scope}`, class: "check" }, box, h("span", {}, h("strong", {}, scope), ` · ${meaning}`))];
     });
+    const hasPassword = (context.session.account || {}).has_password !== false;
+    const proof = h("input", { type: hasPassword ? "password" : "text", id: "token-proof", autocomplete: hasPassword ? "current-password" : "off",
+      placeholder: hasPassword ? "" : (context.session.account || {}).login });
     const form = h("form", { class: "stack", novalidate: true },
       h("label", { for: "token-name" }, "What is it for?"), name,
       vaults.length > 1 ? [h("label", { for: "token-vault" }, "Which vault"), vault] : null,
       h("fieldset", { class: "checks" }, h("legend", {}, "What it may do"), boxes.map(([, label]) => label)),
+      h("label", { for: "token-proof" }, hasPassword ? "Your password" : "Type your sign-in name to confirm"), proof,
       h("div", {}, h("button", { type: "submit", class: "button primary" }, "Make token")));
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       const scopes = boxes.filter(([box]) => box.checked).map(([box]) => box.value);
-      if (!name.value.trim() || !scopes.length) {
-        replace(status, notice("Give it a name and at least one thing it may do.", "error"));
+      if (!name.value.trim() || !scopes.length || !proof.value) {
+        replace(status, notice(!proof.value ? (hasPassword ? "Enter your password to make a token." : "Type your sign-in name to make a token.") : "Give it a name and at least one thing it may do.", "error"));
         return;
       }
       attempt(async () => {
-        const made = await api.createToken(name.value.trim(), scopes, vault.value || (vaults[0] && vaults[0].id));
+        const made = await api.createToken(name.value.trim(), scopes, vault.value || (vaults[0] && vaults[0].id), hasPassword ? proof.value : "", hasPassword ? "" : proof.value);
         draw(await api.tokens(), made);
       });
     });
@@ -276,7 +280,10 @@ export function peopleView(container, _params, context) {
             ].join(""))),
           h("span", { class: "row" },
             person.id === all.you ? null : actionButton("Remove…", () => attempt(async () => draw(await api.everyone(), null, { person, plan: await api.adminRemovalPlan(person.id) })), { kind: "small" }),
-            actionButton(person.has_password ? "Reset link" : "Setup link", () => attempt(async () => draw(await api.everyone(), { who: person.login, path: await api.newSetupLink(person.id) })), { kind: "small" }),
+            // Only for someone who has never signed in: a link signs in as that person, so an administrator
+            // cannot be given one for an account in use. Whoever runs the server can make one if needed.
+            person.has_password || (person.services || []).length ? null
+              : actionButton("Setup link", () => attempt(async () => draw(await api.everyone(), { who: person.login, path: await api.newSetupLink(person.id) })), { kind: "small" }),
             person.id === all.you ? null : actionButton(person.admin ? "Not admin" : "Make admin", () => attempt(async () => { await api.setAdmin(person.id, !person.admin); draw(await api.everyone()); }), { kind: "small" }),
             person.id === all.you ? null : (person.disabled_at
               ? actionButton("Switch on", () => attempt(async () => { await api.setDisabled(person.id, false); draw(await api.everyone()); }), { kind: "small" })

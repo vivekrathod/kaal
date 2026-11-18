@@ -338,7 +338,7 @@ def test_every_route_works_on_the_servers_vault_and_never_on_the_default(tmp_pat
     call("POST", "/v1/account/recovery-codes", json={"password": "a third made-up password"}, headers=person)
     call("POST", "/v1/session/vault", json={"vault": shown["vault"]["id"]}, headers=person)
     # tokens, vaults and sharing, as a person
-    made_token = result(call("POST", "/v1/account/tokens", json={"name": "made-up script", "scopes": ["read"], "vault": shown["vault"]["id"]}, headers=person))
+    made_token = result(call("POST", "/v1/account/tokens", json={"name": "made-up script", "scopes": ["read"], "vault": shown["vault"]["id"], "password": "a third made-up password"}, headers=person))
     call("GET", "/v1/account/tokens", headers=person)
     call("DELETE", f"/v1/account/tokens/{made_token['token']['id']}", headers=person)
     call("POST", "/v1/account/vaults", json={"name": "Made-up second vault"}, headers=person)
@@ -375,6 +375,7 @@ def test_every_route_works_on_the_servers_vault_and_never_on_the_default(tmp_pat
     call("POST", "/v1/admin/sign-in-services", headers=person,
          json={"kind": "google", "client_id": google.client_id, "client_secret": google.client_secret, "address": "http://testserver"}, expect=(400,))
     app.state.kaal.settings.cookie_secure = False   # this test's browser speaks plain http
+    person = {**person, "Cookie": person["Cookie"].replace("__Host-", "")}   # and over plain http the cookie has its plain name
     call("POST", "/v1/admin/sign-in-services", headers=person,
          json={"kind": "google", "client_id": google.client_id, "client_secret": google.client_secret, "address": "http://localhost"})
     trip = call("POST", "/v1/account/connections/google", json={"password": "a third made-up password"}, headers=person)
@@ -393,6 +394,10 @@ def test_every_route_works_on_the_servers_vault_and_never_on_the_default(tmp_pat
     approved = call("POST", "/v1/account/app-sign-ins", json={"challenge": challenge}, headers=person)
     in_app = call("POST", "/v1/app-sign-ins", json={"code": result(approved)["code"], "verifier": made_up_secret, "device": "A made-up phone"}, headers={})
     assert result(in_app)["account"]["login"] and result(in_app)["session"]
+    # the browser extension is connected the same way, and is handed a token of its own
+    approved = call("POST", "/v1/account/app-sign-ins", json={"challenge": challenge, "kind": "extension", "extension": server.OFFICIAL_EXTENSION_ID}, headers=person)
+    in_extension = call("POST", "/v1/extension-sign-ins", json={"code": result(approved)["code"], "verifier": made_up_secret}, headers={})
+    assert result(in_extension)["token"].startswith("kaal_")
 
     # A person's session opens the vault by the same route as a token does.
     assert call("GET", "/v1/library/notes", headers=person).status_code == 200

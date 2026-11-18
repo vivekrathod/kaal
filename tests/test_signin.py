@@ -115,7 +115,7 @@ def test_signing_in_with_a_password_starts_a_session_the_server_can_end(house):
 
 def test_only_a_hash_of_the_password_and_of_the_session_is_stored(house):
     client, _ = house.set_up("owner")
-    value = client.cookies.get("kaal_session")
+    value = client.cookies.get("__Host-kaal_session")
     stored = (house.home / "accounts.db").read_bytes()
     for name in ("accounts.db-wal",):
         if (house.home / name).exists():

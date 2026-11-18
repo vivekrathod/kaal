@@ -52,6 +52,21 @@
             "pattern": "^[A-Za-z0-9_-]{43}$",
             "title": "Challenge",
             "type": "string"
+          },
+          "extension": {
+            "default": "",
+            "pattern": "^[a-p]{0,32}$",
+            "title": "Extension",
+            "type": "string"
+          },
+          "kind": {
+            "default": "app",
+            "enum": [
+              "app",
+              "extension"
+            ],
+            "title": "Kind",
+            "type": "string"
           }
         },
         "required": [
@@ -213,6 +228,35 @@
           }
         },
         "title": "ConnectStart",
+        "type": "object"
+      },
+      "ExtensionSignInFinish": {
+        "properties": {
+          "code": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          },
+          "name": {
+            "default": "Chrome extension",
+            "maxLength": 60,
+            "title": "Name",
+            "type": "string"
+          },
+          "verifier": {
+            "maxLength": 128,
+            "minLength": 43,
+            "pattern": "^[A-Za-z0-9._~-]+$",
+            "title": "Verifier",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "verifier"
+        ],
+        "title": "ExtensionSignInFinish",
         "type": "object"
       },
       "ExtractRun": {
@@ -985,10 +1029,22 @@
       },
       "TokenNew": {
         "properties": {
+          "confirm": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Confirm",
+            "type": "string"
+          },
           "name": {
             "maxLength": 80,
             "minLength": 1,
             "title": "Name",
+            "type": "string"
+          },
+          "password": {
+            "default": "",
+            "maxLength": 1024,
+            "title": "Password",
             "type": "string"
           },
           "scopes": {
@@ -1159,7 +1215,7 @@
     },
     "/v1/account/app-sign-ins": {
       "post": {
-        "description": "Approve signing an app in as oneself. Answers a code that works once, for five minutes.",
+        "description": "Approve signing an app (or this browser's Kaal extension) in as oneself. Answers a code that\nworks once, for five minutes, and where to send it: the app's own address, or the extension's.\nKaal decides where it goes, so a page cannot be talked into handing a code to anyone else.",
         "operationId": "app_sign_in_start_v1_account_app_sign_ins_post",
         "requestBody": {
           "content": {
@@ -1465,7 +1521,7 @@
         ]
       },
       "post": {
-        "description": "Make a token for a script or the extension. Its secret is in this answer and nowhere else, ever.",
+        "description": "Make a token for a script or the extension. Its secret is in this answer and nowhere else, ever.\nNeeds the password (or, for an account without one, the sign-in name typed), so a borrowed\nbrowser cannot leave a lasting way in behind.",
         "operationId": "account_token_create_v1_account_tokens_post",
         "requestBody": {
           "content": {
@@ -1834,7 +1890,7 @@
     },
     "/v1/admin/people/{account_id}/setup-link": {
       "post": {
-        "description": "A new single-use link for someone who has not chosen a password yet, or has lost theirs.",
+        "description": "A new single-use link for someone who has never signed in. An administrator cannot make one\nfor an account already in use: whoever uses a setup link signs in as that person, so that would\nlet an administrator into other people's vaults. For someone who has lost every way in, whoever\nruns the server makes the link (kaal-server account setup-link LOGIN).",
         "operationId": "admin_person_link_v1_admin_people__account_id__setup_link_post",
         "parameters": [
           {
@@ -2140,6 +2196,46 @@
         "summary": "Export",
         "tags": [
           "service"
+        ]
+      }
+    },
+    "/v1/extension-sign-ins": {
+      "post": {
+        "description": "The browser extension collects the sign-in a browser approved for it, as a token of its own\nfor the vault that was open: read, reveal and write, as far as the person's role there allows.",
+        "operationId": "extension_sign_in_finish_v1_extension_sign_ins_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtensionSignInFinish"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Extension Sign In Finish",
+        "tags": [
+          "session"
         ]
       }
     },
@@ -4397,7 +4493,7 @@
     },
     "/v1/sign-in/recover": {
       "post": {
-        "description": "Use a recovery code to choose a new password. Signs every other browser out.",
+        "description": "Use a recovery code to choose a new password. Signs every other browser out and\nends the account's tokens, since whoever forgot the password may not be the only one using it.",
         "operationId": "recover_v1_sign_in_recover_post",
         "requestBody": {
           "content": {

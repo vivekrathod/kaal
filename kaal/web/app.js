@@ -1,6 +1,6 @@
 import { api, ApiError, updateWaiting } from "/web/api.js";
 import { h, replace, notice } from "/web/ui.js";
-import { signInView, setupView, appSignInView, APP_CHALLENGE } from "/web/views/signin.js";
+import { signInView, setupView, appSignInView, APP_CHALLENGE, EXTENSION_ID } from "/web/views/signin.js";
 import { inboxView } from "/web/views/inbox.js";
 import { reviewView } from "/web/views/review.js";
 import { totalsView } from "/web/views/totals.js";
@@ -41,11 +41,17 @@ function shell(active, content) {
 const APP_SIGN_IN = "kaal.app-sign-in";
 function appSignInWaiting() {
   try {
-    const { name, rest } = route();
-    if (name === "app-sign-in" && APP_CHALLENGE.test(rest[0] || "")) sessionStorage.setItem(APP_SIGN_IN, rest[0]);
-    return sessionStorage.getItem(APP_SIGN_IN) || "";
+    const { name, rest, params } = route();
+    if (name === "app-sign-in" && APP_CHALLENGE.test(rest[0] || "")) {
+      const kind = params.for === "extension" && EXTENSION_ID.test(params.id || "") ? "extension" : "app";
+      sessionStorage.setItem(APP_SIGN_IN, JSON.stringify({ challenge: rest[0], kind, extension: kind === "extension" ? params.id : "" }));
+    }
+    const kept = sessionStorage.getItem(APP_SIGN_IN);
+    if (!kept) return null;
+    // Kept by an earlier version as the bare challenge.
+    return kept.startsWith("{") ? JSON.parse(kept) : { challenge: kept, kind: "app", extension: "" };
   } catch {
-    return "";
+    return null;
   }
 }
 function appSignInDone() {

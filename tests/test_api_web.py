@@ -49,7 +49,8 @@ def test_signing_in_sets_a_cookie_scripts_cannot_read(service):
     assert response.status_code == 200
     assert response.json()["result"] == {"name": "full", "scopes": ["read", "reveal", "write", "delete", "admin"]}
     cookie = response.headers["set-cookie"]
-    assert cookie.startswith(f"kaal_session={service.secrets['full']};")
+    # The name ties the cookie to this one host: no other host on the same domain can set or replace it.
+    assert cookie.startswith(f"__Host-kaal_session={service.secrets['full']};")
     for attribute in ("HttpOnly", "Secure", "SameSite=strict", "Path=/", "Max-Age=2592000"):
         assert attribute in cookie
     assert service.secrets["full"] not in response.text

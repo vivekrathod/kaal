@@ -197,7 +197,7 @@ def test_an_owner_deletes_a_vault_with_their_password_and_everything_goes(house)
     made = owner.post("/v1/account/vaults", json={"name": "Made-up spare vault"}).json()["result"]["vault"]
     owner.post("/v1/session/vault", json={"vault": made["id"]})
     note(owner, "Made-up note to lose")
-    token = owner.post("/v1/account/tokens", json={"name": "made-up", "scopes": ["read"], "vault": made["id"]}).json()["result"]["secret"]
+    token = owner.post("/v1/account/tokens", json={"name": "made-up", "scopes": ["read"], "vault": made["id"], "password": GOOD}).json()["result"]["secret"]
     folder = house.store.folder_of(house.store.vault(made["id"]))
     assert folder.is_dir()
 
@@ -241,7 +241,7 @@ def test_a_person_deletes_their_account_and_the_vaults_only_they_had(house):
     # Sam is also an editor in the owner's first vault, which stays.
     owner = house.signed_in("owner")
     owner.post("/v1/vault/members", json={"login": "sam", "role": "editor"})
-    token = sam.post("/v1/account/tokens", json={"name": "made-up", "scopes": ["read"], "vault": sam_vault}).json()["result"]["secret"]
+    token = sam.post("/v1/account/tokens", json={"name": "made-up", "scopes": ["read"], "vault": sam_vault, "password": GOOD}).json()["result"]["secret"]
 
     plan = sam.get("/v1/account/removal").json()["result"]
     assert plan == {"login": "sam", "vaults_to_delete": ["Sam's made-up notes"], "vaults_to_leave": ["Main"], "blocked": []}

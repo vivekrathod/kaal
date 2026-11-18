@@ -300,7 +300,7 @@ def test_starting_a_trip_needs_the_web_apps_own_header(house):
     bare = TestClient(house.app, base_url=HERE, follow_redirects=False)
     assert bare.post("/v1/sign-in/with/google", json={}).status_code == 403
     signed = house.signed_in("owner")
-    cookie = {"Cookie": f"kaal_session={signed.cookies.get('kaal_session')}"}
+    cookie = {"Cookie": f"__Host-kaal_session={signed.cookies.get('__Host-kaal_session')}"}
     assert bare.post("/v1/account/connections/google", json={"password": GOOD}, headers=cookie).status_code == 403
     assert bare.delete("/v1/account/connections/google", headers=cookie).status_code == 403
     # A token is not a person: it can connect nothing.
