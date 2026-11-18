@@ -49,12 +49,14 @@ services:
     mem_limit: ${KAAL_DEMO_MEMORY:-1g}
     pids_limit: 256
     # Healthy only once the made-up data is in, so run.sh knows when to say so.
+    # Putting it back takes under a minute, which is not long enough to count
+    # as unhealthy; two minutes without it is.
     healthcheck:
       test: ["CMD", "python", "/opt/kaal-demo/demo.py", "health"]
       interval: 10s
       timeout: 5s
       start_period: 3m
-      retries: 3
+      retries: 12
 
   # HTTPS for the demo's own domain, exactly as for a regular installation.
   caddy:

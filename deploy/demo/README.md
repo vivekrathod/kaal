@@ -134,7 +134,7 @@ can. None of it reaches past the demo, and none of it lasts:
 | Change the reviewer's password, with the password or with a recovery code | Put back within a minute, and everyone is signed out, whoever changed it included; the recovery codes are replaced |
 | Rename a vault, which removes the notice in its name | The name is put back within a minute |
 | Delete the reviewer's account or one of its vaults, or hand a vault to John | The whole reset happens within a minute instead of at night |
-| Fill the demo's storage with files | The whole reset happens once nine tenths of it is used |
+| Fill the demo's storage with files | The whole reset happens within a minute of three quarters of it being used |
 | Make tokens (at most 50) | They work until the next reset, and reach only what the reviewer can see |
 | See which browsers and apps are signed in as `reviewer` (the kind of device and when, nothing more) and sign them out | Signing in again; the nightly reset clears the list |
 | Download a copy of a vault | Nothing to put right: it holds only what is in the demo |
@@ -182,9 +182,9 @@ address, port and passwords chosen before and applies what is new.
   unless those folders really are in memory, so it can never empty a volume
   that holds anyone's real data.
 - **Limits for strangers**: files up to 10 MiB, at most 256 MB stored in all,
-  at most 1 GB of memory and 256 processes. When the storage is nearly full,
-  or the memory runs out, it starts again with the made-up data. Anything
-  stored is gone by the next morning.
+  at most 1 GB of memory and 256 processes. When three quarters of the
+  storage is used, or the memory runs out, it starts again with the made-up
+  data. Anything stored is gone by the next morning.
 - **No new accounts**: sign-up is closed, and the limit on new accounts is
   zero even if an administrator opened it. A person may own at most three
   vaults.

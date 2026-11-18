@@ -14,7 +14,7 @@ While it runs, `kill -HUP` (deploy/demo/run.sh reset) puts the made-up data
 back at once. Everyone who looks at the demo signs in with the same published
 password, so every minute it also checks that the next visitor still can: a
 changed password or vault name is put back, and a deleted account or vault, or
-storage that strangers have filled, brings the whole reset forward.
+storage that strangers have mostly filled, brings the whole reset forward.
 
 It needs the standard library, plus Pillow for the pictures, which the
 container image has.
@@ -55,7 +55,10 @@ NOTICE_TITLE = "Read me first: this is Kaal's demo"
 LOCAL = "http://127.0.0.1:8765"
 READY = Path("/tmp/kaal-demo-ready")
 CHECK_SECONDS = 60         # how often the reviewer's account is checked (see keep_reviewer)
-FULL = 0.9                 # how much of its storage may be used before the demo starts again
+# How much of its storage may be used before the demo starts again. Well short of all of it:
+# a file being added needs room for more than its own size for a moment, so adding files
+# starts to fail some way before the storage is full.
+FULL = 0.75
 SESSION_COOKIES = {"kaal_session", "__Host-kaal_session"}   # over plain http, and over https
 RESET_AT = "03:00"         # UTC, unless KAAL_DEMO_RESET_AT says otherwise
 PASSWORD = re.compile(r"[A-Za-z0-9._-]{10,128}")
@@ -668,8 +671,8 @@ def keep_reviewer(connect: Callable[[], Kaal], run: Callable[[list[str]], str], 
 
 
 def nearly_full(folder: Path, limit: float = FULL) -> bool:
-    """Whether strangers have filled the demo's storage. Kaal cannot even sign anyone in
-    once it is full, so the demo starts again rather than wait for the night."""
+    """Whether strangers have filled most of the demo's storage. Once it is full Kaal cannot add
+    a file, or even sign anyone in, so the demo starts again rather than wait for the night."""
     usage = shutil.disk_usage(folder)
     return usage.used >= usage.total * limit
 
@@ -787,7 +790,7 @@ def serve() -> int:
                             log.warning("the reviewer's account or one of its vaults had been deleted; putting the made-up data back now")
                             break
                         if nearly_full(home):
-                            log.warning("the demo's storage was nearly full; putting the made-up data back now")
+                            log.warning("the demo's storage was three quarters full; putting the made-up data back now")
                             break
                         if "password" in found:
                             log.warning("the reviewer's password had been changed; it is back to the one App Review was given")

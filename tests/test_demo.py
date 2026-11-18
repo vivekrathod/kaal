@@ -328,9 +328,9 @@ def test_storage_that_is_nearly_full_calls_for_starting_again(tmp_path, monkeypa
     usage = SimpleNamespace(total=256 * 1024 * 1024, used=0)
     monkeypatch.setattr(demo.shutil, "disk_usage", lambda folder: usage)
     assert demo.nearly_full(tmp_path) is False
-    usage.used = 200 * 1024 * 1024
+    usage.used = 180 * 1024 * 1024
     assert demo.nearly_full(tmp_path) is False
-    usage.used = 231 * 1024 * 1024
+    usage.used = 192 * 1024 * 1024       # room is left for a file of the largest size allowed, and the copy made while adding it
     assert demo.nearly_full(tmp_path) is True
 
 
@@ -585,6 +585,7 @@ def test_compose_resolves_the_demo_with_the_regular_hardening(tmp_path):
     assert kaal_service["restart"] == "unless-stopped"
     assert kaal_service["command"] == ["python", "/opt/kaal-demo/demo.py", "serve"]
     assert kaal_service["healthcheck"]["test"] == ["CMD", "python", "/opt/kaal-demo/demo.py", "health"]
+    assert kaal_service["healthcheck"]["retries"] * 10 >= 120, "a reset, which takes under a minute, never shows as unhealthy"
     assert int(kaal_service["mem_limit"]) == 1024 ** 3 and kaal_service["pids_limit"] == 256
     assert "kaal.env" not in json.dumps(kaal_service), "a regular installation's own settings never apply"
 
