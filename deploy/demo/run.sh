@@ -34,7 +34,7 @@ settings="$project.env"
 # file, so these are left out: the settings file alone says how the demo runs.
 dc() {
     (
-        unset COMPOSE_PROFILES KAAL_IMAGE KAAL_PUBLIC_URL KAAL_DOMAIN KAAL_LISTEN KAAL_COOKIE_SECURE KAAL_HTTP_PORT KAAL_HTTPS_PORT \
+        unset COMPOSE_PROFILES KAAL_IMAGE KAAL_PUBLIC_URL KAAL_DOMAIN KAAL_LISTEN KAAL_COOKIE_SECURE KAAL_HSTS KAAL_HTTP_PORT KAAL_HTTPS_PORT \
             KAAL_DEMO_PASSWORD KAAL_DEMO_ADMIN_PASSWORD KAAL_DEMO_RESET_AT KAAL_DEMO_STORAGE KAAL_DEMO_FREE_SPACE_MB KAAL_DEMO_MAX_UPLOAD_BYTES KAAL_DEMO_MEMORY
         docker compose -p "$project" --env-file "$settings" -f compose.yaml "$@"
     )
@@ -160,6 +160,7 @@ printf '%s' "$reset_at" | grep -Eq '^([01][0-9]|2[0-3]):[0-5][0-9]$' || stop "--
 profiles=""
 domain=""
 secure=1
+hsts=0
 case "$mode" in
 domain)
     domain=$(printf '%s' "$value" | tr 'A-Z' 'a-z' | sed -e 's#^https\{0,1\}://##' -e 's#/.*$##')
@@ -167,6 +168,9 @@ domain)
     value=$domain
     address="https://$domain"
     profiles=https
+    # A domain of its own serves nothing over plain http, so browsers are told to stay on https,
+    # as deploy/docker/install.sh has it.
+    hsts=1
     ;;
 behind)
     address=$(printf '%s' "$value" | sed -e 's#/*$##')
@@ -198,7 +202,7 @@ made_admin=0
 
 umask 077
 # Lines this script does not write, such as KAAL_DEMO_STORAGE (see README.md), are kept.
-ours='^(#|$|(KAAL_DEMO_MODE|KAAL_DEMO_ADDRESS|KAAL_PUBLIC_URL|KAAL_DOMAIN|KAAL_LISTEN|KAAL_COOKIE_SECURE|COMPOSE_PROFILES|KAAL_IMAGE|KAAL_DEMO_RESET_AT|KAAL_DEMO_PASSWORD|KAAL_DEMO_ADMIN_PASSWORD)=)'
+ours='^(#|$|(KAAL_DEMO_MODE|KAAL_DEMO_ADDRESS|KAAL_PUBLIC_URL|KAAL_DOMAIN|KAAL_LISTEN|KAAL_COOKIE_SECURE|KAAL_HSTS|COMPOSE_PROFILES|KAAL_IMAGE|KAAL_DEMO_RESET_AT|KAAL_DEMO_PASSWORD|KAAL_DEMO_ADMIN_PASSWORD)=)'
 {
     echo "# Written by deploy/demo/run.sh; run it again to change these. Keep this file private: it holds the passwords."
     echo "KAAL_DEMO_MODE=$mode"
@@ -207,6 +211,7 @@ ours='^(#|$|(KAAL_DEMO_MODE|KAAL_DEMO_ADDRESS|KAAL_PUBLIC_URL|KAAL_DOMAIN|KAAL_L
     echo "KAAL_DOMAIN=$domain"
     echo "KAAL_LISTEN=127.0.0.1:$port"
     echo "KAAL_COOKIE_SECURE=$secure"
+    echo "KAAL_HSTS=$hsts"
     echo "COMPOSE_PROFILES=$profiles"
     echo "KAAL_IMAGE=$image"
     echo "KAAL_DEMO_RESET_AT=$reset_at"
@@ -249,3 +254,7 @@ cat << DONE
 Both passwords are kept in deploy/demo/$settings and stay the same across
 resets. What to tell App Review is in deploy/demo/README.md.
 DONE
+if [ "$mode" = behind ]; then
+    printf '\nThe demo listens on 127.0.0.1:%s. Point your proxy at it; with Tailscale:\n\n  tailscale serve --bg %s\n' "$port" "$port"
+    printf '\nA proxy of your own must pass on who is asking (the X-Forwarded-For header), or Kaal\ncannot tell visitors apart. Tailscale and Caddy do; for nginx add:\n\n  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n'
+fi

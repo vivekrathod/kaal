@@ -132,14 +132,15 @@ can. None of it reaches past the demo, and none of it lasts:
 | A visitor can | What puts it right |
 |---|---|
 | Add, change, trash or delete notes and receipts, add files, change the family names | The nightly reset |
-| Change the reviewer's password, with the password or with a recovery code | Put back within a minute, and everyone is signed out, whoever changed it included; the recovery codes are replaced |
+| Change the reviewer's password, with the password or with a recovery code | Put back within a minute, and everyone is signed out, whoever changed it included; the recovery codes are replaced, and every token made with the old password stops working (the one the Tokens page shows is made again) |
 | Rename a vault, which removes the notice in its name | The name is put back within a minute |
 | Delete the reviewer's account or one of its vaults, or hand a vault to John | The whole reset happens within a minute instead of at night |
 | Fill the demo's storage with files | Kaal refuses a file it has too little room for, and the whole reset happens within a minute of less than 52 MB being free |
-| Make tokens (at most 50, and 20 in an hour) | They work until the next reset, and reach only what the reviewer can see |
+| Make tokens (at most 50, and 20 in an hour) | They work until the next reset, or until a changed password is put back, and reach only what the reviewer can see |
 | See which browsers and apps are signed in as `reviewer` (the kind of device and when, nothing more) and sign them out | Signing in again; the nightly reset clears the list |
 | Download a copy of a vault | Nothing to put right: it holds only what is in the demo |
-| Type wrong passwords | Kaal slows guessing per address, so one visitor's wrong tries do not hold up another's. Fifty wrong tries from many addresses together make everyone wait, a minute at most, and the next right password clears the count |
+| Type wrong passwords on the sign-in page | Kaal slows guessing per address, and whoever has not typed it wrong from where they are always has their try, so one visitor's wrong tries do not hold up another's |
+| Type wrong passwords where Kaal asks a signed-in person for theirs again (making a token, new recovery codes, changing the password, deleting) | After five, those few things make everyone wait, a quarter of an hour at most; signing in and everything else carry on. The nightly reset clears it |
 
 A visitor cannot open the administrator's pages, make an account, read
 anything outside the demo's container, or touch another Kaal on the machine.
@@ -150,7 +151,8 @@ who keeps at it can spoil the demo for others: by trashing the notes just
 before a reviewer looks, by deleting the account again and again so that the
 demo keeps starting over, by signing in so often that earlier sign-ins are
 ended (an account keeps its newest 50), or by sending requests so fast that
-the account's allowance for the minute is used up and others are told to wait.
+the account's allowance for the minute is used up and others are told to wait
+(the password may be given again six times a minute, by everyone together).
 If that happens during a review, give the reviewer account a new password and
 tell App Review:
 
@@ -180,7 +182,10 @@ address, port and passwords chosen before and applies what is new.
   privileges, its logs are kept small, and Kaal can be reached directly only
   from the machine itself (127.0.0.1), with Caddy (HTTPS) or your own proxy in
   front. Kaal's own protections are all on: sign-in is limited per address,
-  wrong passwords are slowed, and browsers are told to use HTTPS only.
+  wrong passwords are slowed, and on a domain of the demo's own browsers are
+  told to use HTTPS only. Behind a proxy of your own, the proxy must pass on
+  who is asking (the `X-Forwarded-For` header, which Tailscale and Caddy
+  send), or Kaal cannot tell one visitor from another.
 - **Nothing on disk.** The vaults, the accounts and the key are held in memory
   inside the container and are gone when it stops. The demo refuses to start
   unless those folders really are in memory, so it can never empty a volume
@@ -192,7 +197,9 @@ address, port and passwords chosen before and applies what is new.
   for two files of the largest size), the demo starts again with the made-up
   data, as it does if the memory runs out. Anything stored is gone by the
   next morning. What Kaal holds in memory is cut to fit: 128 MB of files on
-  their way to people, and 64 MB of text for searching in each vault.
+  their way to people, and 64 MB of text for searching in each vault. A
+  program reading a file may write 32 MB at most, where a regular
+  installation allows as much as the demo's whole storage.
 - **One account for everyone**: whoever looks at the demo shares the
   reviewer's allowance of requests, so it is 1,800 a minute, three times a
   regular installation's.

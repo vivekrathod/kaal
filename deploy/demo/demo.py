@@ -13,8 +13,9 @@ Kaal's files. Nothing here prints a password or a setup link either.
 While it runs, `kill -HUP` (deploy/demo/run.sh reset) puts the made-up data
 back at once. Everyone who looks at the demo signs in with the same published
 password, so every minute it also checks that the next visitor still can: a
-changed password or vault name is put back, and a deleted account or vault, or
-storage that strangers have nearly filled, brings the whole reset forward.
+changed password or vault name is put back (which ends every token made with
+the old one), and a deleted account or vault, or storage that strangers have
+nearly filled, brings the whole reset forward.
 
 It needs the standard library, plus Pillow for the pictures, which the
 container image has.
@@ -51,6 +52,7 @@ VAULT_NAME = "Demo: anything you add is removed every night"
 HOUSEHOLD = "Madeup household (shared)"
 FAMILY = ["Jane Madeup", "John Madeup", "Robin Madeup"]
 NOTICE_TITLE = "Read me first: this is Kaal's demo"
+TOKEN = {"name": "Kaal for Chrome", "scopes": ["read", "write"]}   # so that the Tokens page has one to show
 
 LOCAL = "http://127.0.0.1:8765"
 READY = Path("/tmp/kaal-demo-ready")
@@ -604,7 +606,7 @@ def seed(connect: Callable[[], Kaal], run: Callable[[list[str]], str], *, review
     for note in made_notes:
         _add_note(jane, note)
         pause()
-    jane.call("POST", "/v1/account/tokens", {"name": "Kaal for Chrome", "scopes": ["read", "write"], "vault": main, "password": reviewer_password})
+    jane.call("POST", "/v1/account/tokens", {**TOKEN, "vault": main, "password": reviewer_password})
     # The notice is written a moment after everything else, so it is always at the top of the list.
     pause()
     _add_note(jane, notice(reset_at))
@@ -654,8 +656,16 @@ def keep_reviewer(connect: Callable[[], Kaal], run: Callable[[list[str]], str], 
         return found
     person = connect()
     if "password" in found:
-        # A setup link, as for someone who forgot theirs. It signs everyone out, whoever changed it included.
+        # A setup link, as for someone who forgot theirs. It signs everyone out, whoever changed
+        # it included, and ends the account's tokens, a visitor's with the one the Tokens page shows.
         sign_in_with_setup_link(person, run, REVIEWER, password, REVIEWER_NAME)
+        try:
+            main = next(vault for vault, name in vaults.items() if name == VAULT_NAME)
+            person.call("POST", "/v1/account/tokens", {**TOKEN, "vault": main, "password": password})
+        except (DemoError, StopIteration):
+            # Visitors share how often the account may give its password and make tokens, so
+            # this can be refused. The password is back, which is what matters; the token waits for the reset.
+            pass
     else:
         person.call("POST", "/v1/sign-in", {"login": REVIEWER, "password": password})
     if "names" in found:

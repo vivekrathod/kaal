@@ -41,6 +41,10 @@ services:
       # on their way to people, and each vault's text for searching.
       KAAL_DOWNLOAD_MEMORY_MB: "128"
       KAAL_SEARCH_MEMORY_MB: "64"
+      # A program reading a file writes its pages and text into the same
+      # storage. A regular installation lets each file it writes reach 256 MiB,
+      # which is all the demo has; a page of a real receipt is far smaller.
+      KAAL_FILE_OUTPUT_MB: "32"
       # Everyone looking at the demo shares one account, so its allowance of
       # requests a minute is three times a regular installation's.
       KAAL_RATE_PER_MINUTE: "1800"

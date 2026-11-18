@@ -235,18 +235,51 @@ def keep(seeded):
 def test_a_changed_reviewer_password_is_put_back(seeded):
     jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
     assert keep(seeded) == [], "nothing is wrong, so nothing is done and nobody is signed out"
-    jane.call("GET", "/v1/account")
+    main = jane.call("GET", "/v1/account")["vault"]["id"]
+    theirs = jane.call("POST", "/v1/account/tokens", {"name": "Made-up visitor token", "scopes": ["read"], "vault": main, "password": REVIEWER_PASSWORD})["secret"]
+    with_token = TestClient(seeded.app, base_url="https://testserver", headers={"Authorization": f"Bearer {theirs}"})
+    assert with_token.get("/v1/library/notes").status_code == 200
     jane.call("POST", "/v1/account/password", {"current": REVIEWER_PASSWORD, "new": "someone-else-chose-this"})
     assert demo.what_is_wrong(REVIEWER_PASSWORD, seeded.made["vaults"]) == ["password"]
 
     assert keep(seeded) == ["password"]
     assert keep(seeded) == []
-    seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    again = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    # Putting it back ends every token made with the old password, the visitor's included,
+    # and the one the Tokens page shows is made again, for the same vault.
+    assert with_token.get("/v1/library/notes").status_code == 401
+    assert [(token["name"], token["vault"], token["scopes"]) for token in again.call("GET", "/v1/account/tokens")["tokens"]] == [("Kaal for Chrome", main, ["read", "write"])]
     with pytest.raises(demo.DemoError, match="401"):
         seeded.signed_in("reviewer", "someone-else-chose-this")
     with pytest.raises(demo.DemoError, match="401"):
         jane.call("GET", "/v1/account")     # putting it back signed everyone out, whoever changed it included
     assert len(seeded.signed_in("reviewer", REVIEWER_PASSWORD).call("GET", "/v1/library/notes")) == 8, "the notes stay until the nightly reset"
+
+
+def test_the_password_is_put_back_even_when_the_token_cannot_be_made_again(seeded):
+    """Everyone shares how often the account may give its password, so a visitor can use that up."""
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    jane.call("POST", "/v1/account/password", {"current": REVIEWER_PASSWORD, "new": "someone-else-chose-this"})
+    refused = []
+
+    def connect():
+        person = seeded.connect()
+        call = person.call
+
+        def but_no_tokens(method, path, *args, **kwargs):
+            if (method, path) == ("POST", "/v1/account/tokens"):
+                refused.append(path)
+                raise demo.DemoError("POST /v1/account/tokens was refused (429): made up")
+            return call(method, path, *args, **kwargs)
+
+        person.call = but_no_tokens
+        return person
+
+    assert demo.keep_reviewer(connect, seeded.run, REVIEWER_PASSWORD, seeded.made["vaults"]) == ["password"]
+    assert refused == ["/v1/account/tokens"]
+    again = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    assert again.call("GET", "/v1/account/tokens")["tokens"] == [], "it waits for the reset"
+    assert keep(seeded) == []
 
 
 def test_a_password_changed_with_a_recovery_code_is_put_back_and_the_codes_are_replaced(seeded):
@@ -452,6 +485,7 @@ def test_run_sh_starts_a_local_demo_with_its_own_names_and_prints_the_password_o
     assert stat.S_IMODE(demo_folder.settings().stat().st_mode) == 0o600
     assert stored["KAAL_PUBLIC_URL"] == "http://localhost:8797" and stored["KAAL_LISTEN"] == "127.0.0.1:8797"
     assert stored["KAAL_COOKIE_SECURE"] == "0" and stored["COMPOSE_PROFILES"] == "" and stored["KAAL_DEMO_RESET_AT"] == "03:00"
+    assert stored["KAAL_HSTS"] == "0", "plain http on this machine: browsers are not told to use https only"
     assert stored["KAAL_IMAGE"] == "kaal-demo:local", "never kaal:local, which a regular installation runs"
     for password in (stored["KAAL_DEMO_PASSWORD"], stored["KAAL_DEMO_ADMIN_PASSWORD"]):
         assert re.fullmatch(r"[a-z2-9]{4}(-[a-z2-9]{4}){3}", password)
@@ -482,13 +516,13 @@ def test_run_sh_keeps_settings_it_does_not_write(demo_folder):
 
 def test_run_sh_lets_only_its_settings_file_decide(demo_folder):
     done, _calls = demo_folder.run("--local", KAAL_PUBLIC_URL="https://elsewhere.example.org", KAAL_IMAGE="someone-else:latest",
-                                   KAAL_DEMO_ADMIN_PASSWORD="made-up-other-1", COMPOSE_PROFILES="https")
+                                   KAAL_DEMO_ADMIN_PASSWORD="made-up-other-1", COMPOSE_PROFILES="https", KAAL_HSTS="1")
     assert done.returncode == 0, done.stderr
     stored = read_settings(demo_folder.settings())
     assert stored["KAAL_PUBLIC_URL"] == "http://localhost:8770" and stored["KAAL_IMAGE"] == "kaal-demo:local"
     assert stored["KAAL_DEMO_ADMIN_PASSWORD"] != "made-up-other-1" and stored["COMPOSE_PROFILES"] == ""
     seen = demo_folder.docker_saw()
-    for elsewhere in ("elsewhere.example.org", "someone-else", "made-up-other-1", "COMPOSE_PROFILES=https"):
+    for elsewhere in ("elsewhere.example.org", "someone-else", "made-up-other-1", "COMPOSE_PROFILES=https", "KAAL_HSTS=1"):
         assert elsewhere not in seen, "Docker Compose would have preferred it to the settings file"
 
 
@@ -513,6 +547,19 @@ def test_run_sh_sets_up_https_for_a_domain_of_its_own(demo_folder):
     stored = read_settings(demo_folder.settings())
     assert stored["KAAL_PUBLIC_URL"] == "https://demo.example.org" and stored["KAAL_DOMAIN"] == "demo.example.org"
     assert stored["COMPOSE_PROFILES"] == "https" and stored["KAAL_COOKIE_SECURE"] == "1" and stored["KAAL_DEMO_RESET_AT"] == "04:30"
+    assert stored["KAAL_HSTS"] == "1", "as deploy/docker/install.sh sets it for a domain of Kaal's own"
+    assert "X-Forwarded-For" not in done.stdout, "Caddy passes on who is asking"
+
+
+def test_run_sh_behind_a_proxy_says_what_the_proxy_must_pass_on(demo_folder):
+    done, _calls = demo_folder.run("--behind", "https://demo.example.ts.net/", "--port", "8796")
+    assert done.returncode == 0, done.stderr
+    stored = read_settings(demo_folder.settings())
+    assert stored["KAAL_PUBLIC_URL"] == "https://demo.example.ts.net" and stored["KAAL_COOKIE_SECURE"] == "1"
+    # The host name may serve other things over plain http on other ports, so no HSTS for it.
+    assert stored["KAAL_HSTS"] == "0" and stored["COMPOSE_PROFILES"] == ""
+    assert "127.0.0.1:8796" in done.stdout and "tailscale serve --bg 8796" in done.stdout
+    assert "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;" in done.stdout
 
 
 @pytest.mark.parametrize(("args", "env", "says"), [
@@ -596,6 +643,8 @@ def test_compose_resolves_the_demo_with_the_regular_hardening(tmp_path):
     storage = next(entry for entry in kaal_service["tmpfs"] if entry.startswith("/srv/kaal:"))
     assert "size=256m" in storage and int(environment["KAAL_FREE_SPACE_MB"]) == 32, "the floor of free space fits the demo's storage"
     assert int(environment["KAAL_DOWNLOAD_MEMORY_MB"]) + 3 * int(environment["KAAL_SEARCH_MEMORY_MB"]) + 256 < 1024, "what is held in memory fits the limit"
+    assert 2 * int(environment["KAAL_FILE_OUTPUT_MB"]) + 52 < 256, "two files being read at once cannot fill the storage by themselves"
+    assert environment["KAAL_HSTS"] == "0", "only a domain of the demo's own tells browsers to stay on https"
     # From the regular setup: limits apply per visitor behind the proxy, and logs cannot fill the disk.
     assert environment["KAAL_TRUSTED_PROXIES"] == "private"
     assert kaal_service["logging"] == {"driver": "json-file", "options": {"max-file": "3", "max-size": "10m"}}
@@ -780,12 +829,18 @@ def test_the_real_demo_shows_the_made_up_data_and_puts_it_back(tmp_path):
         assert [token["name"] for token in jane.call("GET", "/v1/account/tokens")["tokens"]] == ["Kaal for Chrome"]
         assert [session["current"] for session in account["sessions"]] == [True]
 
-        # Between resets: a changed password and a renamed vault are put back within about a minute.
+        # Between resets: a changed password and a renamed vault are put back within about a minute,
+        # and a token a visitor made with the old password stops working.
+        token = jane.call("POST", "/v1/account/tokens", {"name": "Made-up visitor token", "scopes": ["read"], "vault": account["vault"]["id"], "password": REVIEW})["secret"]
         jane.call("POST", "/v1/vault/name", {"name": "Made-up name a visitor chose"})
         jane.call("POST", "/v1/account/password", {"current": REVIEW, "new": "someone-else-chose-this"})
         eventually("putting the reviewer's password back", lambda: signed_out(jane))
         jane = sign_in("reviewer", REVIEW)
         assert jane.call("GET", "/v1/account")["vault"]["name"] == demo.VAULT_NAME
+        status, _cookies, _body = send("GET", "/v1/library/notes", {"Authorization": f"Bearer {token}"}, b"")
+        assert status == 401
+        eventually("making the token the Tokens page shows again",
+                   lambda: [token["name"] for token in jane.call("GET", "/v1/account/tokens")["tokens"]] == ["Kaal for Chrome"], seconds=60)
         assert len(jane.call("GET", "/v1/library/notes")) == len(seeded_notes), "only the password and the name were touched"
 
         # A deleted vault, then a deleted account, each bring the whole reset forward.
