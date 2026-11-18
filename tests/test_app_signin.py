@@ -42,7 +42,7 @@ def house(tmp_path):
 
     def phone(session=""):
         """The app: no cookie jar of its own, it sends the session it was given."""
-        headers = {**APP, "Cookie": f"{server.SESSION_COOKIE}={session}"} if session else dict(APP)
+        headers = {**APP, "X-Kaal-Session": session} if session else dict(APP)
         return TestClient(app, base_url=HERE, headers=headers, follow_redirects=False)
 
     yield SimpleNamespace(app=app, state=state, store=state.accounts, browser=browser, signed_in=signed_in, phone=phone, token=token, home=tmp_path)
@@ -146,7 +146,7 @@ def test_the_app_opens_the_vault_the_browser_had_open(house):
 
 def test_the_app_must_mark_its_changes_like_the_web_app_does(house):
     session = collect(house, approve(house.signed_in("owner"))).json()["result"]["session"]
-    bare = TestClient(house.app, base_url=HERE, headers={"Cookie": f"{server.SESSION_COOKIE}={session}"})
+    bare = TestClient(house.app, base_url=HERE, headers={"X-Kaal-Session": session})
     assert bare.get("/v1/library/notes").status_code == 200
     assert bare.post("/v1/library/notes", json={"title": "t", "body": "b"}).status_code == 403
 

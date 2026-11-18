@@ -27,12 +27,13 @@ import secrets
 import stat
 import tempfile
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 SCOPES = ("read", "reveal", "write", "delete", "admin")
 PREFIX = "kaal"
+KEEP_REVOKED_DAYS = 7
 
 
 class TokenError(Exception):
@@ -111,7 +112,9 @@ class TokenStore:
             raise TokenError("A token needs a name.")
         wanted = self._wanted(scopes)
         with self._lock:
-            records = [dict(r) for r in self._load()]
+            # A revoked token is kept for a while so that "who had access" can be answered, not for ever.
+            forget_before = (datetime.now(timezone.utc) - timedelta(days=KEEP_REVOKED_DAYS)).isoformat(timespec="seconds")
+            records = [dict(r) for r in self._load() if not r.get("revoked_at") or str(r["revoked_at"]) >= forget_before]
             # Names are a person's own: two people may each have a "laptop".
             if any(r["name"] == name and not r.get("revoked_at") and r.get("account") == account for r in records):
                 raise TokenError(f"An active token named {name!r} already exists; revoke it first.")

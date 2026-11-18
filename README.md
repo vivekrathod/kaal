@@ -401,9 +401,19 @@ proxy. What it does about strangers:
   memory limit (`KAAL_FILE_MEMORY_MB`, 1024), a few at a time
   (`KAAL_FILE_JOBS`, 2), and with nothing of the server's environment.
 - A vault other than the first may hold `KAAL_VAULT_QUOTA_MB` (10240; 0 for no
-  limit), a person may own `KAAL_VAULTS_PER_PERSON` vaults, hold 50 sessions
-  and make 50 tokens, and files being downloaded are held in memory only up
-  to `KAAL_DOWNLOAD_MEMORY_MB` (1024) at once.
+  limit), and nothing new is stored, nor a copy of a vault written, once the
+  disk has less than `KAAL_FREE_SPACE_MB` (1024) free. A person may own
+  `KAAL_VAULTS_PER_PERSON` vaults, hold 50 sessions and 50 tokens (20 new ones
+  an hour), send four large files at a time and download one copy of a vault
+  at a time. Files being downloaded are held in memory only up to
+  `KAAL_DOWNLOAD_MEMORY_MB` (1024) at once, and the text kept in memory for
+  searching up to `KAAL_SEARCH_MEMORY_MB` (256) for each vault.
+- Letting an app or the browser extension sign in as you needs a sign-in made
+  in the last ten minutes, or your password again: what it is given outlasts
+  the browser's own sign-in.
+- Requests to a sign-in service have one deadline for the whole answer, only a
+  few are in progress at once, and a service that is down is not asked again
+  by every visitor.
 
 **Not defended against.** A compromised client can do whatever its token allows
 until you revoke it, and a token with `admin` can export everything. A

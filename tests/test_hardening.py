@@ -211,8 +211,12 @@ def test_over_https_the_session_cookie_is_host_only_and_a_planted_one_is_ignored
     plain = house.visitor("192.0.2.9")
     planted = plain.get("/v1/session", headers={"Cookie": f"kaal_session={session}", "Sec-Fetch-Site": "same-origin"})
     assert planted.status_code == 401
-    assert plain.get("/v1/session", headers={"Cookie": f"kaal_session={session}"}).status_code == 200     # an app from before the change
-    assert plain.get("/v1/session", headers={"X-Kaal-Session": session}).status_code == 200
+    assert plain.get("/v1/session", headers={"Cookie": f"kaal_session={session}"}).status_code == 401     # whoever sends it
+    assert plain.get("/v1/session", headers={"X-Kaal-Session": session}).status_code == 200               # how an app sends its session
+    # An app installed before the change still sends the old cookie, for a sign-in older than the change: it keeps working.
+    house.store.put(server.HOST_COOKIE_SINCE, "2999-01-01T00:00:00+00:00")
+    older = plain.get("/v1/session", headers={"Cookie": f"kaal_session={session}"})
+    assert older.status_code == 200 and "set-cookie" not in older.headers
 
 
 def test_a_browser_signed_in_before_the_change_is_moved_to_the_new_cookie_once(house):
@@ -486,3 +490,305 @@ def test_the_command_line_makes_no_link_for_an_account_in_use_when_asked_not_to(
     assert refused.returncode == 3 and "/#/setup/" not in refused.stdout
     assert "/#/setup/" in link("alex", "--new-only").stdout
     assert "/#/setup/" in link("sam").stdout                                          # on purpose, whoever runs the server still can
+
+
+def test_an_account_id_is_not_a_second_name_to_sign_in_recover_or_share_under(house):
+    sam = house.signed_in("sam")
+    account_id = house.store.account("sam")["id"]
+    stranger = house.visitor("198.51.100.77")
+    assert stranger.post("/v1/sign-in", json={"login": "sam", "password": GOOD}).status_code == 200
+    assert stranger.post("/v1/sign-in", json={"login": account_id, "password": GOOD}).status_code == 401
+    assert stranger.post("/v1/sign-in/recover", json={"login": account_id, "code": "made-up-code", "password": "another made-up password"}).status_code == 401
+    alex = house.signed_in("alex", address="198.51.100.78")
+    assert alex.post("/v1/vault/members", json={"login": account_id, "role": "viewer"}).status_code == 404
+    assert alex.post("/v1/vault/members", json={"login": "sam", "role": "viewer"}).status_code == 200
+    # A sign-in service cannot hand a newcomer a name shaped like an id either.
+    assert house.store.free_login(account_id) == f"person-{account_id}"
+    assert sam.get("/v1/session").status_code == 200
+
+
+def test_a_cookie_whose_name_only_looks_like_ours_is_not_ours(house):
+    sam = house.signed_in("sam")
+    mine = sam.cookies.get("__Host-kaal_session")
+    mallory = house.signed_in("mallory", address="198.51.100.90").cookies.get("__Host-kaal_session")
+    plain = house.visitor("192.0.2.9")
+    both = plain.get("/v1/session", headers={"Cookie": f"__Host-kaal_session={mine}; \xa0__Host-kaal_session={mallory}".encode("latin-1")})
+    assert both.json()["result"]["account"]["login"] == "sam"
+    assert plain.get("/v1/session", headers={"Cookie": f"\x85__Host-kaal_session={mallory}".encode("latin-1")}).status_code == 401
+    assert server.cookie_named('a=1;  __Host-kaal_session="x" ; b=2', "__Host-kaal_session") == "x"
+
+
+def test_approving_an_app_needs_a_sign_in_just_made_or_the_password(house, monkeypatch):
+    sam = house.signed_in("sam")
+    ask = {"challenge": "A" * 43}
+    assert sam.post("/v1/account/app-sign-ins", json=ask).status_code == 200           # signed in a moment ago
+    monkeypatch.setattr(server, "APPROVE_WITHIN_SECONDS", -1)                           # as if signed in long ago
+    stale = sam.post("/v1/account/app-sign-ins", json=ask)
+    assert stale.status_code == 403 and stale.json()["kind"] == "proof_needed"
+    assert sam.post("/v1/account/app-sign-ins", json={**ask, "password": "not it"}).status_code == 403
+    assert sam.post("/v1/account/app-sign-ins", json={**ask, "password": GOOD}).status_code == 200
+
+
+def test_tokens_cannot_be_made_and_revoked_without_end(house):
+    sam = house.signed_in("sam")
+    vault = sam.get("/v1/session").json()["result"]["vault"]["id"]
+    answers = []
+    for index in range(server.TOKENS_PER_HOUR + 1):
+        made = sam.post("/v1/account/tokens", json={"name": f"made-up-{index}", "scopes": ["read"], "vault": vault, "password": GOOD})
+        answers.append(made.status_code)
+        if made.status_code == 200:
+            sam.delete(f"/v1/account/tokens/{made.json()['result']['token']['id']}")
+    assert answers == [200] * server.TOKENS_PER_HOUR + [429]
+
+
+# --- a sign-in service that answers slowly, or with something that is not an answer
+
+@pytest.fixture()
+def made_up_service(tmp_path):
+    """A TLS server with a certificate made for the test, whose behaviour each test chooses."""
+    import datetime
+    import socket
+    import ssl
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    certificate = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key()).serial_number(x509.random_serial_number())
+                   .not_valid_before(now - datetime.timedelta(minutes=5)).not_valid_after(now + datetime.timedelta(hours=1))
+                   .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False).sign(key, hashes.SHA256()))
+    (tmp_path / "made-up.pem").write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    (tmp_path / "made-up.key").write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    serving = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    serving.load_cert_chain(tmp_path / "made-up.pem", tmp_path / "made-up.key")
+    trusting = ssl.create_default_context(cafile=str(tmp_path / "made-up.pem"))
+    listener = socket.create_server(("127.0.0.1", 0))
+    plays = SimpleNamespace(pieces=[b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"], pause=0.0)
+    stop = threading.Event()
+
+    def serve():
+        while not stop.is_set():
+            try:
+                raw, _ = listener.accept()
+            except OSError:
+                return
+            try:
+                with serving.wrap_socket(raw, server_side=True) as client:
+                    client.settimeout(5)
+                    client.recv(65536)
+                    for piece in plays.pieces:
+                        client.sendall(piece)
+                        if stop.wait(plays.pause):
+                            break
+                    # Close politely: say there is no more, then wait for the client to finish
+                    # (closing with its request unread would reset the connection under it).
+                    client.shutdown(socket.SHUT_WR)
+                    client.settimeout(2)
+                    while client.recv(65536):
+                        pass
+            except OSError:
+                pass
+
+    threading.Thread(target=serve, daemon=True).start()
+    yield SimpleNamespace(url=f"https://localhost:{listener.getsockname()[1]}/made-up", trusting=trusting, plays=plays)
+    stop.set()
+    listener.close()
+
+
+def test_a_sign_in_service_is_given_one_deadline_for_its_whole_answer(made_up_service, monkeypatch):
+    from kaal import oidc
+
+    assert oidc.fetch(made_up_service.url, trusting=made_up_service.trusting) == (200, b"{}")
+    made_up_service.plays.pieces = [b"HTTP/1.1 400 Bad Request\r\nContent-Length: 9\r\n\r\n", b"made-up !"]
+    assert oidc.fetch(made_up_service.url, {"code": "made-up"}, trusting=made_up_service.trusting) == (400, b"made-up !")
+
+    monkeypatch.setattr(oidc, "TOTAL_SECONDS", 1.0)
+    made_up_service.plays.pause = 0.4          # each piece arrives well inside the per-step timeout, for ever
+    for dripped in ([b"HTTP/1.1 200 OK\r\n"] + [b"X-Made-Up: 1\r\n"] * 50,                                     # the headers
+                    [b"HTTP/1.1 400 Bad Request\r\nContent-Length: 500\r\n\r\n"] + [b"x"] * 50,                  # an error's body
+                    [b"HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n"] + [b"x"] * 50):                           # an answer's body
+        made_up_service.plays.pieces = dripped
+        started = time.monotonic()
+        with pytest.raises(oidc.SignInServiceError) as gave_up:
+            oidc.fetch(made_up_service.url, trusting=made_up_service.trusting)
+        assert gave_up.value.kind == "unreachable" and time.monotonic() - started < 4
+
+
+def test_an_answer_that_is_not_http_is_a_service_that_cannot_be_reached_and_is_remembered(made_up_service):
+    from kaal import oidc
+
+    made_up_service.plays.pieces = [b"made-up nonsense, not an answer\r\n\r\n"]
+    asked = []
+
+    def through(url, form=None):
+        asked.append(url)
+        return oidc.fetch(made_up_service.url, trusting=made_up_service.trusting)
+
+    services = oidc.Services(through)
+    for _ in range(3):
+        with pytest.raises(oidc.SignInServiceError) as refused:
+            services.settings("https://id.example")
+        assert refused.value.kind == "unreachable"
+    assert len(asked) == 1
+
+
+def test_only_a_few_requests_to_sign_in_services_wait_at_once(monkeypatch):
+    from kaal import oidc
+
+    monkeypatch.setattr(oidc, "WAIT_SECONDS", 0.2)
+    release = threading.Event()
+
+    def stuck(url, form=None):
+        release.wait(5)
+        return 200, b"{}"
+
+    services = oidc.Services(stuck)
+    holders = [threading.Thread(target=lambda: services._fetch("https://id.example/t", {"code": "made-up"})) for _ in range(oidc.CALLS_AT_ONCE)]
+    for holder in holders:
+        holder.start()
+    time.sleep(0.2)
+    started = time.monotonic()
+    with pytest.raises(oidc.SignInServiceError):
+        services._fetch("https://id.example/t", {"code": "made-up"})
+    assert time.monotonic() - started < 2                                             # told to try again, not left waiting
+    release.set()
+    for holder in holders:
+        holder.join()
+    assert services._fetch("https://id.example/t") == (200, b"{}")
+
+
+# --- what is kept in memory for searching
+
+def test_search_memory_is_bounded_and_text_let_go_is_read_again(house, monkeypatch):
+    monkeypatch.setenv("KAAL_SEARCH_MEMORY_MB", "1")
+    sam = house.signed_in("sam")
+    for index in range(4):
+        made = sam.post("/v1/library/notes", json={"title": f"Made-up {index}", "body": f"made-up-word-{index} " + "x" * 400_000})
+        assert made.status_code == 200, made.text
+    found = sam.post("/v1/library/search", json={"query": "made-up-word-0"})
+    assert found.status_code == 200 and len(found.json()["result"]) == 1
+    vault = house.state.vaults.get(sam.get("/v1/session").json()["result"]["vault"]["id"])
+    assert vault.text_total <= 1024 * 1024 + 400_100 and len(vault.text_cache) < 4 and vault.text_total == sum(vault.text_sizes.values())
+    again = sam.post("/v1/library/search", json={"query": "made-up-word-3"})
+    assert len(again.json()["result"]) == 1
+
+
+def test_a_saved_from_address_keeps_no_session_and_is_a_web_address(house):
+    clean = kaal.sanitized_capture_url
+    assert clean("https://portal.example/receipt;jsessionid=MADEUP/print;v=2?x=1#top") == "https://portal.example/receipt/print"
+    assert clean("https://user:made-up@portal.example:8443/a?token=made-up") == "https://portal.example:8443/a"
+    for refused in ("data:text/html,<p>made-up</p>", "file:///made-up/receipt.pdf", "https://portal.example\\\\@evil.example/x", "javascript:void(0)", "https:///nowhere"):
+        assert clean(refused) == ""
+
+
+# --- the disk, and what arrives without saying how large it is
+
+def test_something_new_must_say_how_large_it_is(house):
+    sam = house.signed_in("sam")
+    unsized = sam.post("/v1/library/notes", content=iter([b'{"title": "Made-up", ', b'"body": "x"}']), headers={"Content-Type": "application/json"})
+    assert unsized.status_code == 411
+    assert sam.post("/v1/library/notes", json={"title": "Made-up", "body": "x"}).status_code == 200
+
+
+def test_a_nearly_full_disk_refuses_something_new_and_writes_no_export(house):
+    app = house.build(free_space_bytes=1 << 60)                                       # as if the disk were nearly full
+    made = app.state.kaal.accounts.add_account("sam")
+    server.create_vault(app.state.kaal.accounts, "My notes", made["id"])
+    sam = house.visitor(application=app)
+    assert sam.post("/v1/setup", json={"code": app.state.kaal.accounts.new_setup_code("sam"), "password": GOOD}).status_code == 200
+    refused = sam.post("/v1/library/notes", json={"title": "Made-up", "body": "x"})
+    assert refused.status_code == 507 and "disk" in refused.json()["error"]
+    big = sam.post("/v1/captures", files={"file": ("made-up.bin", b"0" * (2 * 1024 * 1024), "application/octet-stream")})
+    assert big.status_code == 507 and big.json()["kind"] == "full"                    # before the file is written anywhere
+    assert sam.get("/v1/vault/export").status_code == 507
+    assert sam.get("/v1/library/notes").status_code == 200                            # reading still works
+    assert not list((house.home / "tmp").glob("export-*"))
+
+
+def test_one_person_sends_only_a_few_large_files_at_once():
+    import asyncio
+
+    reached = []
+
+    async def inner(scope, receive, send):
+        reached.append(scope["path"])
+        await server._send_json(send, 200, {"result": "ok"})
+
+    limited = server.BodyLimitMiddleware(inner, 100 * 1024 * 1024, credentials=lambda headers: "token:made-up", full=lambda needed: False)
+    sent = []
+
+    async def ask():
+        scope = {"type": "http", "method": "POST", "path": "/v1/captures",
+                 "headers": [(b"content-type", b"multipart/form-data; boundary=x"), (b"content-length", str(5 * 1024 * 1024).encode())]}
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                sent.append(message["status"])
+
+        await limited(scope, receive, send)
+
+    limited._uploading["token:made-up"] = server.BodyLimitMiddleware.UPLOADS_AT_ONCE   # that many are already arriving
+    asyncio.run(ask())
+    assert sent == [429] and reached == []
+    limited._uploading["token:made-up"] = server.BodyLimitMiddleware.UPLOADS_AT_ONCE - 1
+    asyncio.run(ask())
+    assert sent == [429, 200] and limited._uploading == {"token:made-up": server.BodyLimitMiddleware.UPLOADS_AT_ONCE - 1}   # counted, then given back
+
+
+def test_a_copy_of_a_vault_is_written_for_one_download_at_a_time(house):
+    sam = house.signed_in("sam")
+    sam.post("/v1/library/notes", json={"title": "Made-up", "body": "x"})
+    caller = f"account:{house.store.account('sam')['id']}"
+    held = house.state.exports.take(caller, 1)                                        # one copy is still on its way to them
+    busy = sam.get("/v1/vault/export")
+    assert busy.status_code == 503 and busy.json()["kind"] == "busy"
+    house.state.exports.give(held)
+    done = sam.get("/v1/vault/export")
+    assert done.status_code == 200 and done.content[:2] == b"PK"
+    assert house.state.exports._by_caller == {}                                       # given back once it had left
+
+
+# --- one note, for a caller that cannot reveal
+
+def test_a_read_only_token_sees_one_note_without_its_address_or_its_files_fingerprints(house):
+    sam = house.signed_in("sam")
+    vault = sam.get("/v1/session").json()["result"]["vault"]["id"]
+    saved = sam.post("/v1/captures", files={"file": ("made-up.txt", b"made-up words", "text/plain")},
+                     data={"source_url": "https://bank.example/accounts/998877/statement", "source_title": "Made-up page"})
+    assert saved.status_code == 200, saved.text
+    reader = sam.post("/v1/account/tokens", json={"name": "reader", "scopes": ["read"], "vault": vault, "password": GOOD}).json()["result"]["secret"]
+    script = house.visitor(Authorization=f"Bearer {reader}")
+    note_id = script.get("/v1/notes").json()["result"][0]["id"]
+    shown = script.get(f"/v1/notes/{note_id}")
+    assert shown.status_code == 200
+    assert "998877" not in shown.text and "sha256" not in shown.text and "bank.example" in shown.text
+    assert set(shown.json()["result"]["attachments"][0]) <= set(server.META_ATTACHMENT_KEYS)
+    full = sam.get(f"/v1/notes/{note_id}", params={"full": "true"})
+    assert "998877" in full.text and "sha256" in full.text
+
+
+def test_an_address_that_cannot_be_read_does_not_break_the_list_for_read_only_callers():
+    shown = server.metadata_only({"id": "n1", "title": "Made-up", "source": {"type": "browser", "url": "https://[oops/x?a=1"}})
+    assert shown["source"] == {"type": "browser"}
+
+
+def test_forgetting_a_provider_name_needs_the_right_to_read_them(house):
+    sam = house.signed_in("sam")
+    vault = sam.get("/v1/session").json()["result"]["vault"]["id"]
+    writer = sam.post("/v1/account/tokens", json={"name": "writer", "scopes": ["write"], "vault": vault, "password": GOOD}).json()["result"]["secret"]
+    script = house.visitor(Authorization=f"Bearer {writer}")
+    for name in ("Made-up Clinic", "Another Made-up Clinic"):
+        assert script.post("/v1/medical/providers/forget", json={"forget": [name]}).status_code == 403
+
+
+def test_ids_only_keeps_the_ids_of_what_was_attached_or_queued():
+    assert server.ids_only({"status": "attached", "note": "n1", "attachmentId": "a1", "name": "made-up.pdf"}) == {"status": "attached", "note": "n1", "attachmentId": "a1"}
+    assert server.ids_only({"status": "queued", "count": 2, "ids": ["n1", "n2"], "names": ["Jane Madeup"]}) == {"status": "queued", "count": 2, "ids": ["n1", "n2"]}
+    assert server.ids_only({"note": {"id": "n1", "title": "Made-up"}}) == {"note": {"id": "n1"}}

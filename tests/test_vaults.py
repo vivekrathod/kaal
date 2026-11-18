@@ -255,7 +255,7 @@ def test_every_route_works_on_the_servers_vault_and_never_on_the_default(tmp_pat
     call("GET", "/v1/status")
     call("GET", "/v1/verify", params={"deep": "true"})
     call("POST", "/v1/session", json={"token": secret}, headers={})
-    cookie = {"Cookie": f"kaal_session={secret}", "X-Kaal-Request": "1"}
+    cookie = {"Cookie": f"__Host-kaal_session={secret}", "X-Kaal-Request": "1"}
     call("GET", "/v1/session", headers=cookie)
 
     # plain notes

@@ -124,6 +124,8 @@ class Settings:
     vault_quota_bytes: int = 10 * 1024 * MiB
     # Files being downloaded are held in memory until the client has them; this is the most held at once.
     download_memory_bytes: int = 1024 * MiB
+    # Nothing new is accepted, and no export is written, when the disk has less than this free (0: no floor).
+    free_space_bytes: int = 1024 * MiB
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "Settings":
@@ -151,12 +153,16 @@ class Settings:
             password_checks=int(env.get("KAAL_PASSWORD_CHECKS") or 4),
             vault_quota_bytes=max(0, int(env.get("KAAL_VAULT_QUOTA_MB") or 10 * 1024)) * MiB,
             download_memory_bytes=max(1, int(env.get("KAAL_DOWNLOAD_MEMORY_MB") or 1024)) * MiB,
+            free_space_bytes=max(0, int(env.get("KAAL_FREE_SPACE_MB") or 1024)) * MiB,
         )
 
 
 PRIVATE_NETWORKS = ("127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "fc00::/7", "fe80::/10")
 STRANGER_BODY_BYTES = 1 * 1024 * 1024
 MAX_TOKENS_PER_PERSON = 50
+TOKENS_PER_HOUR = 20
+# Approving an app or the extension needs a sign-in this recent, or the password again.
+APPROVE_WITHIN_SECONDS = 600
 JSON_BODY_BYTES = 8 * 1024 * 1024
 
 
@@ -352,15 +358,16 @@ class Downloads:
 
     PER_CALLER = 6
 
-    def __init__(self, limit_bytes: int) -> None:
+    def __init__(self, limit_bytes: int, per_caller: int = PER_CALLER) -> None:
         self.limit = limit_bytes
+        self.per_caller = per_caller
         self._held = 0
         self._by_caller: dict[str, int] = {}
         self._lock = threading.Lock()
 
     def take(self, caller: str, size: int) -> tuple[str, int] | None:
         with self._lock:
-            if self._by_caller.get(caller, 0) >= self.PER_CALLER:
+            if self._by_caller.get(caller, 0) >= self.per_caller:
                 return None
             # One file is always allowed, however large; more only while they fit.
             if self._held and self._held + size > self.limit:
@@ -386,31 +393,44 @@ class HeldDownloadsMiddleware:
     It sits outside everything else so that "left" means written to the client, not handed to
     another layer of the server."""
 
-    def __init__(self, app: Any, downloads: Downloads) -> None:
+    def __init__(self, app: Any) -> None:
         self.app = app
-        self.downloads = downloads
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        held: list[tuple[str, int]] = []
+        held: list[Callable[[], None]] = []
         scope["kaal_held"] = held
         try:
             await self.app(scope, receive, send)
         finally:
-            for ticket in held:
-                self.downloads.give(ticket)
+            for give_back in held:
+                give_back()
 
 
-def held_download(request: Request, size: int) -> JSONResponse | None:
+def held_download(request: Request, size: int, pool: Downloads | None = None) -> JSONResponse | None:
     """Count a file about to be sent; an error answer when this caller, or the server, holds too many."""
-    state = request.app.state.kaal
-    ticket = state.downloads.take(getattr(request.state, "caller", "-"), size)
+    pool = pool or request.app.state.kaal.downloads
+    ticket = pool.take(getattr(request.state, "caller", "-"), size)
     if ticket is None:
         return _error(503, "Kaal is sending as many files as it can hold at once. Try again in a moment.", "busy", headers={"Retry-After": "5"})
-    request.scope.setdefault("kaal_held", []).append(ticket)
+    request.scope.setdefault("kaal_held", []).append(lambda: pool.give(ticket))
     return None
+
+
+def disk_is_full(settings: "Settings", needed: int = 0) -> bool:
+    """Whether storing ``needed`` more bytes would leave the disk under its floor of free space."""
+    if not settings.free_space_bytes:
+        return False
+    try:
+        free = shutil.disk_usage(settings.home).free
+    except OSError:
+        return False
+    return free - max(0, needed) < settings.free_space_bytes
+
+
+FULL_DISK = "This Kaal's disk is nearly full, so nothing new can be stored. Whoever runs it needs to make room."
 
 
 class _TooLarge(Exception):
@@ -463,18 +483,29 @@ class BodyLimitMiddleware:
     from a request that carries no valid credential) is held to a small limit, checked before
     the body is read, so strangers cannot make the server read or store large bodies."""
 
-    def __init__(self, app: Any, limit: int, credentials: Callable[[dict[bytes, bytes]], bool] | None = None) -> None:
+    UPLOADS_AT_ONCE = 4
+
+    def __init__(self, app: Any, limit: int, credentials: Callable[[dict[bytes, bytes]], str] | None = None,
+                 full: Callable[[int], bool] | None = None) -> None:
         self.app = app
         self.limit = limit
+        # Who a request's credential belongs to ("" when it carries none that works).
         self.credentials = credentials
+        self.full = full
+        self._uploading: dict[str, int] = {}
+        self._lock = threading.Lock()
 
-    def _limit_for(self, headers: dict[bytes, bytes], declared: int | None) -> int:
+    def _limit_for(self, headers: dict[bytes, bytes], declared: int | None) -> tuple[int, str]:
+        """The most this request may send, and whose upload it is when it may be large."""
         limit = self.limit
         if not headers.get(b"content-type", b"").lower().startswith(b"multipart/"):
             limit = min(limit, JSON_BODY_BYTES)
-        if (declared is None or declared > STRANGER_BODY_BYTES) and self.credentials is not None and not self.credentials(headers):
-            limit = min(limit, STRANGER_BODY_BYTES)
-        return limit
+        who = ""
+        if (declared is None or declared > STRANGER_BODY_BYTES) and self.credentials is not None:
+            who = self.credentials(headers)
+            if not who:
+                limit = min(limit, STRANGER_BODY_BYTES)
+        return limit, who
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         if scope["type"] != "http":
@@ -483,10 +514,26 @@ class BodyLimitMiddleware:
         headers = dict(scope.get("headers") or [])
         raw = headers.get(b"content-length")
         declared = int(raw) if raw and raw.isdigit() else None
-        limit = self._limit_for(headers, declared)
+        limit, who = self._limit_for(headers, declared)
         if declared is not None and declared > limit:
             await _send_json(send, 413, {"error": "Request is too large.", "kind": "too_large"})
             return
+        # A large body is written to disk as it arrives, before anything else looks at the request:
+        # so the disk's floor, and how many one person sends at once, are checked here.
+        large = bool(who) and scope.get("method") in ("POST", "PUT", "PATCH") and limit > STRANGER_BODY_BYTES
+        if large and self.full is not None and self.full(declared or 0):
+            await _send_json(send, 507, {"error": FULL_DISK, "kind": "full"})
+            return
+        if large:
+            with self._lock:
+                if self._uploading.get(who, 0) >= self.UPLOADS_AT_ONCE:
+                    busy = True
+                else:
+                    busy = False
+                    self._uploading[who] = self._uploading.get(who, 0) + 1
+            if busy:
+                await _send_json(send, 429, {"error": "You are sending several large files at once. Wait for one to finish.", "kind": "rate_limited"})
+                return
         received = 0
         started = False
 
@@ -510,6 +557,14 @@ class BodyLimitMiddleware:
         except _TooLarge:
             if not started:
                 await _send_json(send, 413, {"error": "Request is too large.", "kind": "too_large"})
+        finally:
+            if large:
+                with self._lock:
+                    left = self._uploading.get(who, 0) - 1
+                    if left > 0:
+                        self._uploading[who] = left
+                    else:
+                        self._uploading.pop(who, None)
 
 
 async def _send_json(send: Callable, status: int, payload: dict) -> None:
@@ -563,6 +618,8 @@ class AppState:
     usage: Any = None
     downloads: Any = None
     invites: Any = None
+    token_making: Any = None
+    exports: Any = None
 
 
 class Scoped:
@@ -834,6 +891,23 @@ def flow_cookie_name(settings: "Settings") -> str:
     return HOST_FLOW_COOKIE if settings.cookie_secure else FLOW_COOKIE
 
 
+def cookie_named(header: str, name: str) -> str:
+    """The value of the cookie with exactly this name, read from the Cookie header as it was sent.
+
+    Not through the framework's parser, which trims more than spaces from a name: a cookie called
+    "\xa0__Host-kaal_session", which any neighbouring host may set, would be read as ours. Here a
+    name matches byte for byte or not at all, and the first such cookie is the one used."""
+    for part in header.split(";"):
+        key, found, value = part.partition("=")
+        if found and key.strip(" \t") == name:
+            return value.strip(" \t").strip('"')
+    return ""
+
+
+def exact_cookie(request: Request, name: str) -> str:
+    return cookie_named(request.headers.get("cookie", ""), name)
+
+
 HOST_COOKIE_SINCE = "host_cookie_since"
 
 
@@ -852,24 +926,21 @@ def _older_than_the_host_cookie(state: Any, presented: str) -> bool:
 
 def presented_session(request: Request) -> str:
     """The session (or, from older sign-ins, the token) a request carries: the app's header, or the
-    browser's cookie. Over https the un-prefixed cookie is believed only from a client that is not a
-    browser (one sending no Sec-Fetch-Site), which is what an app installed before the change sends,
-    or for a sign-in older than the change, which is then moved to the new cookie."""
+    browser's cookie. Over https the un-prefixed cookie is believed only for a sign-in older than
+    the change to a host-bound cookie: a browser's is then moved to the new cookie, and an app
+    installed before the change keeps working until it is updated to send the header."""
     state = request.app.state.kaal
     settings = state.settings
     header = request.headers.get(SESSION_HEADER, "").strip()
     if header:
         return header
-    cookie = request.cookies.get(session_cookie_name(settings), "").strip()
+    cookie = exact_cookie(request, session_cookie_name(settings))
     if cookie or not settings.cookie_secure:
         return cookie
-    legacy = request.cookies.get(SESSION_COOKIE, "").strip()
-    if not legacy:
-        return ""
-    if not request.headers.get("sec-fetch-site"):
-        return legacy
-    if _older_than_the_host_cookie(state, legacy):
-        request.state.move_cookie = legacy
+    legacy = exact_cookie(request, SESSION_COOKIE)
+    if legacy and _older_than_the_host_cookie(state, legacy):
+        if request.headers.get("sec-fetch-site"):
+            request.state.move_cookie = legacy
         return legacy
     return ""
 
@@ -967,13 +1038,16 @@ def _signed_in_person(request: Request, state: AppState) -> dict[str, Any] | Non
 
 def _room_checked(request: Request, state: AppState, vault: core.Vault | None) -> None:
     """Refuse something new for a vault that is full. Counted from the request's declared size, before it is read."""
+    declared = request.headers.get("content-length", "")
+    if not declared.isdigit():
+        # Without a size there is nothing to count before the body has been stored.
+        raise HTTPException(411, "Say how large the request is (Content-Length).")
+    incoming = int(declared)
+    if disk_is_full(state.settings, incoming):
+        raise HTTPException(507, FULL_DISK)
     quota = state.settings.vault_quota_bytes
     if not quota or vault is None or vault.root.resolve() == Path(state.settings.vault).expanduser().resolve():
         return
-    try:
-        incoming = max(0, int(request.headers.get("content-length") or 0))
-    except ValueError:
-        incoming = 0
     if state.usage.used(vault.root) + incoming > quota:
         raise HTTPException(413, f"This vault is full: it may hold {quota // MiB} MiB. Delete what you no longer need from the Trash, "
                                  "or ask whoever runs this Kaal for more room.")
@@ -1067,6 +1141,30 @@ def require_owner() -> Callable:
     return Depends(dependency)
 
 
+class Hourly:
+    """So many an hour for each key: for things nobody needs to do often, such as making tokens."""
+
+    REMEMBERED = 10_000
+
+    def __init__(self, per_hour: int) -> None:
+        self.per_hour = max(1, per_hour)
+        self._lock = threading.Lock()
+        self._times: dict[str, list[float]] = {}
+
+    def allow(self, key: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            if len(self._times) >= self.REMEMBERED and key not in self._times:
+                self._times = {name: times for name, times in self._times.items() if times and now - times[-1] < 3600}
+            recent = [moment for moment in self._times.get(key, []) if now - moment < 3600]
+            if len(recent) >= self.per_hour:
+                self._times[key] = recent
+                return False
+            recent.append(now)
+            self._times[key] = recent
+            return True
+
+
 class SignUpGuard:
     """Caps how many accounts strangers can create in an hour when sign-up is open."""
 
@@ -1101,13 +1199,23 @@ def _run(state: AppState, handler: Callable[[Any], None], *, exact_note: str | N
 META_ATTACHMENT_KEYS = ("id", "name", "size", "storage", "sensitivity", "extracted_markdown", "extracted_at")
 
 
+SOURCE_LINE = re.compile(r"(?m)^(Source URL: )(\S+).*$")
+
+
+def _host_of(address: str) -> str:
+    try:
+        return core.urlsplit(address).hostname or ""
+    except ValueError:
+        return ""
+
+
 def metadata_only(note: dict[str, Any]) -> dict[str, Any]:
     """What the read scope may see of a note: its title, tags, times and files' names. Not a
     receipt's values (names, amounts, dates) and not the full address it was saved from."""
     shown = {key: value for key, value in note.items() if key not in {"receipt", "source"}}
     source = note.get("source")
     if isinstance(source, dict):
-        host = core.urlsplit(str(source.get("url") or "")).hostname
+        host = _host_of(str(source.get("url") or ""))
         shown["source"] = {key: value for key, value in {"type": source.get("type"), "host": host}.items() if value}
     if "attachments" in note:
         shown["attachments"] = [{key: entry[key] for key in META_ATTACHMENT_KEYS if key in entry} for entry in note.get("attachments", []) if isinstance(entry, dict)]
@@ -1128,7 +1236,7 @@ def _metadata_answer(response: JSONResponse, caller: dict[str, Any]) -> JSONResp
 
 
 # What an answer to a change may tell a caller that cannot read the vault's contents.
-WRITTEN_KEYS = frozenset({"id", "note_id", "attachment_id", "status", "state", "kind", "type", "created", "created_at", "updated", "updated_at",
+WRITTEN_KEYS = frozenset({"id", "ids", "note_id", "attachment_id", "attachmentId", "status", "state", "kind", "type", "created", "created_at", "updated", "updated_at",
                           "duplicate", "queued", "count", "changed", "trashed", "restored", "deleted", "purged", "reviewed", "size", "storage"})
 
 
@@ -1137,11 +1245,14 @@ def ids_only(value: Any) -> Any:
     if isinstance(value, dict):
         kept: dict[str, Any] = {}
         for key, inner in value.items():
-            if isinstance(inner, (dict, list)):
+            if key == "ids" and isinstance(inner, list):
+                kept[key] = [entry for entry in inner if isinstance(entry, str)]
+            elif isinstance(inner, (dict, list)):
                 trimmed = ids_only(inner)
                 if trimmed:
                     kept[key] = trimmed
-            elif key in WRITTEN_KEYS:
+            elif key in WRITTEN_KEYS or (key in ("note", "receipt") and isinstance(inner, str)):
+                # "note" and "receipt" name what was changed when they hold an id rather than the thing itself.
                 kept[key] = inner
         return kept
     if isinstance(value, list):
@@ -1382,6 +1493,10 @@ class AppSignInStart(BaseModel):
     kind: Literal["app", "extension"] = "app"
     # For the browser extension: its id, which must be one this Kaal lets call it.
     extension: str = Field(default="", pattern=r"^[a-p]{0,32}$")
+    # Needed when the browser was signed in more than a few minutes ago: the password, or for an
+    # account without one, the sign-in name typed.
+    password: str = Field(default="", max_length=1024)
+    confirm: str = Field(default="", max_length=200)
 
 
 class ExtensionSignInFinish(BaseModel):
@@ -1467,34 +1582,35 @@ def create_app(settings: Settings) -> FastAPI:
         # From now on a browser's sign-in is accepted only in the cookie tied to this host.
         store.put(HOST_COOKIE_SINCE, accounts._now())
     app.state.kaal.downloads = Downloads(settings.download_memory_bytes)
+    # A whole vault written out for download sits on disk until its client has it: one at a time each.
+    app.state.kaal.exports = Downloads(1 << 62, per_caller=1)
     # Adding someone to a vault says whether that sign-in name exists; nobody needs to try many a minute.
     app.state.kaal.invites = RateLimiter(10)
+    # Tokens, and apps signed in, per person: each leaves a record behind, and nobody makes many.
+    app.state.kaal.token_making = Hourly(TOKENS_PER_HOUR)
     passwords.set_concurrency(settings.password_checks)
 
-    def holds_credential(headers: dict[bytes, bytes]) -> bool:
-        """Whether a request carries a credential that works; checked only before reading a large body."""
+    def holds_credential(headers: dict[bytes, bytes]) -> str:
+        """Whose credential a request carries, "" when none that works; checked only before reading a large body."""
         state = app.state.kaal
         scheme, _, presented = headers.get(b"authorization", b"").decode("latin-1").partition(" ")
         if scheme.lower() == "bearer":
-            return state.tokens.authenticate(presented.strip()) is not None
+            record = state.tokens.authenticate(presented.strip())
+            return f"token:{record.get('account') or record['id']}" if record else ""
         offered = headers.get(SESSION_HEADER.encode(), b"").decode("latin-1").strip()
         if not offered:
-            from http.cookies import SimpleCookie
-
-            jar = SimpleCookie()
-            try:
-                jar.load(headers.get(b"cookie", b"").decode("latin-1"))
-            except Exception:
-                return False
-            for name in (session_cookie_name(settings), SESSION_COOKIE):
-                if name in jar:
-                    offered = jar[name].value.strip()
-                    break
+            sent = headers.get(b"cookie", b"").decode("latin-1")
+            offered = cookie_named(sent, session_cookie_name(settings)) or cookie_named(sent, SESSION_COOKIE)
         if not offered:
-            return False
-        return state.accounts.session(offered) is not None or state.tokens.authenticate(offered) is not None
+            return ""
+        session = state.accounts.session(offered)
+        if session is not None:
+            return f"token:{session['account']}"
+        record = state.tokens.authenticate(offered)
+        return f"token:{record.get('account') or record['id']}" if record else ""
 
-    app.add_middleware(BodyLimitMiddleware, limit=settings.max_upload_bytes + MiB, credentials=holds_credential)
+    app.add_middleware(BodyLimitMiddleware, limit=settings.max_upload_bytes + MiB, credentials=holds_credential,
+                       full=lambda needed: disk_is_full(settings, needed))
 
     @app.middleware("http")
     async def access_log(request: Request, call_next: Callable) -> Response:
@@ -1541,7 +1657,7 @@ def create_app(settings: Settings) -> FastAPI:
     # check is answered without touching the vault, the log or the rate limit.
     if settings.extension_origins:
         app.add_middleware(ExtensionCorsMiddleware, origins=settings.extension_origins)
-    app.add_middleware(HeldDownloadsMiddleware, downloads=app.state.kaal.downloads)
+    app.add_middleware(HeldDownloadsMiddleware)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
@@ -1694,7 +1810,8 @@ def create_app(settings: Settings) -> FastAPI:
             login = accounts.clean_login(body.login)
         except accounts.AccountError:
             login = body.login.strip().lower()[:64]
-        account = state.accounts.account(login)
+        # By sign-in name only: an account's id is not a second name to guess under.
+        account = state.accounts.account_named(login)
         if not checked_password(request, state, account, body.password, login):
             if refused_too_often(request, state):
                 raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
@@ -1719,7 +1836,7 @@ def create_app(settings: Settings) -> FastAPI:
             waiting = state.guard.wait(login, address)
             if waiting:
                 raise HTTPException(429, "Too many wrong tries. Wait a little and try again.", headers={"Retry-After": str(waiting)})
-            account = state.accounts.account(login)
+            account = state.accounts.account_named(login)
             usable = account is not None and not account["disabled_at"]
             # The code is checked the same way whether or not the name exists, so timing says nothing.
             matched = state.accounts.use_recovery_code(account["id"] if usable else "no-such-account", body.code)
@@ -1775,9 +1892,27 @@ def create_app(settings: Settings) -> FastAPI:
         works once, for five minutes, and where to send it: the app's own address, or the extension's.
         Kaal decides where it goes, so a page cannot be talked into handing a code to anyone else."""
         state = S(request)
+        if body.kind == "extension" and (not body.extension or f"chrome-extension://{body.extension}" not in state.settings.extension_origins):
+            return _error(400, "This Kaal does not know that extension.", "invalid")
+        # What is approved here outlasts the browser's own sign-in, so a browser left signed in is
+        # not enough: the person signed in just now (as they do in the window an app opens), or
+        # says who they are again.
+        session = state.accounts.session(presented_session(request)) or {}
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(session.get("created", ""))).total_seconds()
+        except ValueError:
+            age = float("inf")
+        if not 0 <= age <= APPROVE_WITHIN_SECONDS:
+            if state.accounts.password_hash(person["account"]) is not None:
+                if not body.password:
+                    return _error(403, "Enter your password to allow this.", "proof_needed", {"proof": "password"})
+                if not checked_password(request, state, person["person"], body.password, person["name"]):
+                    return _error(403, "Your password is not right.", "proof_needed", {"proof": "password"})
+            elif body.confirm.strip() != person["person"]["login"]:
+                return _error(403, "Type your sign-in name to allow this.", "proof_needed", {"proof": "name"})
+        if not state.token_making.allow(person["account"]):
+            return _error(429, "You have connected a lot of apps in the last hour. Try again later.", "rate_limited", headers={"Retry-After": "600"})
         if body.kind == "extension":
-            if not body.extension or f"chrome-extension://{body.extension}" not in state.settings.extension_origins:
-                return _error(400, "This Kaal does not know that extension.", "invalid")
             code = state.accounts.start_app_signin(person["account"], person["vault"], body.challenge, kind="extension")
             return answer({"code": code, "redirect": f"https://{body.extension}.chromiumapp.org/kaal?code={quote(code)}"})
         code = state.accounts.start_app_signin(person["account"], person["vault"], body.challenge)
@@ -1927,6 +2062,8 @@ def create_app(settings: Settings) -> FastAPI:
         vault = next((entry for entry in person["vaults"] if entry["id"] == body.vault), None)
         if vault is None:
             return _error(404, "You do not belong to that vault.", "not_found")
+        if not state.token_making.allow(person["account"]):
+            return _error(429, "You have made a lot of tokens in the last hour. Try again later.", "rate_limited", headers={"Retry-After": "600"})
         if sum(1 for token in state.tokens.list() if token.get("account") == person["account"] and not token.get("revoked_at")) >= MAX_TOKENS_PER_PERSON:
             return _error(409, f"You have {MAX_TOKENS_PER_PERSON} tokens already. Revoke one you no longer use first.", "conflict")
         beyond = [scope for scope in body.scopes if scope not in accounts.ROLE_SCOPES[vault["role"]]]
@@ -1979,10 +2116,22 @@ def create_app(settings: Settings) -> FastAPI:
             return checked_password(request, state, person["person"], body.password, person["name"])
         return body.confirm.strip() == name
 
+    def export_refused(request: Request) -> JSONResponse | None:
+        """A copy of a whole vault is written to disk and stays until its client has it: one at a
+        time for each caller, and only while the disk has room for it."""
+        state = S(request)
+        size = state.usage.used(state.vault.root) if state.vault is not None else 0
+        if disk_is_full(state.settings, size):
+            return _error(507, "This Kaal's disk has no room to write the copy. Whoever runs it needs to make room.", "full")
+        return held_download(request, size, state.exports)
+
     @app.get("/v1/vault/export", tags=["account"], dependencies=[require("read", "reveal", "admin")], response_class=Response)
     def vault_export_readable(request: Request):
         """Everything in the open vault, decrypted, as a zip: notes as Markdown, the files, receipts.csv. Owners only."""
         state = S(request)
+        refused = export_refused(request)
+        if refused is not None:
+            return refused
         workdir = Path(tempfile.mkdtemp(prefix="export-", dir=state.settings.tmp_dir))
         out = workdir / "kaal.zip"
         with state.in_vault():
@@ -2023,7 +2172,7 @@ def create_app(settings: Settings) -> FastAPI:
         if not state.invites.allow(person["account"]):
             return _error(429, "You are adding people too quickly. Try again in a minute.", "rate_limited", headers={"Retry-After": "60"})
         try:
-            state.accounts.grant(body.login.strip().lower(), person["vault"], body.role)
+            state.accounts.grant(body.login.strip().lower(), person["vault"], body.role, by_name=True)
         except accounts.AccountError as error:
             missing = str(error).startswith("No account")
             return _error(404 if missing else 409, "Nobody here has that sign-in name." if missing else str(error), "not_found" if missing else "conflict")
@@ -2203,7 +2352,7 @@ def create_app(settings: Settings) -> FastAPI:
                                    httponly=True, secure=kaal_state.settings.cookie_secure, samesite="lax")
             return with_cookie(response, kaal_state, cookie) if cookie else response
 
-        presented = request.cookies.get(flow_cookie_name(kaal_state.settings), "")
+        presented = exact_cookie(request, flow_cookie_name(kaal_state.settings))
         flow = kaal_state.accounts.finish_flow(state) if state and presented and secrets.compare_digest(presented.encode(), state.encode()) else None
         if flow is None or flow["service"] != service_id:
             if refused_too_often(request, kaal_state):
@@ -2343,6 +2492,9 @@ def create_app(settings: Settings) -> FastAPI:
     @app.get("/v1/export", tags=["service"], dependencies=[require("read", "reveal", "admin")], response_class=Response)
     def export(request: Request):
         state = S(request)
+        refused = export_refused(request)
+        if refused is not None:
+            return refused
         workdir = Path(tempfile.mkdtemp(prefix="export-", dir=state.settings.tmp_dir))
         out = workdir / "kaal-export.tar"
         with state.in_vault():
@@ -2380,7 +2532,16 @@ def create_app(settings: Settings) -> FastAPI:
     def show_note(request: Request, note_id: str, full: bool = False, token: dict = require("read")):
         if full and "reveal" not in token["scopes"]:
             raise HTTPException(403, "This token lacks the reveal scope.")
-        return _run(S(request), core.show_note, exact_note=note_id, query=note_id, full=full, json=True)
+        shown = _run(S(request), core.show_note, exact_note=note_id, query=note_id, full=full, json=True)
+        if "reveal" in token["scopes"] or shown.status_code != 200:
+            return shown
+        # Without reveal: the files by name and size only, and where a page was saved from by its host only.
+        payload = json.loads(shown.body)
+        note = payload.get("result")
+        if isinstance(note, dict):
+            note["attachments"] = [{key: entry[key] for key in META_ATTACHMENT_KEYS if key in entry} for entry in note.get("attachments", []) if isinstance(entry, dict)]
+            note["body"] = SOURCE_LINE.sub(lambda line: f"{line.group(1)}{_host_of(line.group(2))}", str(note.get("body") or ""))
+        return JSONResponse(payload)
 
     @app.post("/v1/notes/{note_id}/append", tags=["notes"], dependencies=[require("write", adds=True)])
     def append_note(request: Request, note_id: str, body: TextBody):
@@ -2548,7 +2709,8 @@ def create_app(settings: Settings) -> FastAPI:
     def medical_providers(request: Request):
         return _run(S(request), core.medical_providers, forget=[])
 
-    @app.post("/v1/medical/providers/forget", tags=["medical"], dependencies=[require("write")])
+    # Forgetting says whether a name was known, so it needs the right to read the names too.
+    @app.post("/v1/medical/providers/forget", tags=["medical"], dependencies=[require("write", "reveal")])
     def medical_providers_forget(request: Request, body: ProviderForget):
         return _run(S(request), core.medical_providers, forget=body.forget)
 

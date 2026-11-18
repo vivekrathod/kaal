@@ -75,6 +75,8 @@ class Vault:
         self.request_lock = threading.Lock()
         # Decrypted text kept for searching (see note_text_pieces). Memory only.
         self.text_cache: dict[str, tuple[Any, list[tuple[str, str, str]]]] = {}
+        self.text_sizes: dict[str, int] = {}
+        self.text_total = 0
 
     @property
     def root(self) -> Path:
@@ -960,6 +962,31 @@ def library_list(args: argparse.Namespace) -> None:
 # vault object's memory (Vault.text_cache), keyed by what would change if the note or its files did.
 # Nothing here is written to disk.
 SEARCH_PIECE_LIMIT = 400_000   # characters of one note or one file's text that are searched
+
+
+def search_memory_chars() -> int:
+    """How much decrypted text one vault keeps in memory for searching (KAAL_SEARCH_MEMORY_MB, 256).
+    Beyond it the text read longest ago is let go, and read again when it is next searched."""
+    try:
+        return max(1, int(os.environ.get("KAAL_SEARCH_MEMORY_MB") or 256)) * 1024 * 1024
+    except ValueError:
+        return 256 * 1024 * 1024
+
+
+def _forget_text(vault: Any, note_id: str) -> None:
+    if vault.text_cache.pop(note_id, None) is not None:
+        vault.text_total -= vault.text_sizes.pop(note_id, 0)
+
+
+def _remember_text(vault: Any, note_id: str, stamp: Any, pieces: list[tuple[str, str, str]]) -> None:
+    _forget_text(vault, note_id)
+    size = sum(len(text) for _where, _name, text in pieces)
+    vault.text_cache[note_id] = (stamp, pieces)
+    vault.text_sizes[note_id] = size
+    vault.text_total += size
+    limit = search_memory_chars()
+    while vault.text_total > limit and len(vault.text_cache) > 1:
+        _forget_text(vault, next(iter(vault.text_cache)))
 SNIPPET_BEFORE, SNIPPET_AFTER = 60, 110
 
 
@@ -1002,7 +1029,7 @@ def note_text_pieces(meta: dict[str, Any]) -> list[tuple[str, str, str]]:
             text = ""
         if text:
             pieces.append(("file", att.get("name") or "file", text[:SEARCH_PIECE_LIMIT]))
-    current_vault().text_cache[meta["id"]] = (stamp, pieces)
+    _remember_text(current_vault(), meta["id"], stamp, pieces)
     return pieces
 
 
@@ -1039,7 +1066,7 @@ def library_search(args: argparse.Namespace) -> None:
     notes = index.get("notes", [])
     cache = current_vault().text_cache
     for gone in set(cache) - {note["id"] for note in notes}:
-        del cache[gone]
+        _forget_text(current_vault(), gone)
     patterns = [re.compile(re.escape(term), re.IGNORECASE) for term in terms]
     hits: list[tuple[int, str, dict[str, Any]]] = []
     for note in notes:
@@ -1668,17 +1695,22 @@ def sanitized_capture_url(value: str) -> str:
         parsed = urlsplit(value)
     except ValueError:
         return ""
-    if not parsed.scheme:
+    # Web addresses only, and none with a backslash, which a browser and this code read differently.
+    if parsed.scheme.lower() not in ("http", "https") or "\\" in value:
         return ""
-    # No query, fragment or user name and password: those can hold one-time secrets.
+    # No query, fragment or user name and password: those can hold one-time secrets. Nor what
+    # follows a ";" in a part of the path, where some sites carry a session.
     try:
         host = parsed.hostname or ""
         port = f":{parsed.port}" if parsed.port else ""
     except ValueError:
         return ""
+    if not host:
+        return ""
     if ":" in host:
         host = f"[{host}]"
-    return urlunsplit((parsed.scheme, f"{host}{port}", parsed.path, "", ""))
+    path = "/".join(part.split(";", 1)[0] for part in parsed.path.split("/"))
+    return urlunsplit((parsed.scheme.lower(), f"{host}{port}", path, "", ""))
 
 
 def browser_capture(args: argparse.Namespace) -> None:

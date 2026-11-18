@@ -57,7 +57,7 @@ def test_signing_in_sets_a_cookie_scripts_cannot_read(service):
 
 
 def test_a_signed_in_browser_can_read_but_must_prove_writes_come_from_the_app(service):
-    cookie = {"Cookie": f"kaal_session={service.secrets['full']}"}
+    cookie = {"Cookie": f"__Host-kaal_session={service.secrets['full']}"}
     assert service.client.get("/v1/session", headers=cookie).json()["result"]["name"] == "full"
     assert service.client.get("/v1/medical/receipts", headers=cookie).status_code == 200
 
@@ -73,11 +73,11 @@ def test_a_signed_in_browser_can_read_but_must_prove_writes_come_from_the_app(se
 
 
 def test_sessions_follow_the_token_scopes_revocation_and_sign_out(service):
-    reader = {"Cookie": f"kaal_session={service.secrets['reader']}"}
+    reader = {"Cookie": f"__Host-kaal_session={service.secrets['reader']}"}
     assert service.client.get("/v1/session", headers=reader).json()["result"] == {"name": "reader", "scopes": ["read"]}
     assert service.client.get("/v1/medical/receipts", headers=reader).status_code == 403
     assert service.client.get("/v1/session").status_code == 401
-    assert service.client.get("/v1/session", headers={"Cookie": "kaal_session=kaal_made_up"}).status_code == 401
+    assert service.client.get("/v1/session", headers={"Cookie": "__Host-kaal_session=kaal_made_up"}).status_code == 401
 
     cleared = service.client.delete("/v1/session", headers=reader)
     assert cleared.status_code == 200 and 'kaal_session="";' in cleared.headers["set-cookie"] and "Max-Age=0" in cleared.headers["set-cookie"]
