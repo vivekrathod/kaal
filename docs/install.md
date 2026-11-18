@@ -135,7 +135,18 @@ take effect after `deploy/docker/kaalctl start`. The ones most people want:
 | Setting | What it does |
 |---|---|
 | `KAAL_MAX_UPLOAD_BYTES` | The largest file Kaal accepts (default 100 MiB). |
+| `KAAL_VAULT_QUOTA_MB` | The most any vault but the first may hold (default 10240, which is 10 GiB; 0 for no limit). |
+| `KAAL_VAULTS_PER_PERSON` | How many vaults one person may own (default 10). |
 | `KAAL_SIGNUPS_PER_HOUR` | How many accounts strangers may create per hour when sign-up is open (default 10). |
+| `KAAL_SIGN_IN_PER_MINUTE` | How often one address may call the sign-in pages' routes (default 30 a minute). |
+| `KAAL_PASSWORD_CHECKS` | How many passwords are checked at the same moment (default 4). Each takes memory and a processor for a moment. |
+| `KAAL_TRUSTED_PROXIES` | Whose word is taken for a visitor's address: `private` (the default here, for the proxy in a container), `none`, or a list of networks. |
+| `KAAL_FILE_JOBS`, `KAAL_FILE_MEMORY_MB` | How many files are read at once (default 2) and the memory each reading may use (default 1024). |
+| `KAAL_DOWNLOAD_MEMORY_MB` | The most memory held by files on their way to people at one time (default 1024). |
+
+Before opening sign-up to strangers, set the quota and the hourly allowance to
+what the disk can bear: ten new accounts an hour, each with ten vaults of
+10 GiB, is more than most disks.
 
 Signing in with Google is set up in the web app, under Settings → Sign-in
 services; see the README.

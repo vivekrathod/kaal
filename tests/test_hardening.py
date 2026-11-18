@@ -269,3 +269,200 @@ def test_a_picture_with_too_many_pixels_is_not_decoded(tmp_path):
     trap.write_bytes(buffer.getvalue())
     assert len(buffer.getvalue()) < 1_000_000
     assert receipt_ai.receipt_images(trap) == []
+
+
+# --- what a caller that may change the vault but not read it is told
+
+def test_a_token_that_cannot_reveal_is_told_what_it_changed_by_id_only(house):
+    sam = house.signed_in("sam")
+    vault = sam.get("/v1/session").json()["result"]["vault"]["id"]
+    receipt = {"file": ("receipt.txt", b"Patient: Jane Madeup\nAmount paid: $40.00\n", "text/plain")}
+    for scopes in (["write"], ["read", "write"]):
+        secret = sam.post("/v1/account/tokens", json={"name": "-".join(scopes), "scopes": scopes, "vault": vault, "password": GOOD}).json()["result"]["secret"]
+        script = house.visitor(Authorization=f"Bearer {secret}")
+        saved = script.post("/v1/medical/receipts", files=receipt)
+        assert saved.status_code == 200, saved.text
+        assert "Jane" not in saved.text and "40.00" not in saved.text and "receipt.txt" not in saved.text
+        assert json.dumps(saved.json()["result"]).count('"id"') >= 1                 # it still learns which receipt it made
+        people = script.post("/v1/medical/people", json={"add": ["Jane Madeup"]})
+        assert people.status_code == 200 and "Jane" not in people.text
+        note = script.post("/v1/library/notes", json={"title": "A made-up title", "body": "made-up body"})
+        assert note.status_code == 200 and "made-up" not in note.text
+    # Someone signed in, who may read everything, is answered in full as before.
+    full = sam.post("/v1/library/notes", json={"title": "A made-up title", "body": "made-up body"})
+    assert "A made-up title" in full.text
+
+
+def test_ids_only_keeps_ids_and_states_and_drops_what_people_wrote():
+    answer = {"note": {"id": "n1", "title": "Made-up", "tags": ["a"], "receipt": {"status": "needs_review", "fields": {"amount": "40.00"}},
+                       "attachments": [{"id": "a1", "name": "made-up.pdf", "size": 12}]}, "people": ["Jane Madeup"], "count": 2}
+    assert server.ids_only(answer) == {"note": {"id": "n1", "receipt": {"status": "needs_review"}, "attachments": [{"id": "a1", "size": 12}]}, "count": 2}
+    assert server.ids_only("a made-up sentence") is None and server.ids_only(["x", "y"]) == []
+
+
+# --- room
+
+def test_a_vault_that_is_full_refuses_something_new_but_can_still_be_tidied(house, tmp_path):
+    app = house.build(vault_quota_bytes=200_000)
+    made = app.state.kaal.accounts.add_account("sam")
+    server.create_vault(app.state.kaal.accounts, "My notes", made["id"])
+    sam = house.visitor(application=app)
+    assert sam.post("/v1/setup", json={"code": app.state.kaal.accounts.new_setup_code("sam"), "password": GOOD}).status_code == 200
+    big = {"file": ("made-up.bin", b"0" * 150_000, "application/octet-stream")}
+    note = sam.post("/v1/library/notes", json={"title": "Made-up", "body": "x"}).json()["result"]
+    note_id = note.get("id") or note["note"]["id"]
+    assert sam.post(f"/v1/library/notes/{note_id}/attachments", files=big).status_code == 200
+    full = sam.post(f"/v1/library/notes/{note_id}/attachments", files=big)
+    assert full.status_code == 413 and "full" in full.json()["error"]
+    assert sam.post("/v1/library/notes", json={"title": "One more", "body": "x" * 60_000}).status_code == 413
+    # Reading, and moving things to the Trash, still work.
+    assert sam.get("/v1/library/notes").status_code == 200
+    assert sam.post(f"/v1/library/notes/{note_id}/trash").status_code == 200
+
+
+def test_the_first_vault_and_a_server_without_a_limit_have_no_quota(house):
+    tight = house.build(vault_quota_bytes=1)
+    request = SimpleNamespace(headers={"content-length": "500000"})
+    first = SimpleNamespace(root=house.home / "data")
+    server._room_checked(request, tight.state.kaal, first)                           # the installation's own vault: no limit
+    other = SimpleNamespace(root=house.home / "elsewhere")
+    with pytest.raises(server.HTTPException) as refused:
+        server._room_checked(request, tight.state.kaal, other)
+    assert refused.value.status_code == 413
+    server._room_checked(request, house.build(vault_quota_bytes=0).state.kaal, other)  # 0 means no limit
+
+
+def test_usage_counts_a_folder_and_what_is_on_its_way(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "one").write_bytes(b"0" * 1000)
+    usage = server.Usage()
+    assert usage.used(tmp_path) == 1000
+    usage.add(tmp_path, 500)
+    (tmp_path / "a" / "two").write_bytes(b"0" * 9000)
+    assert usage.used(tmp_path) == 1500                                               # counted again only every half minute
+    usage.forget(tmp_path)
+    assert usage.used(tmp_path) == 10_000
+
+
+# --- files on their way out
+
+def test_only_so_many_files_are_held_for_one_caller_and_for_everyone():
+    downloads = server.Downloads(limit_bytes=1000)
+    first = downloads.take("sam", 5000)
+    assert first is not None                                                          # one file always goes, however large
+    assert downloads.take("alex", 10) is None                                         # but nothing more fits beside it
+    downloads.give(first)
+    tickets = [downloads.take("sam", 10) for _ in range(server.Downloads.PER_CALLER)]
+    assert all(tickets) and downloads.take("sam", 10) is None and downloads.take("alex", 10) is not None
+    for ticket in tickets:
+        downloads.give(ticket)
+    assert downloads.take("sam", 10) is not None
+
+
+def test_a_download_is_counted_until_it_has_left_and_refused_when_too_many_are_held(house):
+    sam = house.signed_in("sam")
+    note = sam.post("/v1/library/notes", json={"title": "Made-up", "body": "x"}).json()["result"]
+    note_id = note.get("id") or note["note"]["id"]
+    added = sam.post(f"/v1/library/notes/{note_id}/attachments", files={"file": ("made-up.txt", b"made-up words", "text/plain")})
+    assert added.status_code == 200, added.text
+    shown = sam.get(f"/v1/library/notes/{note_id}").json()["result"]
+    attachment = (shown.get("note") or shown)["attachments"][0]["id"]
+    path = f"/v1/notes/{note_id}/attachments/{attachment}/content"
+    assert sam.get(path).content == b"made-up words"
+    downloads = house.state.downloads
+    assert downloads._held == 0 and downloads._by_caller == {}                        # given back once the answer had left
+    caller = f"account:{house.store.account('sam')['id']}"
+    held = [downloads.take(caller, 1) for _ in range(server.Downloads.PER_CALLER)]
+    busy = sam.get(path)
+    assert busy.status_code == 503 and busy.json()["kind"] == "busy"
+    for ticket in held:
+        downloads.give(ticket)
+    assert sam.get(path).status_code == 200 and sam.get(f"/v1/notes/{note_id}/attachments/{attachment}/view").status_code == 200
+    assert downloads._held == 0
+
+
+# --- names, and finding out who has an account
+
+def test_a_sign_in_name_cannot_be_shaped_like_an_account_id(house):
+    victim = house.store.add_account("sam")
+    with pytest.raises(server.accounts.AccountError):
+        house.store.add_account(victim["id"])
+    with pytest.raises(server.accounts.AccountError):
+        house.store.add_account("0123456789ab")
+    assert house.store.add_account("0123456789abc")["login"] == "0123456789abc"       # thirteen characters is a name like any other
+
+
+def test_adding_people_to_a_vault_cannot_be_used_to_try_many_names_quickly(house):
+    sam = house.signed_in("sam")
+    answers = [sam.post("/v1/vault/members", json={"login": f"made-up-{index}", "role": "viewer"}).status_code for index in range(12)]
+    assert answers[:10] == [404] * 10 and answers[10:] == [429, 429]
+
+
+# --- sign-in services that are slow or down
+
+def test_a_sign_in_service_that_is_down_is_asked_once_not_by_every_visitor():
+    from kaal import oidc
+
+    asked = []
+
+    def down(url, form=None):
+        asked.append(url)
+        raise oidc.SignInServiceError("could not reach the sign-in service", "unreachable")
+
+    services = oidc.Services(down)
+    for _ in range(5):
+        with pytest.raises(oidc.SignInServiceError):
+            services.settings("https://id.example")
+    assert len(asked) == 1
+    with pytest.raises(oidc.SignInServiceError):
+        services._signing_keys("https://id.example")
+    assert len(asked) == 1                                                            # the keys need the settings, which are known to be down
+
+
+def test_many_visitors_at_once_cause_one_request_to_the_sign_in_service():
+    from kaal import oidc
+
+    asked = []
+
+    def slow(url, form=None):
+        asked.append(url)
+        time.sleep(0.2)
+        return 200, json.dumps({"issuer": "https://id.example", "authorization_endpoint": "https://id.example/a",
+                                "token_endpoint": "https://id.example/t", "jwks_uri": "https://id.example/k"}).encode()
+
+    services = oidc.Services(slow)
+    threads = [threading.Thread(target=services.settings, args=("https://id.example",)) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(asked) == 1
+
+
+# --- the programs that read files are told nothing about the server
+
+def test_a_program_reading_a_file_is_not_given_the_servers_environment(monkeypatch):
+    monkeypatch.setenv("KAAL_KEY_FILE", "/made-up/key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "made-up")
+    done = tools.run(["/usr/bin/env"], timeout=5, text=True)
+    assert done is not None and "KAAL_KEY_FILE" not in done.stdout and "ANTHROPIC_API_KEY" not in done.stdout and "PATH=" in done.stdout
+
+
+# --- the installer's link
+
+def test_the_command_line_makes_no_link_for_an_account_in_use_when_asked_not_to(house):
+    import os
+    import subprocess
+    import sys
+
+    house.signed_in("sam")
+    house.store.add_account("alex")
+    env = {**os.environ, "KAAL_HOME": str(house.home), "KAAL_VAULT": str(house.home / "data"), "KAAL_KEY_FILE": os.environ.get("KAAL_KEY_FILE", "")}
+
+    def link(*args):
+        return subprocess.run([sys.executable, "-m", "kaal.server", "account", "setup-link", *args], capture_output=True, text=True, env=env)
+
+    refused = link("sam", "--new-only")
+    assert refused.returncode == 3 and "/#/setup/" not in refused.stdout
+    assert "/#/setup/" in link("alex", "--new-only").stdout
+    assert "/#/setup/" in link("sam").stdout                                          # on purpose, whoever runs the server still can

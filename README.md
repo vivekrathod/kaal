@@ -72,11 +72,16 @@ stay signed in. Each token has scopes:
 
 | Scope | Allows |
 |---|---|
-| `read` | Metadata: list, search, redacted views, status, verify |
-| `reveal` | Plaintext: full note bodies, field values, attachment contents, extracted text, medical receipt fields |
+| `read` | Titles, tags, times and file names in lists and searches; a note's text with identity numbers and similar values hidden; status and a quick verify |
+| `reveal` | Plaintext: full note bodies, field values, attachment contents, extracted text, medical receipt fields, the full address a page was saved from |
 | `write` | Create, edit, append, attach, capture, extract, trash, restore |
 | `delete` | Permanent deletion and purges |
-| `admin` | Whole-vault export |
+| `admin` | Whole-vault export, and the deep verify that reads every file |
+
+`read` without `reveal` is for a script that needs to know what is there, not
+what it says: it sees a note's wording with numbers hidden, so it is not a way
+to keep a note's text from someone. A token with `write` but not `reveal` is
+answered with the ids and states of what it changed, never the contents.
 
 **People and vaults.** An installation can hold several people, each with a
 vault of their own, and a vault can be shared. Someone who belongs to a vault
@@ -377,10 +382,40 @@ service is used under that account's terms and data settings. Notes and other
 attachments are never sent. An API key or a login for the command is a
 credential on the server: keep it readable only by the service.
 
+**On the open internet.** Kaal can be put on a public address behind its HTTPS
+proxy. What it does about strangers:
+
+- The routes that need no sign-in answer each address only so often
+  (`KAAL_SIGN_IN_PER_MINUTE`, 30), and take small requests only. Wrong
+  passwords are slowed for the name and the address together, so guessing from
+  one place does not lock the real person out from another; only a few
+  passwords are checked at once (`KAAL_PASSWORD_CHECKS`, 4), and more are told
+  to try again.
+- The visitor's address is taken from `X-Forwarded-For` only when the request
+  comes from a proxy named in `KAAL_TRUSTED_PROXIES` (this machine by default;
+  `private` for a proxy in a container; `none` to believe nobody).
+- The session cookie is tied to the one host (`__Host-`), browsers are told to
+  stay on HTTPS, and nothing a visitor sends is written to the log as they
+  typed it.
+- Files are read by pdftotext, pdftoppm and tesseract with a time limit and a
+  memory limit (`KAAL_FILE_MEMORY_MB`, 1024), a few at a time
+  (`KAAL_FILE_JOBS`, 2), and with nothing of the server's environment.
+- A vault other than the first may hold `KAAL_VAULT_QUOTA_MB` (10240; 0 for no
+  limit), a person may own `KAAL_VAULTS_PER_PERSON` vaults, hold 50 sessions
+  and make 50 tokens, and files being downloaded are held in memory only up
+  to `KAAL_DOWNLOAD_MEMORY_MB` (1024) at once.
+
 **Not defended against.** A compromised client can do whatever its token allows
 until you revoke it, and a token with `admin` can export everything. A
-compromised server host exposes everything. Rate limits are basic and are not
-denial-of-service protection.
+compromised server host exposes everything. The limits above keep one visitor
+from getting in the way of the rest; they are not protection against a
+determined flood, which belongs to the proxy or the network in front. The
+programs that read files run as the same user as the server, so a flaw in one
+of them that a crafted file could exploit would reach the key: keep the system
+(or the container image) updated. Someone who owns a vault can find out whether
+a sign-in name exists by trying to share with it, slowly. With sign-up open,
+set the quota and the hourly sign-up allowance to what the disk can bear. See
+[SECURITY.md](SECURITY.md) for reporting a problem.
 
 ## How receipts and files are read
 

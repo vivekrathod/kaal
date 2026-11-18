@@ -46,7 +46,9 @@ def run(argv: Sequence[str], *, timeout: float, text: bool = False, wait: float 
             # The shell sets the memory limit and then becomes the program. Where the
             # limit cannot be set (some systems refuse), the program runs without one.
             command = ["/bin/sh", "-c", f'ulimit -v {limit} 2>/dev/null; exec "$@"', "kaal-tool", *command]
-        return subprocess.run(command, capture_output=True, text=text, timeout=timeout, stdin=subprocess.DEVNULL)
+        # The program gets a bare environment: nothing that names the key, a token or a service.
+        bare = {name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL", "TESSDATA_PREFIX", "TMPDIR") if name in os.environ}
+        return subprocess.run(command, capture_output=True, text=text, timeout=timeout, stdin=subprocess.DEVNULL, env=bare)
     except (OSError, subprocess.TimeoutExpired):
         return None
     finally:

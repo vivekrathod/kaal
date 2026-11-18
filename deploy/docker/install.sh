@@ -128,8 +128,14 @@ until [ "$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose 
 done
 
 say "Kaal is running at $address"
-if [ "$first_time" -eq 1 ]; then
-    link=$(docker compose exec -T kaal kaal-server account setup-link owner 2> /dev/null | tail -1)
+# A link only for an administrator who has never signed in. A second run (another checkout over
+# the same data, say) must not hand whoever runs it a way to replace an existing password.
+link=""
+[ "$first_time" -eq 1 ] && link=$(docker compose exec -T kaal kaal-server account setup-link owner --new-only 2> /dev/null | tail -1) || true
+if [ "$first_time" -eq 1 ] && [ -z "$link" ]; then
+    printf '\nThis Kaal already has its administrator, so no new sign-in link was made. Sign in as usual.\n'
+    printf 'If the password is lost: deploy/docker/kaalctl setup-link owner\n'
+elif [ "$first_time" -eq 1 ]; then
     cat << DONE
 
 Open this link once to choose your password (it works for 24 hours):

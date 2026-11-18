@@ -120,6 +120,10 @@ class Settings:
     strangers_per_minute: int = 30
     # Passwords checked at the same moment; more wait briefly, then are told to try again.
     password_checks: int = 4
+    # The most one vault may hold, in bytes (0: no limit). The installation's first vault has no limit.
+    vault_quota_bytes: int = 10 * 1024 * MiB
+    # Files being downloaded are held in memory until the client has them; this is the most held at once.
+    download_memory_bytes: int = 1024 * MiB
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "Settings":
@@ -145,6 +149,8 @@ class Settings:
             trusted_proxies=trusted_proxy_list(env.get("KAAL_TRUSTED_PROXIES") or ""),
             strangers_per_minute=int(env.get("KAAL_SIGN_IN_PER_MINUTE") or 30),
             password_checks=int(env.get("KAAL_PASSWORD_CHECKS") or 4),
+            vault_quota_bytes=max(0, int(env.get("KAAL_VAULT_QUOTA_MB") or 10 * 1024)) * MiB,
+            download_memory_bytes=max(1, int(env.get("KAAL_DOWNLOAD_MEMORY_MB") or 1024)) * MiB,
         )
 
 
@@ -297,6 +303,116 @@ class RateLimiter:
             return True
 
 
+class Usage:
+    """How much each vault holds on disk, counted at most every half minute."""
+
+    FRESH_SECONDS = 30.0
+
+    def __init__(self) -> None:
+        self._known: dict[str, tuple[float, int]] = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _count(folder: Path) -> int:
+        total = 0
+        for directory, _names, files in os.walk(folder):
+            for name in files:
+                try:
+                    total += os.lstat(os.path.join(directory, name)).st_size
+                except OSError:
+                    pass
+        return total
+
+    def used(self, folder: Path) -> int:
+        key, now = str(folder), time.monotonic()
+        with self._lock:
+            known = self._known.get(key)
+        if known is not None and now - known[0] < self.FRESH_SECONDS:
+            return known[1]
+        total = self._count(folder)
+        with self._lock:
+            self._known[key] = (now, total)
+        return total
+
+    def add(self, folder: Path, size: int) -> None:
+        """Count what is about to arrive, so many uploads at once cannot all slip under the limit."""
+        with self._lock:
+            known = self._known.get(str(folder))
+            if known is not None:
+                self._known[str(folder)] = (known[0], known[1] + max(0, size))
+
+    def forget(self, folder: Path) -> None:
+        with self._lock:
+            self._known.pop(str(folder), None)
+
+
+class Downloads:
+    """Files on their way out. A file is decrypted whole and stays in memory until the client has
+    taken it, so a client that asks and never reads could otherwise pin as much memory as it liked."""
+
+    PER_CALLER = 6
+
+    def __init__(self, limit_bytes: int) -> None:
+        self.limit = limit_bytes
+        self._held = 0
+        self._by_caller: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def take(self, caller: str, size: int) -> tuple[str, int] | None:
+        with self._lock:
+            if self._by_caller.get(caller, 0) >= self.PER_CALLER:
+                return None
+            # One file is always allowed, however large; more only while they fit.
+            if self._held and self._held + size > self.limit:
+                return None
+            self._held += size
+            self._by_caller[caller] = self._by_caller.get(caller, 0) + 1
+            return caller, size
+
+    def give(self, ticket: tuple[str, int]) -> None:
+        caller, size = ticket
+        with self._lock:
+            self._held = max(0, self._held - size)
+            left = self._by_caller.get(caller, 0) - 1
+            if left > 0:
+                self._by_caller[caller] = left
+            else:
+                self._by_caller.pop(caller, None)
+
+
+class HeldDownloadsMiddleware:
+    """Gives back what Downloads counted once a response has left, or its client has gone.
+
+    It sits outside everything else so that "left" means written to the client, not handed to
+    another layer of the server."""
+
+    def __init__(self, app: Any, downloads: Downloads) -> None:
+        self.app = app
+        self.downloads = downloads
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        held: list[tuple[str, int]] = []
+        scope["kaal_held"] = held
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            for ticket in held:
+                self.downloads.give(ticket)
+
+
+def held_download(request: Request, size: int) -> JSONResponse | None:
+    """Count a file about to be sent; an error answer when this caller, or the server, holds too many."""
+    state = request.app.state.kaal
+    ticket = state.downloads.take(getattr(request.state, "caller", "-"), size)
+    if ticket is None:
+        return _error(503, "Kaal is sending as many files as it can hold at once. Try again in a moment.", "busy", headers={"Retry-After": "5"})
+    request.scope.setdefault("kaal_held", []).append(ticket)
+    return None
+
+
 class _TooLarge(Exception):
     pass
 
@@ -443,6 +559,10 @@ class AppState:
     guard: Any = None
     signups: Any = None
     services: Any = None
+    strangers: Any = None
+    usage: Any = None
+    downloads: Any = None
+    invites: Any = None
 
 
 class Scoped:
@@ -819,9 +939,28 @@ def _signed_in_person(request: Request, state: AppState) -> dict[str, Any] | Non
     return record
 
 
-def require(*scopes: str) -> Callable:
+def _room_checked(request: Request, state: AppState, vault: core.Vault | None) -> None:
+    """Refuse something new for a vault that is full. Counted from the request's declared size, before it is read."""
+    quota = state.settings.vault_quota_bytes
+    if not quota or vault is None or vault.root.resolve() == Path(state.settings.vault).expanduser().resolve():
+        return
+    try:
+        incoming = max(0, int(request.headers.get("content-length") or 0))
+    except ValueError:
+        incoming = 0
+    if state.usage.used(vault.root) + incoming > quota:
+        raise HTTPException(413, f"This vault is full: it may hold {quota // MiB} MiB. Delete what you no longer need from the Trash, "
+                                 "or ask whoever runs this Kaal for more room.")
+    state.usage.add(vault.root, incoming)
+
+
+def require(*scopes: str, adds: bool = False) -> Callable:
+    """The caller must hold ``scopes`` in the vault they are in. ``adds`` marks a route that stores
+    something new, which a full vault refuses."""
+
     def dependency(request: Request) -> dict[str, Any]:
         state: AppState = request.app.state.kaal
+        request.state.needed = scopes
         scheme, _, presented = request.headers.get("authorization", "").partition(" ")
         from_cookie = False
         if scheme.lower() != "bearer":
@@ -834,6 +973,9 @@ def require(*scopes: str) -> Callable:
                 if missing:
                     raise HTTPException(403, f"Your role in this vault does not allow that (it needs {', '.join(missing)}).")
                 request.state.vault = state.vaults.get(person["vault"]) if person["vault"] else None
+                request.state.caller, request.state.scopes = f"account:{person['account']}", person["scopes"]
+                if adds:
+                    _room_checked(request, state, request.state.vault)
                 return person
             presented, from_cookie = presented_session(request), True
         record = state.tokens.authenticate(presented.strip()) if presented.strip() else None
@@ -856,6 +998,9 @@ def require(*scopes: str) -> Callable:
         if missing:
             raise HTTPException(403, f"This token lacks the {', '.join(missing)} scope.")
         request.state.vault = vault
+        request.state.caller, request.state.scopes = record["id"], allowed
+        if adds:
+            _room_checked(request, state, vault)
         return {**record, "scopes": allowed, "account": account["id"], "vault": vault_id, "role": role}
 
     return Depends(dependency)
@@ -956,6 +1101,28 @@ def _metadata_answer(response: JSONResponse, caller: dict[str, Any]) -> JSONResp
     return JSONResponse(payload, status_code=response.status_code)
 
 
+# What an answer to a change may tell a caller that cannot read the vault's contents.
+WRITTEN_KEYS = frozenset({"id", "note_id", "attachment_id", "status", "state", "kind", "type", "created", "created_at", "updated", "updated_at",
+                          "duplicate", "queued", "count", "changed", "trashed", "restored", "deleted", "purged", "reviewed", "size", "storage"})
+
+
+def ids_only(value: Any) -> Any:
+    """Ids, states and counts, and nothing a person wrote: no titles, names, amounts, dates of service or text."""
+    if isinstance(value, dict):
+        kept: dict[str, Any] = {}
+        for key, inner in value.items():
+            if isinstance(inner, (dict, list)):
+                trimmed = ids_only(inner)
+                if trimmed:
+                    kept[key] = trimmed
+            elif key in WRITTEN_KEYS:
+                kept[key] = inner
+        return kept
+    if isinstance(value, list):
+        return [trimmed for trimmed in (ids_only(entry) for entry in value if isinstance(entry, (dict, list))) if trimmed]
+    return None
+
+
 def _upload_name(raw: str | None) -> str:
     name = Path((raw or "").replace("\\", "/")).name
     name = re.sub(r"[\x00-\x1f/]", "_", name).strip()
@@ -986,7 +1153,7 @@ def _saved_upload(state: AppState, upload: UploadFile) -> Iterator[Path]:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _content_response(state: AppState, note_id: str, attachment_id: str, *, receipt: bool = False) -> Response:
+def _content_response(request: Request, state: AppState, note_id: str, attachment_id: str, *, receipt: bool = False) -> Response:
     with state.in_vault():
         try:
             meta = core.medical_receipt_meta(core.load_index(), note_id) if receipt else core.note_by_id(note_id)
@@ -996,6 +1163,9 @@ def _content_response(state: AppState, note_id: str, attachment_id: str, *, rece
             data = core.attachment_original_bytes(meta, matches[0])
         except core.KaalError as error:
             return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind, error.details)
+    busy = held_download(request, len(data))
+    if busy is not None:
+        return busy
     return Response(
         content=data,
         media_type="application/octet-stream",
@@ -1266,6 +1436,10 @@ def create_app(settings: Settings) -> FastAPI:
     app.state.kaal.worker = ExtractionWorker(registry.all)
     app.state.kaal.services = oidc.Services()
     app.state.kaal.strangers = RateLimiter(settings.strangers_per_minute)
+    app.state.kaal.usage = Usage()
+    app.state.kaal.downloads = Downloads(settings.download_memory_bytes)
+    # Adding someone to a vault says whether that sign-in name exists; nobody needs to try many a minute.
+    app.state.kaal.invites = RateLimiter(10)
     passwords.set_concurrency(settings.password_checks)
 
     def holds_credential(headers: dict[bytes, bytes]) -> bool:
@@ -1303,6 +1477,20 @@ def create_app(settings: Settings) -> FastAPI:
         route = request.scope.get("route")
         template = getattr(route, "path", "(unmatched)")
         token_name = getattr(request.state, "token_name", "-")
+        needed, held = getattr(request.state, "needed", ()), getattr(request.state, "scopes", None)
+        if (held is not None and "reveal" not in held and ("write" in needed or "delete" in needed) and response.status_code == 200
+                and response.headers.get("content-type", "").startswith("application/json")):
+            # A caller that may change the vault but not read it is told what it changed by id, not shown it.
+            body = b"".join([chunk async for chunk in response.body_iterator])
+            try:
+                payload = json.loads(body)
+                told = {"result": ids_only(payload.get("result")), **({"format": payload["format"]} if "format" in payload else {})}
+            except (ValueError, AttributeError):
+                told = {"result": None}
+            trimmed = JSONResponse(told)
+            for name in ("Cache-Control", "X-Kaal-Version"):
+                trimmed.headers[name] = response.headers[name]
+            response = trimmed
         if settings.cookie_secure:
             # Browsers that have been here once never try plain http again (ignored over http).
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
@@ -1319,6 +1507,7 @@ def create_app(settings: Settings) -> FastAPI:
     # check is answered without touching the vault, the log or the rate limit.
     if settings.extension_origins:
         app.add_middleware(ExtensionCorsMiddleware, origins=settings.extension_origins)
+    app.add_middleware(HeldDownloadsMiddleware, downloads=app.state.kaal.downloads)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
@@ -1797,6 +1986,8 @@ def create_app(settings: Settings) -> FastAPI:
     def vault_member_set(request: Request, body: MemberChange, person: dict[str, Any] = require_owner()):
         """Let someone with an account into this vault, or change their role in it."""
         state = S(request)
+        if not state.invites.allow(person["account"]):
+            return _error(429, "You are adding people too quickly. Try again in a minute.", "rate_limited", headers={"Retry-After": "60"})
         try:
             state.accounts.grant(body.login.strip().lower(), person["vault"], body.role)
         except accounts.AccountError as error:
@@ -2135,7 +2326,7 @@ def create_app(settings: Settings) -> FastAPI:
     def list_notes(request: Request, tag: str = Query("", max_length=200), caller: dict[str, Any] = require("read")):
         return _metadata_answer(_run(S(request), core.list_notes, tag=tag, json=True), caller)
 
-    @app.post("/v1/notes", tags=["notes"], dependencies=[require("write")])
+    @app.post("/v1/notes", tags=["notes"], dependencies=[require("write", adds=True)])
     def add_note(request: Request, note: NoteCreate):
         return _run(S(request), core.add_note, title=note.title, tags=_tags(note.tags), body=note.body, body_file=None, sensitivity=note.sensitivity)
 
@@ -2157,7 +2348,7 @@ def create_app(settings: Settings) -> FastAPI:
             raise HTTPException(403, "This token lacks the reveal scope.")
         return _run(S(request), core.show_note, exact_note=note_id, query=note_id, full=full, json=True)
 
-    @app.post("/v1/notes/{note_id}/append", tags=["notes"], dependencies=[require("write")])
+    @app.post("/v1/notes/{note_id}/append", tags=["notes"], dependencies=[require("write", adds=True)])
     def append_note(request: Request, note_id: str, body: TextBody):
         return _run(S(request), core.append_note, exact_note=note_id, query=note_id, body=body.body)
 
@@ -2169,14 +2360,14 @@ def create_app(settings: Settings) -> FastAPI:
     def field_value(request: Request, note_id: str, field: str):
         return _run(S(request), _field, exact_note=note_id, query=note_id, field=field)
 
-    @app.post("/v1/notes/{note_id}/attachments", tags=["notes"], dependencies=[require("write")])
+    @app.post("/v1/notes/{note_id}/attachments", tags=["notes"], dependencies=[require("write", adds=True)])
     def attach(request: Request, note_id: str, file: UploadFile = File(...), sensitivity: Sensitivity = Form("auto"), extract: bool = Form(False), ocr: bool = Form(False)):
         with _saved_upload(S(request), file) as path:
             return _run(S(request), core.attach_file, exact_note=note_id, query=note_id, file=str(path), sensitivity=sensitivity, extract=extract, ocr=ocr)
 
     @app.get("/v1/notes/{note_id}/attachments/{attachment_id}/content", tags=["notes"], dependencies=[require("read", "reveal")], response_class=Response)
     def attachment_content(request: Request, note_id: str, attachment_id: str):
-        return _content_response(S(request), note_id, attachment_id)
+        return _content_response(request, S(request), note_id, attachment_id)
 
     # --- browser captures
 
@@ -2200,6 +2391,9 @@ def create_app(settings: Settings) -> FastAPI:
         media_type = viewable_type(attachment.get("name", ""), data)
         if media_type is None:
             return _error(415, "This kind of file can only be downloaded.", "invalid")
+        busy = held_download(request, len(data))
+        if busy is not None:
+            return busy
         headers = {
             "Content-Disposition": f"inline; filename*=UTF-8''{quote(attachment.get('name', 'file'), safe='')}",
             "X-Content-Type-Options": "nosniff",
@@ -2221,12 +2415,12 @@ def create_app(settings: Settings) -> FastAPI:
             return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind, error.details)
         return Response(content=data, media_type=media_type, headers={"X-Content-Type-Options": "nosniff"})
 
-    @app.post("/v1/captures", tags=["captures"], dependencies=[require("write")])
+    @app.post("/v1/captures", tags=["captures"], dependencies=[require("write", adds=True)])
     def capture(request: Request, file: UploadFile = File(...), title: str = Form(""), source_url: str = Form(""), source_title: str = Form(""), captured_at: str = Form("")):
         with _saved_upload(S(request), file) as path:
             return _run(S(request), core.browser_capture, file=str(path), title=title, source_url=source_url, source_title=source_title, captured_at=captured_at)
 
-    @app.post("/v1/captures/text", tags=["captures"], dependencies=[require("write")])
+    @app.post("/v1/captures/text", tags=["captures"], dependencies=[require("write", adds=True)])
     def capture_text(request: Request, body: TextCapture):
         return _run(S(request), core.browser_capture_text, **body.model_dump())
 
@@ -2243,7 +2437,7 @@ def create_app(settings: Settings) -> FastAPI:
     def library_search(request: Request, search: LibrarySearch):
         return _run(S(request), core.library_search, **search.model_dump())
 
-    @app.post("/v1/library/notes", tags=["library"], dependencies=[require("write")])
+    @app.post("/v1/library/notes", tags=["library"], dependencies=[require("write", adds=True)])
     def library_create(request: Request, note: LibraryCreate):
         return _run(S(request), core.library_create, title=note.title, tags=_tags(note.tags), body=note.body, source_url=note.source_url, source_title=note.source_title)
 
@@ -2251,7 +2445,7 @@ def create_app(settings: Settings) -> FastAPI:
     def library_show(request: Request, note_id: str):
         return _run(S(request), core.library_show, note_id=note_id)
 
-    @app.put("/v1/library/notes/{note_id}", tags=["library"], dependencies=[require("write")])
+    @app.put("/v1/library/notes/{note_id}", tags=["library"], dependencies=[require("write", adds=True)])
     def library_update(request: Request, note_id: str, note: LibraryUpdate):
         return _run(S(request), core.library_update, note_id=note_id, title=note.title, tags=_tags(note.tags), body=note.body)
 
@@ -2267,7 +2461,7 @@ def create_app(settings: Settings) -> FastAPI:
     def library_purge(request: Request, note_id: str, confirm: bool = False):
         return _run(S(request), core.library_purge, note_id=note_id, yes=confirm)
 
-    @app.post("/v1/library/notes/{note_id}/attachments", tags=["library"], dependencies=[require("write")])
+    @app.post("/v1/library/notes/{note_id}/attachments", tags=["library"], dependencies=[require("write", adds=True)])
     def library_attach(request: Request, note_id: str, file: UploadFile = File(...)):
         with _saved_upload(S(request), file) as path:
             return _run(S(request), core.library_attach, note_id=note_id, file=str(path))
@@ -2282,7 +2476,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     # --- medical receipts (fields are medical data, so reading them needs reveal)
 
-    @app.post("/v1/medical/receipts", tags=["medical"], dependencies=[require("write")])
+    @app.post("/v1/medical/receipts", tags=["medical"], dependencies=[require("write", adds=True)])
     def medical_capture(request: Request, file: UploadFile = File(...), title: str = Form(""), source_url: str = Form(""), source_title: str = Form(""), captured_at: str = Form("")):
         state = S(request)
         defer = state.settings.background_extraction
@@ -2380,7 +2574,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.get("/v1/medical/receipts/{note_id}/attachments/{attachment_id}/content", tags=["medical"], dependencies=[require("read", "reveal")], response_class=Response)
     def medical_content(request: Request, note_id: str, attachment_id: str):
-        return _content_response(S(request), note_id, attachment_id, receipt=True)
+        return _content_response(request, S(request), note_id, attachment_id, receipt=True)
 
     @app.post("/v1/medical/receipts/{note_id}/trash", tags=["medical"], dependencies=[require("write")])
     def medical_trash(request: Request, note_id: str):
@@ -2498,6 +2692,11 @@ def _people(args: argparse.Namespace) -> None:
             vault = None if args.no_vault else create_vault(store, args.vault_name or "My notes", person["id"])
             out = {"status": "created", "account": person, "vault": vault}
         elif action == ("account", "setup-link"):
+            found = store.account(args.login)
+            if args.new_only and found is not None and (store.password_hash(found["id"]) is not None or store.identities_of(found["id"])):
+                # Whoever can run this can reset any password on purpose; an installer run a second time should not by accident.
+                print(f"{found['login']} has already set up their account, so no link was made.", file=sys.stderr)
+                raise SystemExit(3)
             code = store.new_setup_code(args.login, hours=args.hours)
             base = (os.environ.get("KAAL_PUBLIC_URL") or "").rstrip("/") or "https://YOUR-KAAL-ADDRESS"
             print(f"Open this within {args.hours:g} hours to choose a password. It works once:", file=sys.stderr)
@@ -2652,6 +2851,7 @@ def build_parser() -> argparse.ArgumentParser:
     link = account_sub.add_parser("setup-link", help="Print a single-use link for choosing an account's password in the web app")
     link.add_argument("login")
     link.add_argument("--hours", type=float, default=accounts.SETUP_HOURS, help="How long the link works (default: 24)")
+    link.add_argument("--new-only", action="store_true", help="Make no link (and exit 3) for someone who has already chosen a password or connected a sign-in service")
     vault = sub.add_parser("vault", help="Vaults and who belongs to each")
     vault_sub = vault.add_subparsers(dest="action", required=True)
     vault_sub.add_parser("list", help="Vaults and their members")

@@ -181,10 +181,17 @@ def _new_id() -> str:
     return secrets.token_hex(6)
 
 
+_LIKE_AN_ID = re.compile(r"[0-9a-f]{12}")
+
+
 def clean_login(login: str) -> str:
     cleaned = (login or "").strip().lower()
     if not _LOGIN.fullmatch(cleaned):
         raise AccountError("A sign-in name is 1 to 64 characters: letters, digits and . _ @ + - , starting with a letter or digit.")
+    if _LIKE_AN_ID.fullmatch(cleaned):
+        # Accounts are looked up by id or by sign-in name; a name shaped like an id could be chosen to
+        # match someone else's id and be mistaken for them.
+        raise AccountError("A sign-in name cannot be exactly twelve characters of 0-9 and a-f. Choose another.")
     return cleaned
 
 

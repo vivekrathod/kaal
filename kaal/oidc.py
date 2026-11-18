@@ -27,7 +27,9 @@ from typing import Any
 from urllib.parse import urlencode
 
 GOOGLE = {"id": "google", "name": "Google", "issuer": "https://accounts.google.com"}
-TIMEOUT_SECONDS = 10
+TIMEOUT_SECONDS = 10         # for each step of a request: connecting, and each wait for more of the answer
+TOTAL_SECONDS = 20           # for reading a whole answer, however slowly it trickles in
+FAIL_SECONDS = 30            # how long a service that could not be reached is not asked again
 MAX_ANSWER_BYTES = 1024 * 1024
 KEEP_SECONDS = 3600          # how long a service's published settings and keys are remembered
 CLOCK_SLACK_SECONDS = 120
@@ -56,8 +58,18 @@ def fetch(url: str, form: dict[str, str] | None = None) -> tuple[int, bytes]:
         raise SignInServiceError("refusing an address that is not https")
     request = urllib.request.Request(url, data=urlencode(form).encode("ascii") if form is not None else None, headers={"Accept": "application/json", "User-Agent": "kaal"})
     try:
+        deadline = time.monotonic() + TOTAL_SECONDS
         with urllib.request.build_opener(_NoRedirect).open(request, timeout=TIMEOUT_SECONDS) as response:
-            return response.status, response.read(MAX_ANSWER_BYTES + 1)[:MAX_ANSWER_BYTES]
+            # Read in pieces against one deadline: the timeout above restarts with every byte that arrives.
+            body = b""
+            while len(body) <= MAX_ANSWER_BYTES:
+                if time.monotonic() > deadline:
+                    raise SignInServiceError("the sign-in service answered too slowly", "unreachable")
+                piece = response.read1(64 * 1024)
+                if not piece:
+                    break
+                body += piece
+            return response.status, body[:MAX_ANSWER_BYTES]
     except urllib.error.HTTPError as error:
         return error.code, error.read(MAX_ANSWER_BYTES)
     except (urllib.error.URLError, TimeoutError, OSError) as error:
@@ -185,6 +197,25 @@ class Services:
         self._lock = threading.Lock()
         self._settings: dict[str, tuple[float, dict[str, Any]]] = {}
         self._keys: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+        # A service that is down is not asked again by every visitor: the failure is remembered
+        # briefly, and only one request at a time goes out for each thing a service publishes.
+        self._failed: dict[tuple[str, str], tuple[float, SignInServiceError]] = {}
+        self._flights: dict[tuple[str, str], threading.Lock] = {}
+
+    def _flight(self, what: str, issuer: str) -> threading.Lock:
+        with self._lock:
+            return self._flights.setdefault((what, issuer), threading.Lock())
+
+    def _recent_failure(self, what: str, issuer: str) -> None:
+        with self._lock:
+            failed = self._failed.get((what, issuer))
+            if failed and failed[0] > time.monotonic():
+                raise failed[1]
+            self._failed.pop((what, issuer), None)
+
+    def _remember_failure(self, what: str, issuer: str, error: SignInServiceError) -> None:
+        with self._lock:
+            self._failed[(what, issuer)] = (time.monotonic() + FAIL_SECONDS, error)
 
     def _fetch(self, url: str, form: dict[str, str] | None = None) -> tuple[int, bytes]:
         if not url.startswith("https://"):
@@ -193,35 +224,63 @@ class Services:
 
     def settings(self, issuer: str) -> dict[str, Any]:
         """What the service publishes at /.well-known/openid-configuration."""
-        with self._lock:
-            kept = self._settings.get(issuer)
-        if kept and kept[0] > time.monotonic():
-            return kept[1]
-        status, body = self._fetch(f"{issuer}/.well-known/openid-configuration")
-        if status != 200:
-            raise SignInServiceError(f"the service's settings answered {status}", "unreachable")
-        found = _json(body, "settings")
-        if str(found.get("issuer", "")).rstrip("/") != issuer:
-            raise SignInServiceError("the service's settings name another issuer")
-        for field in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
-            if not str(found.get(field, "")).startswith("https://"):
-                raise SignInServiceError(f"the service's settings have no usable {field}")
-        with self._lock:
-            self._settings[issuer] = (time.monotonic() + KEEP_SECONDS, found)
-        return found
+        def kept_now() -> dict[str, Any] | None:
+            with self._lock:
+                kept = self._settings.get(issuer)
+            return kept[1] if kept and kept[0] > time.monotonic() else None
+
+        found = kept_now()
+        if found is not None:
+            return found
+        with self._flight("settings", issuer):
+            found = kept_now()
+            if found is not None:
+                return found
+            self._recent_failure("settings", issuer)
+            try:
+                status, body = self._fetch(f"{issuer}/.well-known/openid-configuration")
+                if status != 200:
+                    raise SignInServiceError(f"the service's settings answered {status}", "unreachable")
+                found = _json(body, "settings")
+                if str(found.get("issuer", "")).rstrip("/") != issuer:
+                    raise SignInServiceError("the service's settings name another issuer")
+                for field in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
+                    if not str(found.get(field, "")).startswith("https://"):
+                        raise SignInServiceError(f"the service's settings have no usable {field}")
+            except SignInServiceError as error:
+                self._remember_failure("settings", issuer, error)
+                raise
+            with self._lock:
+                self._settings[issuer] = (time.monotonic() + KEEP_SECONDS, found)
+            return found
 
     def _signing_keys(self, issuer: str, *, fresh: bool = False) -> list[dict[str, Any]]:
-        with self._lock:
-            kept = self._keys.get(issuer)
-        if kept and kept[0] > time.monotonic() and not fresh:
+        def kept_now() -> tuple[float, list[dict[str, Any]]] | None:
+            with self._lock:
+                kept = self._keys.get(issuer)
+            return kept if kept and kept[0] > time.monotonic() else None
+
+        kept = kept_now()
+        if kept and not fresh:
             return kept[1]
-        status, body = self._fetch(self.settings(issuer)["jwks_uri"])
-        keys = _json(body, "keys").get("keys") if status == 200 else None
-        if not isinstance(keys, list):
-            raise SignInServiceError("the service's signing keys could not be fetched", "unreachable")
-        with self._lock:
-            self._keys[issuer] = (time.monotonic() + KEEP_SECONDS, keys)
-        return keys
+        asked = time.monotonic()
+        with self._flight("keys", issuer):
+            kept = kept_now()
+            # Someone else fetched them while this request waited its turn: those are fresh enough.
+            if kept and (not fresh or kept[0] - KEEP_SECONDS >= asked):
+                return kept[1]
+            self._recent_failure("keys", issuer)
+            try:
+                status, body = self._fetch(self.settings(issuer)["jwks_uri"])
+                keys = _json(body, "keys").get("keys") if status == 200 else None
+                if not isinstance(keys, list):
+                    raise SignInServiceError("the service's signing keys could not be fetched", "unreachable")
+            except SignInServiceError as error:
+                self._remember_failure("keys", issuer, error)
+                raise
+            with self._lock:
+                self._keys[issuer] = (time.monotonic() + KEEP_SECONDS, keys)
+            return keys
 
     def address_to_visit(self, service: dict[str, Any], *, redirect: str, state: str, nonce: str, verifier: str) -> str:
         """Where to send the browser so the person can sign in at the service."""

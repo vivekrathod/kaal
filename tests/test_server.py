@@ -207,7 +207,10 @@ class CaptureLibraryMedicalTests(ServerTestCase):
         self.assertEqual(self.ok(self.client.get(f"/v1/library/notes/{nid}", headers=self.h("revealer")))["note"]["body"], "Body")
         self.assertEqual(self.client.get(f"/v1/library/notes/{nid}", headers=self.h("writer")).status_code, 403)
         updated = self.ok(self.client.put(f"/v1/library/notes/{nid}", headers=self.h("writer"), json={"title": "Doc 2", "tags": [], "body": "New"}))
-        self.assertEqual(updated["note"]["title"], "Doc 2")
+        # A token that cannot reveal is told which note it changed, not shown it.
+        self.assertEqual(updated["note"]["id"], nid)
+        self.assertNotIn("Doc 2", json.dumps(updated))
+        self.assertEqual(self.ok(self.client.get(f"/v1/library/notes/{nid}", headers=self.h("revealer")))["note"]["title"], "Doc 2")
         attached = self.ok(self.upload(f"/v1/library/notes/{nid}/attachments", name="a.txt", content=b"text body", token="writer"))
         att_id = attached["attachment"]["id"]
         text = self.ok(self.client.get(f"/v1/library/notes/{nid}/attachments/{att_id}/extracted-text", headers=self.h("revealer")))
@@ -252,7 +255,7 @@ class CaptureLibraryMedicalTests(ServerTestCase):
         self.assertEqual(self.client.get("/v1/medical/people", headers=self.h("reader")).status_code, 403)
         self.assertEqual(self.client.post("/v1/medical/people", headers=self.h("revealer"), json={"add": ["Jane Doe"]}).status_code, 403)
         self.assertEqual(self.client.post("/v1/medical/people", headers=self.h("writer"), json={}).status_code, 400)
-        self.assertEqual(self.ok(self.client.post("/v1/medical/people", headers=self.h("writer"), json={"add": ["Jane Doe"]}))["people"], ["Jane Doe"])
+        self.assertNotIn("Jane", self.client.post("/v1/medical/people", headers=self.h("writer"), json={"add": ["Jane Doe"]}).text)
         self.assertEqual(self.ok(self.client.get("/v1/medical/people", headers=self.h("revealer")))["people"], ["Jane Doe"])
 
         too_early = self.client.post("/v1/medical/receipts/reimburse", headers=self.h("writer"), json={"ids": [rid], "date": "2026-02-01"})
@@ -260,8 +263,9 @@ class CaptureLibraryMedicalTests(ServerTestCase):
         self.assertEqual(self.client.patch(f"/v1/medical/receipts/{rid}/fields", headers=self.h("writer"), json={"fields": {"paid_date": "whenever"}}).status_code, 400)
         self.ok(self.client.post(f"/v1/medical/receipts/{rid}/review", headers=self.h("writer")))
         self.assertEqual(self.client.post("/v1/medical/receipts/reimburse", headers=self.h("revealer"), json={"ids": [rid]}).status_code, 403)
-        done = self.ok(self.client.post("/v1/medical/receipts/reimburse", headers=self.h("writer"), json={"ids": [rid], "date": "2/1/2026", "note": "ref 1"}))
-        self.assertEqual((done["reimbursed_at"], done["total_amount"]), ("2026-02-01", "12.50"))
+        done = self.client.post("/v1/medical/receipts/reimburse", headers=self.h("writer"), json={"ids": [rid], "date": "2/1/2026", "note": "ref 1"})
+        self.assertEqual(done.status_code, 200)
+        self.assertNotIn("12.50", done.text)   # the amounts are for someone who may reveal them: the report below
 
         report = self.ok(self.client.post("/v1/medical/report", headers=self.h("revealer"), json={"year": "2026"}))
         self.assertEqual((report["count"], report["total_amount"], report["unreimbursed_amount"]), (1, "12.50", "0.00"))
