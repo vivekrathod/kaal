@@ -36,7 +36,7 @@ collected by the publisher, and the answers below apply instead.
 | Medical receipts and the values read from them (amounts, dates, patient, provider, insurer) | The person's own Kaal server | No |
 | Photos and files the person picks, pages they scan | The person's own Kaal server | No |
 | Speech while dictating | Turned into text on the iPhone where it can do that; otherwise by Apple's speech recognition service, as keyboard dictation is. Only the text goes into the note. | No: the audio never reaches the publisher, and Apple's processing is covered by Apple's own policy |
-| Sign-in name and password | Typed into the server's own page, in Apple's sign-in sheet; the app never sees them | No |
+| Sign-in name and password | To sign in, typed into the server's own page in Apple's sign-in sheet, where the app does not see them. In Settings the app has fields of its own for the password, to change it, make new recovery codes or a token, or delete the account (and, for an account without a password, the sign-in name to confirm deleting it); what is typed there is sent only to that server, for that one request, and is not kept | No |
 | The session the server gives the app | The iPhone's keychain, this device only; sent back only to that server | No |
 | The server's address, the account's name, vaults and role | Kept in the app's own settings on the phone (UserDefaults) | No |
 | Device | The server shows the sign-in as "Kaal app on iPhone"; the device's name is never sent | No |

@@ -42,10 +42,20 @@ needs one it can reach from the internet, over HTTPS, holding nothing real.
    bin/demo-data.py fill --url https://DEMO-ADDRESS --token-file appreview.token
    ```
 
-   Then revoke the token under Settings → Tokens, and delete the file.
+   It takes a minute or two: the server reads each receipt after storing it,
+   and the script waits for that before marking some of them reviewed and
+   reimbursed. It stops without adding anything if the made-up notes are
+   already there, so running it twice does no harm. Then revoke the token
+   under Settings → Tokens, and delete the file.
 
-4. Sign in on an iPhone yourself with the address, `appreview` and its
-   password, and go through the steps below once.
+4. Sign in on an iPhone yourself, with the build you are about to upload, the
+   address, `appreview` and its password, and go through the steps below
+   once. In particular the app must still be signed in after the sign-in
+   sheet closes, and after it is closed and opened again. A server reached
+   over https takes an app's session only in the `X-Kaal-Session` header: a
+   build that sends it as a cookie instead (look for `Cookie` in the app's
+   `API.swift`) is told "You were signed out" straight after signing in, and
+   must not be uploaded.
 
 Keep the server running until the review is finished, and for later versions
 too. Nothing in it is real: every name, receipt and address is made up and
@@ -92,19 +102,36 @@ analytics.
 3. Type the sign-in name and password above, tap Sign in, then tap Allow to
    let the app in. The sheet closes and the app opens on the Add screen.
 
-Accounts are made only by the person who runs a Kaal server, by invitation;
-the demo server offers no way to create one, so neither does the app.
+The sign-in sheet shares Safari's cookies, as Apple's sheet does by default.
+If you sign in a second time (after "Sign out of this app", say), the sheet
+shows only Allow, because Safari is still signed in to the demo server; when
+that was more than ten minutes ago, the page asks for the password once more
+before Allow.
+
+## Accounts
+
+Nobody can sign up in the app: it has no sign-up screen, and it signs in only
+to an account that already exists on the server it is pointed at. Accounts on
+a Kaal server are made by whoever runs it. The one place the app makes an
+account is for such an administrator: signed in as the administrator of
+their own server, Settings → People lets them add a person (who then chooses
+a password from a link the administrator sends them), and open or close
+sign-up on that server's own web page. The `appreview` account is not an
+administrator, so those screens are not shown to it; an administrator sees
+the same Settings with two more rows, People and Sign-in services.
 
 ## Deleting the account
 
-The app creates no accounts, so it has no account-deletion screen of its own.
-An account on a Kaal server is deleted by its owner in that server's web app:
-open DEMO-ADDRESS in Safari, sign in, and choose Settings → Delete my account.
-It shows what would be deleted (the account, its tokens, and every vault only
-that person belongs to), asks for the password, and deletes it for good. The
-app is then signed out the next time it talks to the server. Please do not
-finish that step on the demo account; the page before the password is enough
-to see it.
+Settings → Delete my account, at the bottom of the account's settings. "What
+would be deleted?" lists it first (the account, its tokens, and every vault
+only that person belongs to, with everything in it). It then asks for the
+password and, after one more question, deletes the account on the server for
+good and returns the app to its first screen. The server's web app offers the
+same under Settings → Delete my account.
+
+Please do not finish that step on the demo account: "What would be deleted?"
+and the password field are enough to see it, and the account is the one the
+next reviewer signs in with. (If it is deleted, we make it again.)
 
 ## What to try
 
@@ -127,7 +154,7 @@ to see it.
   the PDFs attached to notes. Open "Paint colours for the hall" to see a note
   with a picture in it.
 - **Settings:** the account, the vault and who shares it, signed-in browsers
-  and apps, and "Sign out of this app".
+  and apps, "Delete my account" and "Sign out of this app".
 - **Without a connection:** turn on Airplane Mode and write a note. It waits
   on the Add screen, and is sent when the connection is back.
 

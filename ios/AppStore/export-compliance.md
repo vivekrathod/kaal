@@ -12,9 +12,10 @@ only encryption that is exempt from US export rules. Apple names the common
 exempt case in its guide to encryption export rules: encryption that is part
 of the operating system, such as HTTPS through `URLSession`.
 
-Everything the app does that involves cryptography, checked in
-`ios/Kaal/` (search for `CryptoKit`, `Security`, `URLSession` and
-`FileProtection`):
+Everything the app does that involves cryptography, checked in every Swift
+file under `ios/` apart from the tests (search for `CryptoKit`, `Security`,
+`URLSession` and `FileProtection`; the files are named here without their
+folders, which change as code comes to be shared with an extension):
 
 | What | How | Exempt because |
 |---|---|---|

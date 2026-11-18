@@ -9,10 +9,10 @@ Open an issue on the project's GitHub repository, under **Issues**. Say:
 
 - which part you are using: the server, the web app, Kaal for iPhone or Kaal
   for Chrome;
-- the versions: the web app shows Kaal's version at the bottom of Settings,
-  the iPhone app shows both its own and the server's under Settings,
-  `deploy/docker/kaalctl status` prints the server's, and the extension's is
-  on its card at `chrome://extensions`;
+- the versions: the web app shows Kaal's version on the Settings page, under
+  Your account; the iPhone app shows both its own and the server's under
+  Settings; `deploy/docker/kaalctl status` prints the server's; and the
+  extension's is on its card at `chrome://extensions`;
 - how the server was installed (the Docker install, or by hand), and where
   people open it (a domain, Tailscale, only that machine);
 - what you did, what you expected, and what happened, with the exact message
@@ -55,6 +55,15 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.24.0 or newer.
   itself).
 - **Making a token asks for your password** (or, if you sign in only through
   Google, your sign-in name). That is on purpose: a token can do what you can.
+- **"Enter your password to allow this"** (or "Type your sign-in name to
+  allow this") when you let the iPhone app or the Chrome extension in: that
+  browser was signed in more than ten minutes ago, and what you are allowing
+  lasts longer than its sign-in does, so Kaal asks who you are again.
+- **"You have made a lot of tokens in the last hour"** or **"You have
+  connected a lot of apps in the last hour":** a person can make 20 tokens an
+  hour, counting each time the app or the extension is let in. Wait and try
+  again. Fifty tokens at once is the most a person can hold; revoke ones you
+  no longer use.
 - **Signed out unexpectedly:** a browser stays signed in for 30 days and the
   iPhone app for a year, unless the session is signed out under Settings, the
   password is changed, or a recovery code is used.
@@ -84,7 +93,9 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.24.0 or newer.
 
 - **"Kaal isn't connected yet"** or **"didn't accept this extension's
   token":** open the extension's Settings, enter Kaal's address and press
-  "Connect with my Kaal sign-in". Or paste a token made in the web app under
+  "Connect with my Kaal sign-in", sign in on the page that opens and press
+  Allow (if you were already signed in there for a while, Kaal asks for your
+  password again first). Or paste a token made in the web app under
   Settings → Tokens.
 - **"Can't reach Kaal":** this computer is not on a network that can reach
   your Kaal server; or the server does not allow this copy of the extension.
@@ -119,9 +130,10 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.24.0 or newer.
 - **Taking everything with you:** Settings → Vaults and sharing → Download a
   copy, in the web app, gives an owner of a vault a zip of it that needs no
   Kaal to read.
-- **Deleting your account or a vault:** Settings → Delete my account, and
-  Settings → Vaults and sharing → Delete this vault, in the web app. The
-  [privacy policy](privacy.md) says exactly what goes and what stays.
+- **Deleting your account or a vault:** Settings → Delete my account, in
+  the web app or the iPhone app, and Settings → Vaults and sharing → Delete
+  this vault, in the web app. The [privacy policy](privacy.md) says exactly
+  what goes and what stays.
 
 More answers are in [Installing Kaal](install.md). How Kaal treats your data
 is in the [privacy policy](privacy.md).

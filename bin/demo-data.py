@@ -15,8 +15,9 @@ to no one.
 
     bin/demo-data.py fill --url https://demo.example.org --token-file demo.token
         Fills an existing Kaal through its API. The token needs the read,
-        reveal and write scopes. Use it on an empty vault: it adds to whatever
-        is there.
+        reveal and write scopes. Use it on an empty vault. It stops, changing
+        nothing, if the made-up notes are already there; --again adds them a
+        second time.
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -336,8 +338,37 @@ class Kaal:
             raise SystemExit(f"Kaal refused {method} {path} ({error.code}): {told}") from None
 
 
-def fill(kaal: Kaal) -> dict:
+def already_filled(kaal: Kaal) -> bool:
+    """Whether the vault already has the first of the made-up notes."""
+    title = NOTES[0]["title"]
+    found = kaal.call("GET", "/v1/library/notes?q=" + urllib.parse.quote(title))["result"]
+    return any(note.get("title") == title for note in found)
+
+
+def read_receipt(kaal: Kaal, receipt_id: str, seconds: float = 300, pause: float = 0.5) -> dict:
+    """The receipt, once Kaal has read it.
+
+    A Kaal server stores a receipt at once and reads it afterwards, in the
+    background, so a receipt that was just added has no amount or date yet and
+    cannot be marked reviewed. (The throwaway Kaal that `serve` starts reads as
+    it stores, and answers the first time.)
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        receipt = kaal.call("GET", f"/v1/medical/receipts/{receipt_id}")["result"]["receipt"]
+        if receipt.get("status") != "extracting":
+            return receipt
+        if time.monotonic() >= deadline:
+            raise SystemExit(f"Kaal had not read a receipt after {seconds:.0f} seconds. Look at the server's log, empty the vault "
+                             "(or pass --again) and fill it again.")
+        time.sleep(pause)
+
+
+def fill(kaal: Kaal, again: bool = False) -> dict:
     """Put the made-up family, notes and receipts into the vault the token opens."""
+    if not again and already_filled(kaal):
+        raise SystemExit(f"This vault already holds the made-up notes (it has “{NOTES[0]['title']}”), so nothing was added. "
+                         "Fill an empty vault, or pass --again to add everything a second time.")
     kaal.call("POST", "/v1/medical/people", json_body={"add": FAMILY})
     for note in NOTES:
         made = kaal.call("POST", "/v1/library/notes", json_body={"title": note["title"], "tags": note["tags"], "body": "Adding files…"})["result"]["note"]
@@ -354,6 +385,9 @@ def fill(kaal: Kaal) -> dict:
         name = f"{receipt['provider']} {receipt['number']}.pdf"
         made = kaal.call("POST", "/v1/medical/receipts", file=(name, receipt_pdf(receipt), "application/pdf"),
                          fields={"source_url": receipt.get("source", ""), "source_title": f"{receipt['provider']} - receipt"})["result"]
+        # Reviewing needs the amount and a date, which are only there once Kaal has read the receipt;
+        # and a vault that has just been filled should not still show "Reading…".
+        read_receipt(kaal, made["id"])
         if receipt.get("review"):
             kaal.call("POST", f"/v1/medical/receipts/{made['id']}/review")
         if receipt.get("reimbursed"):
@@ -379,24 +413,35 @@ def _wait_for(url: str, process: subprocess.Popen, seconds: float = 30) -> None:
     raise SystemExit("The Kaal server did not start in time.")
 
 
+def _interrupt(*_: object) -> None:
+    raise KeyboardInterrupt
+
+
 def serve(args: argparse.Namespace) -> int:
-    home = Path(tempfile.mkdtemp(prefix="kaal-demo-"))
-    os.chmod(home, 0o700)
-    key = home / "master.key"
-    key.write_text(base64.b64encode(os.urandom(32)).decode() + "\n", encoding="ascii")
-    os.chmod(key, 0o600)
-    url = f"http://localhost:{args.port}"
-    # Only what this run made: never a real configuration, key, model or vault.
-    env = {name: value for name, value in os.environ.items() if not name.startswith("KAAL_")}
-    env.update({"KAAL_HOME": str(home), "KAAL_VAULT": str(home / "data"), "KAAL_KEY_PROVIDER": "file", "KAAL_KEY_FILE": str(key),
-                "KAAL_CONFIG": str(home / "no-config.toml"), "KAAL_LOCAL": "1", "KAAL_PUBLIC_URL": url,
-                # The session cookie is normally sent over HTTPS only; this Kaal is plain http on this machine.
-                "KAAL_COOKIE_SECURE": "0", "KAAL_BACKGROUND_EXTRACTION": "0", "PYTHONPATH": str(ROOT)})
-    os.environ.update(env)
-    for name in [name for name in os.environ if name.startswith("KAAL_") and name not in env]:
-        del os.environ[name]
+    # Being told to stop (a script's `kill`, a closed terminal) is treated as Ctrl-C, from before
+    # anything is started: otherwise a stop that arrives while the vault is being filled would
+    # end this program and leave its server running, with its key and data still on disk.
+    for number in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, _interrupt)
+    home = None
     server_process = None
     try:
+        home = Path(tempfile.mkdtemp(prefix="kaal-demo-"))
+        os.chmod(home, 0o700)
+        key = home / "master.key"
+        key.write_text(base64.b64encode(os.urandom(32)).decode() + "\n", encoding="ascii")
+        os.chmod(key, 0o600)
+        url = f"http://localhost:{args.port}"
+        # Only what this run made: never a real configuration, key, model or vault.
+        env = {name: value for name, value in os.environ.items() if not name.startswith("KAAL_")}
+        env.update({"KAAL_HOME": str(home), "KAAL_VAULT": str(home / "data"), "KAAL_KEY_PROVIDER": "file", "KAAL_KEY_FILE": str(key),
+                    "KAAL_CONFIG": str(home / "no-config.toml"), "KAAL_LOCAL": "1", "KAAL_PUBLIC_URL": url,
+                    # The session cookie is normally sent over HTTPS only; this Kaal is plain http on this machine.
+                    # Receipts are read as they are stored, so the vault is full as soon as it has been filled.
+                    "KAAL_COOKIE_SECURE": "0", "KAAL_BACKGROUND_EXTRACTION": "0", "PYTHONPATH": str(ROOT)})
+        os.environ.update(env)
+        for name in [name for name in os.environ if name.startswith("KAAL_") and name not in env]:
+            del os.environ[name]
         subprocess.run([sys.executable, str(ROOT / "bin" / "kaal.py"), "init"], env=env, check=True, stdout=subprocess.DEVNULL)
         sys.path.insert(0, str(ROOT))
         from kaal import passwords, server, tokens
@@ -427,26 +472,29 @@ def serve(args: argparse.Namespace) -> int:
         print(f"Kaal with made-up data is at {url}", flush=True)
         print(f"Sign in as {args.login!r} with the password {password!r}.", flush=True)
         print(f"{counted['notes']} notes and {counted['receipts']} receipts. Ctrl-C stops it and deletes everything.", flush=True)
-        stop = []
-        signal.signal(signal.SIGTERM, lambda *_: stop.append(True))
-        while not stop and server_process.poll() is None:
+        while server_process.poll() is None:
             time.sleep(0.5)
         return 0
     except KeyboardInterrupt:
         return 0
     finally:
+        # Nothing may cut the tidying up short.
+        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(number, signal.SIG_IGN)
         if server_process is not None and server_process.poll() is None:
             server_process.terminate()
             try:
                 server_process.wait(10)
             except subprocess.TimeoutExpired:
                 server_process.kill()
-        shutil.rmtree(home, ignore_errors=True)
+                server_process.wait()
+        if home is not None:
+            shutil.rmtree(home, ignore_errors=True)
 
 
 def fill_existing(args: argparse.Namespace) -> int:
     token = Path(args.token_file).read_text().strip()
-    counted = fill(Kaal(args.url, token))
+    counted = fill(Kaal(args.url, token), again=args.again)
     print(f"Added {counted['notes']} made-up notes and {counted['receipts']} made-up receipts.")
     return 0
 
@@ -464,6 +512,7 @@ def main() -> int:
     add = sub.add_parser("fill", help="Add the made-up data to an existing Kaal, through its API")
     add.add_argument("--url", required=True)
     add.add_argument("--token-file", required=True, help="A file holding a token with the read, reveal and write scopes")
+    add.add_argument("--again", action="store_true", help="Add everything even if the made-up notes are already there")
     add.set_defaults(func=fill_existing)
     args = parser.parse_args()
     return args.func(args)

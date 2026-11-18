@@ -63,6 +63,8 @@ update)
     echo "==> Restarting"
     # Whether it worked is decided by Kaal answering, just below.
     docker compose up -d --remove-orphans > /dev/null 2>&1 || true
+    # Caddy reads its Caddyfile only when it starts, and an update may have changed it.
+    [ "$(sed -n 's/^COMPOSE_PROFILES=//p' .env)" != https ] || docker compose restart caddy > /dev/null 2>&1 || true
     if healthy; then
         echo "==> Updated: $before -> $(docker compose exec -T kaal kaal-server --version)"
     elif [ -n "$previous" ]; then

@@ -48,7 +48,9 @@ PORT=$(free_port)
 echo "Starting a Kaal with made-up data on port $PORT…"
 "$PYTHON" "$ROOT/bin/demo-data.py" serve --port "$PORT" --info "$WORK/demo.json" >"$WORK/demo.log" 2>&1 &
 SERVER=$!
-for _ in $(seq 1 120); do
+# Up to five minutes: drawing and storing the made-up receipts is slow on a busy machine.
+# Stopping it early is safe all the same; it stops its server and deletes its folder.
+for _ in $(seq 1 600); do
   [ -s "$WORK/demo.json" ] && break
   kill -0 "$SERVER" 2>/dev/null || { cat "$WORK/demo.log"; exit 1; }
   sleep 0.5

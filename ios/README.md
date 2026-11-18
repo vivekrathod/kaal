@@ -89,6 +89,20 @@ Without `TEST_RUNNER_KAAL_UI_SERVER` those tests are skipped. In the simulator
 speech recognition is not available, so the dictation test only checks that
 the app says so; dictation and the camera scanner need a real iPhone to try.
 
+Those tests look at what deleting the account would delete and stop there.
+`LeavingScenarioTests` deletes one, from Settings → Delete my account, with a
+wrong password first. It runs only when given a made-up account of its own to
+delete, one that is not the server's only administrator
+(`kaal-server account add leaver`), and that account is gone afterwards:
+
+```bash
+TEST_RUNNER_KAAL_UI_SERVER=http://localhost:8765 \
+TEST_RUNNER_KAAL_UI_LEAVER_LOGIN=leaver TEST_RUNNER_KAAL_UI_LEAVER_PASSWORD=... \
+xcodebuild test -project ios/Kaal.xcodeproj -scheme Kaal \
+  -only-testing:KaalUITests/LeavingScenarioTests \
+  -destination 'platform=iOS Simulator,name=iPhone 17'
+```
+
 ## Publishing
 
 [`AppStore/`](AppStore/listing.md) holds what App Store Connect asks for: the

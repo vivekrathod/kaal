@@ -86,8 +86,9 @@ NOTES
 
 YOURS, AND PRIVATE
 • Everything is stored on your Kaal server, encrypted. Nothing goes to Kaal's authors: no analytics, no ads, no tracking.
-• Sign in on your Kaal's own page, with your password, or with Google if your server offers it. The app never sees your password.
+• Sign in on your Kaal's own page, with your password, or with Google if your server offers it. The app is not shown your password when you sign in.
 • Share a vault with your family as viewer, editor or owner, and see every browser and app that is signed in.
+• Leave whenever you like: delete your account, with the vaults that are only yours, from the app's Settings.
 
 Kaal is free and open source, under the Apache License 2.0.
 ```

@@ -64,8 +64,15 @@ anything on someone else's server.
   `/v1/notes/{id}`, never the actual one), the result, which token or account
   id made it, and how long it took. Never what was sent or received, search
   words, file contents, tokens or IP addresses. A proxy that the operator puts
-  in front of Kaal may keep logs of its own; the one the Docker install sets up
-  (Caddy) keeps none.
+  in front of Kaal may keep logs of its own. The one the Docker install sets up
+  (Caddy) is set to keep no record of requests, failed ones included: it logs
+  its own starting up and what happens with its HTTPS certificate, which names
+  the domain. An installation made before that setting was added (November
+  2026) logged each request that failed, such as one made while Kaal was
+  restarting, with the visitor's address, the address asked for and the
+  request's headers, until it is updated (`deploy/docker/kaalctl update`);
+  Docker keeps at most 30 MB of those older lines and replaces them as new
+  ones are written.
 - **Backups:** the Docker install copies everything once a day and keeps the
   newest 14 copies, on the same machine. The encryption key is never part of a
   backup.
@@ -124,7 +131,10 @@ done.
 ## Kaal for iPhone
 
 The app talks only to the Kaal address you type in. You sign in on your
-Kaal's own page in Apple's sign-in sheet, so the app never sees your password.
+Kaal's own page in Apple's sign-in sheet, so the app does not see your
+password when you sign in. It asks for your password only in Settings, when
+you change it, make new recovery codes or a token, or delete your account; it
+sends it to your Kaal for that one request and does not keep it.
 
 **What it keeps on the phone:**
 
@@ -138,7 +148,17 @@ Kaal's own page in Apple's sign-in sheet, so the app never sees your password.
   while the app is running.
 
 Signing out deletes the session and what the app knew about your account.
-Deleting the app removes everything it kept.
+Anything still waiting to be sent stays on the phone (the app says so before
+you sign out) and is sent when you next sign in. Deleting the app removes
+everything it kept.
+
+**Safari stays signed in.** Apple's sign-in sheet shares Safari's cookies, so
+that someone already signed in to their Kaal in Safari need not type the
+password again. Signing in there therefore also leaves Safari on the phone
+signed in to your Kaal, for up to 30 days, listed with your other browsers as
+"Safari on iPhone". Signing out of the app, or deleting it, does not end
+that: sign it out under Settings → Signed-in browsers and apps, or open your
+Kaal in Safari and sign out there.
 
 **What it asks permission for, and why:**
 
@@ -162,7 +182,9 @@ with a token for that server, and to nothing else.
 
 **Connecting it.** "Connect with my Kaal sign-in" opens your Kaal's own
 sign-in page in a window of its own. You sign in there as you usually do and
-press Allow; your Kaal then makes a token for the extension (to read, reveal
+press Allow (if that browser was signed in more than ten minutes ago, your
+Kaal asks for your password again first); your Kaal then makes a token for
+the extension (to read, reveal
 and write in the vault you had open, as far as your role there allows) and
 hands it over. The extension never sees your password. You can paste a token
 you made yourself instead. Either way the token is listed in the web app
@@ -174,10 +196,12 @@ it, the page's title and address. Kaal keeps the address without the part
 after `?` or `#`, where sites often put session codes.
 
 **What it keeps in Chrome:** your Kaal's address and token, and the names of
-the sites you have saved receipts from (so it can offer "Save receipt" there),
-in this Chrome profile on this computer; and, while a save is under way, its
-progress, which Chrome forgets when it closes. Every ten minutes it asks your
-Kaal how many receipts are waiting to be checked, for the number on its icon.
+the sites that receipts in your vault were saved from, by you or by anyone
+who shares the vault (so it can offer "Save receipt" there), in this Chrome
+profile on this computer; and, while a save is under way, its progress, which
+Chrome forgets when it closes. Every ten minutes it asks your Kaal how many
+receipts are waiting to be checked, for the number on its icon, and for that
+list of sites.
 "Disconnect" in its settings removes the address and token; removing the
 extension removes everything it kept.
 
@@ -186,9 +210,13 @@ extension removes everything it kept.
 - **Debugger**, the only way Chrome lets an extension make a true PDF of a
   page, and to fetch a PDF or linked file through the tab you are on, with
   your sign-in to that site. The extension attaches only to the tab you save
-  from, only while saving, and Chrome shows a bar while it does. Chrome
-  describes this permission in broad terms because a debugger could do more;
-  this extension does nothing else with it.
+  from, only while saving, and Chrome shows a bar while it does. Through it,
+  the extension asks the page what kind of document it is (one fixed
+  expression, `document.contentType`, evaluated in that page), has Chrome
+  print the page, or loads the file and reads it. Chrome describes this
+  permission in broad terms ("Read and change all your data on all
+  websites") because a debugger could do more; this extension does nothing
+  else with it.
 - **Active tab**, to know which page you mean when you click the toolbar
   button, a right-click entry or the keyboard shortcut.
 - **Side panel**, **context menus**, **storage** and **alarms**: the review
@@ -200,13 +228,13 @@ extension removes everything it kept.
   receiving the single-use code your Kaal sends back. It does not ask Chrome
   who you are, and it gives the extension no access to a Google account, a
   Chrome profile, or your email address.
-- **Access to one website**, only if you ask for it. The extension holds no
-  access to any site. If a file cannot be read through the tab, it offers to
-  ask Chrome for access to that one site; you can take it back on the
-  extension's card at `chrome://extensions`.
+- **Access to one website**, only if you ask for it. The extension asks for
+  no access to websites of its own when it is installed. If a file cannot be
+  read through the tab, it offers to ask Chrome for access to that one site;
+  you can take it back on the extension's card at `chrome://extensions`.
 
-The extension does not read your browsing history, runs nothing in the pages
-you visit, and does not look at a page until you save it.
+The extension does not read your browsing history, runs nothing in a page you
+have not asked it to save, and does not look at a page until you save it.
 
 ## Deleting your data
 
@@ -228,14 +256,17 @@ it says otherwise. None of it needs the operator, or Kaal's authors.
   file and receipt in it is deleted for good, for everyone who shares it, and
   tokens made for it stop working. The first vault an installation was set
   up with cannot be deleted this way.
-- **Your account:** Settings → Delete my account. "What would be deleted?"
-  shows it before anything is asked: your sign-in, your tokens, your
-  sessions, any connected Google account, and every vault that only you
-  belong to, with everything in it. Vaults you share stay with the people you
-  share them with; if you are the only owner of one, make someone else an
-  owner first. You confirm with your password (or your sign-in name, if you
-  have no password). The only administrator of an installation cannot delete
-  their account until someone else is an administrator too, and an
+- **Your account:** Settings → Delete my account, in the web app or the
+  iPhone app. "What would be deleted?" shows it before anything is asked:
+  your sign-in, your tokens, your sessions, any connected Google account, and
+  every vault that only you belong to, with everything in it. Vaults you
+  share stay with the people you share them with; if you are the only owner
+  of one, make someone else an owner first. You confirm with your password
+  (or your sign-in name, if you have no password). Three things stop it, and
+  Kaal says which: the only administrator of an installation cannot delete
+  their account until someone else is an administrator too; a vault that is
+  only yours cannot go if it is the first vault the installation was set up
+  with, until you share it and make someone else its owner; and an
   installation's only account cannot be deleted at all: that person runs the
   server, and removes the whole installation instead
   ([Installing Kaal](install.md), "Removing Kaal"). An administrator can
@@ -245,14 +276,19 @@ it says otherwise. None of it needs the operator, or Kaal's authors.
   browsers" in the web app, "Signed-in browsers and apps" in the iPhone app).
 - **Tokens:** revoke them under Settings → Tokens.
 - **A connected Google account:** disconnect it under Settings.
-- **On your devices:** sign out of the iPhone app and delete it; choose
-  "Disconnect" in the Chrome extension's settings or remove it.
+- **On your devices:** sign out of the iPhone app and delete it, and sign
+  Safari out of your Kaal if you signed the app in on that phone (see "Safari
+  stays signed in" above); choose "Disconnect" in the Chrome extension's
+  settings or remove it.
 - **Backups.** What you delete stays in the copies the server's daily backup
   has already made until those are replaced: 14 days with the Docker install.
   Only the operator can delete those copies sooner.
 
-Kaal for iPhone and Kaal for Chrome have no "delete my account" button of
-their own; open your Kaal's address in a browser on the same device.
+Kaal for iPhone has "Delete my account" under Settings, which does what the
+web app's does and then signs the app out; a vault is deleted, and a copy
+downloaded, in the web app ("Open Kaal in the browser" in the app's
+Settings). Kaal for Chrome has no such buttons of its own; open your Kaal's
+address in a tab.
 
 ## Children
 
