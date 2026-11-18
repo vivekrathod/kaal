@@ -33,7 +33,7 @@ with your account or your data: only they can see it or change it.
 
 [Installing Kaal](install.md) covers the one-command Docker install, the key
 (keep a copy of it somewhere off the machine), updates, backups and removing
-Kaal. Kaal for iPhone needs a Kaal server version 0.24.0 or newer.
+Kaal. Kaal for iPhone needs a Kaal server version 0.25.0 or newer.
 
 ## Common problems
 
