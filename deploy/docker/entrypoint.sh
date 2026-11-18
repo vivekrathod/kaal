@@ -21,7 +21,8 @@ kaal-server)
             fi
             echo "First start: making this installation's key and an empty vault."
             kaal init > /dev/null
-            echo "Keep a copy of the key somewhere off this machine (deploy/docker/kaalctl key-backup)."
+            # The demo makes a new key every night and keeps none (deploy/demo).
+            [ -n "${KAAL_THROWAWAY_KEY:-}" ] || echo "Keep a copy of the key somewhere off this machine (deploy/docker/kaalctl key-backup)."
         elif ! has_data; then
             kaal init > /dev/null
         fi

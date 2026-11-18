@@ -57,7 +57,7 @@ marker() { dc exec -T kaal cat /tmp/kaal-demo-ready 2> /dev/null || true; }
 command=up
 case "${1:-}" in
 reset | status | logs | stop | start | remove) command=$1; shift ;;
--h | --help | help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+-h | --help | help) sed -n '2,19p' run.sh | sed 's/^# \{0,1\}//'; exit 0 ;;   # this folder is the script's own by now
 esac
 [ "$command" = up ] || [ -f "$settings" ] || stop "the demo is not set up here yet. Start it with: deploy/demo/run.sh --local (or --domain, --behind)"
 
@@ -97,10 +97,14 @@ start)
     exit 0
     ;;
 remove)
-    dc --profile https down --volumes --remove-orphans > /dev/null 2>&1 || true
+    out=$(dc --profile https down --volumes 2>&1) || { printf '%s\n' "$out" >&2; stop "Docker could not remove the demo; it may still be there."; }
     image=$(setting KAAL_IMAGE)
-    [ "$image" != "$project:local" ] || docker image rm "$image" > /dev/null 2>&1 || true
-    echo "Removed the demo's containers, certificate and image."
+    if [ "$image" = "$project:local" ]; then
+        docker image rm "$image" > /dev/null 2>&1 || true
+        echo "Removed the demo's containers, certificate and image."
+    else
+        echo "Removed the demo's containers and certificate. The image $image was not built here and is left."
+    fi
     echo "Its settings, with the passwords, are still in deploy/demo/$settings; delete that file too to forget them."
     exit 0
     ;;
@@ -133,15 +137,24 @@ command -v docker > /dev/null 2>&1 || stop "Docker is not installed. Install it 
 docker info > /dev/null 2>&1 || stop "Docker is installed but not running, or this user may not use it."
 version=$(docker compose version --short 2> /dev/null || true)
 [ -n "$version" ] || stop "Docker Compose is missing. Install the Compose plugin (https://docs.docker.com/compose/install/) and run this again."
+version=${version#v}
 major=${version%%.*}
 rest=${version#*.}
 minor=${rest%%.*}
+case "$major.$minor" in
+*[!0-9.]* | . | .* | *.) stop "could not tell which Docker Compose this is (it says \"$version\"); the demo needs 2.24 or newer." ;;
+esac
 if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 24 ]; }; then
     stop "Docker Compose $version is too old; the demo needs 2.24 or newer."
 fi
 
 first_time=1
 [ -f "$settings" ] && first_time=0
+# A name Docker already knows, with no settings of ours beside it, is somebody else's project:
+# starting the demo under it would put the demo's containers among theirs.
+if [ "$first_time" -eq 1 ] && docker compose ls --all --quiet 2> /dev/null | grep -qx "$project"; then
+    stop "Docker already has a project named \"$project\" that this script did not make. Choose another name with KAAL_DEMO_PROJECT."
+fi
 [ "$first_time" -eq 0 ] || [ -n "$mode" ] || stop "say where people will open the demo: --domain NAME, --behind ADDRESS or --local (see --help)"
 
 # Start from what was chosen before, then apply what was asked now.
@@ -194,15 +207,19 @@ if [ -n "$reviewer" ]; then
 else
     told="unchanged"
     reviewer=$(setting KAAL_DEMO_PASSWORD)
-    [ -n "$reviewer" ] || { reviewer=$(new_password); told="$reviewer   (shown this once)"; }
+    [ -n "$reviewer" ] || reviewer=$(new_password)
+    # Shown once, which means once the demo has come up: a first run that failed part-way
+    # (a port in use, say) has not shown them yet.
+    [ "$(setting KAAL_DEMO_SHOWN)" = 1 ] || told="$reviewer   (shown this once)"
 fi
 admin=$(setting KAAL_DEMO_ADMIN_PASSWORD)
 made_admin=0
-[ -n "$admin" ] || { admin=$(new_password); made_admin=1; }
+[ -n "$admin" ] || admin=$(new_password)
+[ "$(setting KAAL_DEMO_SHOWN)" = 1 ] || made_admin=1
 
 umask 077
 # Lines this script does not write, such as KAAL_DEMO_STORAGE (see README.md), are kept.
-ours='^(#|$|(KAAL_DEMO_MODE|KAAL_DEMO_ADDRESS|KAAL_PUBLIC_URL|KAAL_DOMAIN|KAAL_LISTEN|KAAL_COOKIE_SECURE|KAAL_HSTS|COMPOSE_PROFILES|KAAL_IMAGE|KAAL_DEMO_RESET_AT|KAAL_DEMO_PASSWORD|KAAL_DEMO_ADMIN_PASSWORD)=)'
+ours='^(#|$|(KAAL_DEMO_MODE|KAAL_DEMO_ADDRESS|KAAL_PUBLIC_URL|KAAL_DOMAIN|KAAL_LISTEN|KAAL_COOKIE_SECURE|KAAL_HSTS|COMPOSE_PROFILES|KAAL_IMAGE|KAAL_DEMO_RESET_AT|KAAL_DEMO_PASSWORD|KAAL_DEMO_ADMIN_PASSWORD|KAAL_DEMO_SHOWN|KAAL_DEMO_CODE)=)'
 {
     echo "# Written by deploy/demo/run.sh; run it again to change these. Keep this file private: it holds the passwords."
     echo "KAAL_DEMO_MODE=$mode"
@@ -217,6 +234,10 @@ ours='^(#|$|(KAAL_DEMO_MODE|KAAL_DEMO_ADDRESS|KAAL_PUBLIC_URL|KAAL_DOMAIN|KAAL_L
     echo "KAAL_DEMO_RESET_AT=$reset_at"
     echo "KAAL_DEMO_PASSWORD=$reviewer"
     echo "KAAL_DEMO_ADMIN_PASSWORD=$admin"
+    echo "KAAL_DEMO_SHOWN=$([ "$(setting KAAL_DEMO_SHOWN)" = 1 ] && echo 1 || echo 0)"
+    # Changes when the demo's own script does, so that running this again after an update
+    # makes the container again with the new one.
+    echo "KAAL_DEMO_CODE=$(cksum < demo.py | cut -d' ' -f1)"
     [ "$first_time" -eq 1 ] || grep -Ev "$ours" "$settings" || true
 } > "$settings.new"
 chmod 600 "$settings.new"
@@ -234,8 +255,12 @@ fi
 
 say "Starting the demo"
 [ "$profiles" = https ] || dc --profile https rm --stop --force caddy > /dev/null 2>&1 || true
-out=$(dc up -d --quiet-pull --remove-orphans 2>&1) || { printf '%s\n' "$out" >&2; stop "Docker could not start the demo. If it says a port is in use, something else on this machine listens there: choose another --port, and for --domain ports 80 and 443 must be free."; }
+out=$(dc up -d --quiet-pull 2>&1) || { printf '%s\n' "$out" >&2; stop "Docker could not start the demo. If it says a port is in use, something else on this machine listens there: choose another --port, and for --domain ports 80 and 443 must be free."; }
 ready || stop "the demo did not come up. See what it says with: deploy/demo/run.sh logs"
+# The passwords have been (or are about to be) shown: note it, so they are not shown again.
+{ grep -v '^KAAL_DEMO_SHOWN=' "$settings"; echo "KAAL_DEMO_SHOWN=1"; } > "$settings.new"
+chmod 600 "$settings.new"
+mv "$settings.new" "$settings"
 
 say "Kaal's demo is running at $address"
 cat << DONE

@@ -48,9 +48,17 @@ services:
       # Everyone looking at the demo shares one account, so its allowance of
       # requests a minute is three times a regular installation's.
       KAAL_RATE_PER_MINUTE: "1800"
+      # Everyone who tries the demo signs in as the same person, so what Kaal counts for each
+      # person (tokens an hour, files on their way out, proving the password) is not held
+      # against that one account: one visitor could otherwise use it up for all of them.
+      KAAL_SHARED_ACCOUNTS: "1"
+      # The key is made anew at every reset; nobody is told to keep a copy.
+      KAAL_THROWAWAY_KEY: "1"
       KAAL_DEMO_PASSWORD: ${KAAL_DEMO_PASSWORD:?Run deploy/demo/run.sh first}
       KAAL_DEMO_ADMIN_PASSWORD: ${KAAL_DEMO_ADMIN_PASSWORD:?Run deploy/demo/run.sh first}
       KAAL_DEMO_RESET_AT: ${KAAL_DEMO_RESET_AT:-03:00}
+      # Only so that a changed demo.py makes this container again (see run.sh).
+      KAAL_DEMO_CODE: ${KAAL_DEMO_CODE:-}
     # In place of the regular data and key volumes: only the demo's own script.
     volumes: !override
       - ./demo.py:/opt/kaal-demo/demo.py:ro

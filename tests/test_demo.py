@@ -118,7 +118,7 @@ def test_the_made_up_notes_are_in_with_their_picture_and_pdfs(seeded):
     assert [note["title"] for note in jane.call("GET", "/v1/library/notes?trash=true")] == ["Made-up packing list (old)"]
     notes = by_title(listing)
 
-    # The note the iPhone app's screen-by-screen tests open.
+    # The note the demo's notice and the notes for App Review point people to.
     house = jane.call("GET", f"/v1/library/notes/{notes['Made-up house notes']['id']}")["note"]
     for shown in ("## Boiler", "**Pressure should be 1.5 bar**", "| Hall |", "radiators"):
         assert shown in house["body"]
@@ -176,7 +176,7 @@ def test_the_receipts_waiting_show_what_kaal_read_from_them(seeded):
     jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
     waiting = {receipt["title"]: receipt["receipt"] for receipt in jane.call("GET", "/v1/medical/receipts?inbox=true")}
     clinic = waiting["Example Family Clinic: office visit"]
-    # The iPhone app's screen-by-screen tests look for a $45.00 receipt to check.
+    # The receipt a visitor is most likely to open first.
     assert clinic["fields"]["amount"] == "45.00" and clinic["field_sources"]["amount"] == "labelled-text"
     assert clinic["person"] == "Jane Madeup" and clinic["fields"]["service_date"] == "2026-11-08"
     card = waiting["Example Street Pharmacy"]
@@ -442,6 +442,9 @@ case "$*" in "compose -p "*) env | grep -E '^(KAAL_|COMPOSE_)' >> "$DOCKER_CALLS
 case "$*" in
 info) exit 0 ;;
 "compose version --short") echo "${COMPOSE_VERSION:-2.29.1}" ;;
+"compose ls --all --quiet") printf '%s\n' ${COMPOSE_LS:-} ;;
+*" up -d "*) if [ "${DOCKER_FAILS:-}" = up ]; then echo "address already in use" >&2; exit 1; fi ;;
+*" down --volumes"*) if [ "${DOCKER_FAILS:-}" = down ]; then echo "Cannot connect to the Docker daemon" >&2; exit 1; fi ;;
 *" ps -q kaal") echo made-up-container ;;
 "inspect --format {{.State.Health.Status}} made-up-container") echo healthy ;;
 *"exec -T kaal cat /tmp/kaal-demo-ready")
@@ -588,7 +591,7 @@ def test_run_sh_resets_and_removes_only_its_own_project(demo_folder):
 
     done, calls = demo_folder.run("remove", KAAL_DEMO_PROJECT="kaal-test-made-up")
     assert done.returncode == 0, done.stderr
-    assert "compose -p kaal-test-made-up --env-file kaal-test-made-up.env -f compose.yaml --profile https down --volumes --remove-orphans" in calls
+    assert "compose -p kaal-test-made-up --env-file kaal-test-made-up.env -f compose.yaml --profile https down --volumes" in calls
     assert "image rm kaal-test-made-up:local" in calls
     assert not any("kaal:local" in call or "compose -p kaal " in call for call in calls)
 
@@ -758,7 +761,7 @@ def test_the_real_demo_shows_the_made_up_data_and_puts_it_back(tmp_path):
         reviewed = person.call("GET", "/v1/medical/receipts?status=reviewed")
         assert len(waiting) == 4 and {receipt["receipt"]["status"] for receipt in waiting} == {"needs_review"}
         assert waiting[0]["title"] == "Example Family Clinic: office visit"
-        assert waiting[0]["receipt"]["fields"].get("amount") == "45.00", "the receipt the iPhone app's screen tests check"
+        assert waiting[0]["receipt"]["fields"].get("amount") == "45.00", "the first receipt waiting to be checked"
         assert len(reviewed) == 4 and sum(bool(receipt["receipt"].get("reimbursed_at")) for receipt in reviewed) == 1
         assert len(person.call("GET", "/v1/medical/receipts?trash=true")) == 1
         assert len(person.call("GET", "/v1/library/notes?trash=true")) == 1
@@ -914,3 +917,104 @@ def test_the_real_demo_shows_the_made_up_data_and_puts_it_back(tmp_path):
     assert subprocess.run(["docker", "image", "inspect", f"{PROJECT}:local"], capture_output=True).returncode != 0
     # Everything a regular installation had is still there, and its containers were never stopped.
     assert set(regular) <= set(_project_things("kaal")), "a regular installation on this machine is left alone"
+
+
+def keep_all(seeded):
+    return demo.keep_reviewer(seeded.connect, seeded.run, REVIEWER_PASSWORD, seeded.made["vaults"], notice=seeded.made["notice"])
+
+
+def _titles(person):
+    return [note["title"] for note in person.call("GET", "/v1/library/notes")]
+
+
+def test_the_notice_is_put_back_however_a_visitor_got_rid_of_it(seeded):
+    assert keep_all(seeded) == []                                      # and it learns how the notice stands
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    notice = seeded.made["notice"]
+    time.sleep(1.1)                                                     # Kaal's clock records changes to the second
+    jane.call("PUT", f"/v1/library/notes/{notice['id']}", {"title": "Not a demo at all", "body": "made-up words with a link", "tags": []})
+    assert keep_all(seeded) == ["notice"]
+    shown = jane.call("GET", f"/v1/library/notes/{notice['id']}")["note"]
+    assert shown["title"] == demo.NOTICE_TITLE and "removed every night" in shown["body"]
+    assert keep_all(seeded) == []
+
+    time.sleep(1.1)
+    jane.call("POST", f"/v1/library/notes/{notice['id']}/trash")
+    assert demo.NOTICE_TITLE not in _titles(jane) and keep_all(seeded) == ["notice"]
+    assert _titles(jane).count(demo.NOTICE_TITLE) == 1 and keep_all(seeded) == []
+
+    time.sleep(1.1)
+    jane.call("POST", f"/v1/library/notes/{notice['id']}/trash")
+    jane.call("DELETE", f"/v1/library/notes/{notice['id']}?confirm=true")
+    gone = notice["id"]
+    assert keep_all(seeded) == ["notice"]
+    assert notice["id"] != gone and _titles(jane).count(demo.NOTICE_TITLE) == 1 and keep_all(seeded) == []
+
+
+def test_a_vault_a_visitor_added_is_removed(seeded):
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    jane.call("POST", "/v1/account/vaults", {"name": "Made-up REAL medical records"})
+    assert len(jane.call("GET", "/v1/account")["vaults"]) == 3
+    assert "extra" in keep_all(seeded)
+    again = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    account = again.call("GET", "/v1/account")
+    assert [vault["name"] for vault in account["vaults"]] == [demo.VAULT_NAME, demo.HOUSEHOLD] and account["vault"]["name"] == demo.VAULT_NAME
+    assert "extra" not in keep_all(seeded)
+
+
+def test_what_app_review_is_told_to_open_and_search_for_is_in_the_demo(seeded):
+    told = (ROOT / "ios" / "AppStore" / "review-notes.md").read_text()
+    section = told[told.index("## What to try"):]
+    jane = seeded.signed_in("reviewer", REVIEWER_PASSWORD)
+    titles = set(_titles(jane))
+    named = re.findall(r'"(Made-up [^"]+)"', section)
+    assert named and all(title in titles for title in named), named
+    for word in re.findall(r"`([a-z]+)`", section[section.index("**Notes:**"):section.index("**Settings:**")]):
+        assert jane.call("POST", "/v1/library/search", {"query": word}), word
+
+
+def test_run_sh_shows_passwords_a_failed_first_run_made_but_never_showed(demo_folder):
+    failed, _calls = demo_folder.run("--local", DOCKER_FAILS="up")
+    stored = read_settings(demo_folder.settings())
+    assert failed.returncode != 0 and stored["KAAL_DEMO_SHOWN"] == "0"
+    assert stored["KAAL_DEMO_PASSWORD"] not in failed.stdout and stored["KAAL_DEMO_ADMIN_PASSWORD"] not in failed.stdout
+    done, _calls = demo_folder.run()
+    assert done.returncode == 0, done.stderr
+    assert stored["KAAL_DEMO_PASSWORD"] in done.stdout and stored["KAAL_DEMO_ADMIN_PASSWORD"] in done.stdout
+    assert read_settings(demo_folder.settings())["KAAL_DEMO_SHOWN"] == "1"
+    again, _calls = demo_folder.run()
+    assert stored["KAAL_DEMO_PASSWORD"] not in again.stdout and stored["KAAL_DEMO_ADMIN_PASSWORD"] not in again.stdout
+
+
+def test_run_sh_help_works_from_any_folder(demo_folder, tmp_path):
+    done = subprocess.run(["sh", str(demo_folder.folder / "run.sh"), "--help"], cwd=tmp_path, text=True, capture_output=True, timeout=30,
+                          env={"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+    assert done.returncode == 0 and "deploy/demo/run.sh --local" in done.stdout and done.stderr == ""
+
+
+def test_run_sh_remove_says_so_when_docker_refuses(demo_folder):
+    assert demo_folder.run("--local")[0].returncode == 0
+    refused, _calls = demo_folder.run("remove", DOCKER_FAILS="down")
+    assert refused.returncode != 0 and "could not remove" in refused.stderr and "Removed" not in refused.stdout
+    done, _calls = demo_folder.run("remove")
+    assert done.returncode == 0 and "Removed the demo's containers, certificate and image." in done.stdout
+
+
+def test_run_sh_refuses_a_project_name_docker_already_has_and_a_version_it_cannot_read(demo_folder):
+    taken, calls = demo_folder.run("--local", KAAL_DEMO_PROJECT="databases", COMPOSE_LS="databases other")
+    assert taken.returncode != 0 and "already has a project" in taken.stderr and not any(" up -d" in call for call in calls)
+    assert not demo_folder.settings("databases").exists()
+    odd, calls = demo_folder.run("--local", COMPOSE_VERSION="garbage")
+    assert odd.returncode != 0 and "could not tell which Docker Compose" in odd.stderr and "integer" not in odd.stderr
+    fine, _calls = demo_folder.run("--local", COMPOSE_VERSION="v2.29.1")
+    assert fine.returncode == 0, fine.stderr
+
+
+def test_run_sh_makes_the_container_again_when_the_demos_script_changes(demo_folder):
+    assert demo_folder.run("--local")[0].returncode == 0
+    before = read_settings(demo_folder.settings())["KAAL_DEMO_CODE"]
+    with open(demo_folder.folder / "demo.py", "a") as script:
+        script.write("\n# made-up change\n")
+    assert demo_folder.run()[0].returncode == 0
+    assert read_settings(demo_folder.settings())["KAAL_DEMO_CODE"] != before
+    assert "KAAL_DEMO_CODE: ${KAAL_DEMO_CODE:-}" in (demo_folder.folder / "compose.yaml").read_text()

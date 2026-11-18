@@ -105,8 +105,8 @@ page, writing, editing and trashing a note, a note's Markdown and files,
 checking a receipt and marking it reimbursed, totals, every Settings page,
 adding a receipt and a note from a photo, dictation, and signing out. It needs
 a Kaal that holds only made-up data (never a real vault), with a person who
-has a password, at least one receipt waiting for review with an amount of
-$45.00, and a note called "Made-up house notes":
+has a password and the notes and receipts `bin/demo-data.py` puts in (the
+tests open "Boiler and radiators" and check a receipt of $64.50):
 
 ```bash
 TEST_RUNNER_KAAL_UI_SERVER=http://localhost:8765 \

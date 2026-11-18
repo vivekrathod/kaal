@@ -134,13 +134,16 @@ can. None of it reaches past the demo, and none of it lasts:
 | Add, change, trash or delete notes and receipts, add files, change the family names | The nightly reset |
 | Change the reviewer's password, with the password or with a recovery code | Put back within a minute, and everyone is signed out, whoever changed it included; the recovery codes are replaced, and every token made with the old password stops working (the one the Tokens page shows is made again) |
 | Rename a vault, which removes the notice in its name | The name is put back within a minute |
+| Rewrite, trash or delete the "Read me first" note that says this is a demo | The note is put back within a minute, as it was |
+| Add a vault, under any name | It is removed within a minute |
+| Take John out of a vault, or revoke the token the Tokens page shows | The nightly reset |
 | Delete the reviewer's account or one of its vaults, or hand a vault to John | The whole reset happens within a minute instead of at night |
 | Fill the demo's storage with files | Kaal refuses a file it has too little room for, and the whole reset happens within a minute of less than 52 MB being free |
-| Make tokens (at most 50, and 20 in an hour) | They work until the next reset, or until a changed password is put back, and reach only what the reviewer can see |
+| Make tokens (at most 50 at a time) | They work until the next reset, or until a changed password is put back, and reach only what the reviewer can see |
 | See which browsers and apps are signed in as `reviewer` (the kind of device and when, nothing more) and sign them out | Signing in again; the nightly reset clears the list |
 | Download a copy of a vault | Nothing to put right: it holds only what is in the demo |
 | Type wrong passwords on the sign-in page | Kaal slows guessing per address, and whoever has not typed it wrong from where they are always has their try, so one visitor's wrong tries do not hold up another's |
-| Type wrong passwords where Kaal asks a signed-in person for theirs again (making a token, new recovery codes, changing the password, deleting) | After five, those few things make everyone wait, a quarter of an hour at most; signing in and everything else carry on. The nightly reset clears it |
+| Type wrong passwords where Kaal asks a signed-in person for theirs again (making a token, new recovery codes, changing the password, deleting) | From the sixth wrong try, those few things make everyone wait: a minute at first, up to a quarter of an hour, and each further wrong try starts the wait again. Signing in and everything else carry on. The nightly reset clears it |
 
 A visitor cannot open the administrator's pages, make an account, read
 anything outside the demo's container, or touch another Kaal on the machine.
@@ -151,8 +154,11 @@ who keeps at it can spoil the demo for others: by trashing the notes just
 before a reviewer looks, by deleting the account again and again so that the
 demo keeps starting over, by signing in so often that earlier sign-ins are
 ended (an account keeps its newest 50), or by sending requests so fast that
-the account's allowance for the minute is used up and others are told to wait
-(the password may be given again six times a minute, by everyone together).
+the account's allowance for the minute is used up and others are told to wait.
+What a regular Kaal counts for each person (tokens an hour, files on their way
+out, giving the password again) the demo does not hold against the one account
+everyone shares (`KAAL_SHARED_ACCOUNTS`), so one visitor cannot use those up
+for the rest.
 If that happens during a review, give the reviewer account a new password and
 tell App Review:
 
@@ -171,6 +177,10 @@ deploy/demo/run.sh stop        # stop it; start brings it back with the made-up 
 deploy/demo/run.sh start
 deploy/demo/run.sh remove      # remove its containers, certificate and image
 ```
+
+To update the demo: `git pull`, then `deploy/demo/run.sh` again. It builds
+the new Kaal and makes the container again when the demo's own script has
+changed.
 
 Running `deploy/demo/run.sh` again, with or without options, keeps the
 address, port and passwords chosen before and applies what is new.
@@ -235,10 +245,6 @@ drawn by `demo.py` on the spot. A reset stops Kaal, empties the memory it
 used, and does it all again. Between resets `demo.py` looks at the reviewer's
 account once a minute, as described above.
 
-The same demo serves the iPhone app's screen-by-screen tests
-(`ios/README.md`): `deploy/demo/run.sh --local`, then
-`TEST_RUNNER_KAAL_UI_SERVER=http://localhost:8770` with sign-in name
-`reviewer` and its password.
 
 The tests for all of this are in `tests/test_demo.py`. The last one builds and
 runs the real demo with Docker under the project name `kaal-test-demo`, and

@@ -567,7 +567,11 @@ def seed(connect: Callable[[], Kaal], run: Callable[[list[str]], str], *, review
     run(["account", "add", SHARER, "--name", "John Madeup", "--no-vault"])
 
     jane = connect()
-    signed_in = jane.call("POST", "/v1/setup", {"code": made["setup_path"].rsplit("/", 1)[-1], "password": reviewer_password, "name": REVIEWER_NAME})
+    # The password everyone knows is given to the account last. Until then it has one nobody
+    # knows, so no visitor can sign in to a demo that is still being filled (and, by deleting
+    # the vault under it, keep it from ever being ready).
+    filling = secrets.token_urlsafe(24)
+    signed_in = jane.call("POST", "/v1/setup", {"code": made["setup_path"].rsplit("/", 1)[-1], "password": filling, "name": REVIEWER_NAME})
     main = signed_in["vault"]["id"]
     jane.call("POST", "/v1/medical/people", {"add": FAMILY})
 
@@ -606,13 +610,17 @@ def seed(connect: Callable[[], Kaal], run: Callable[[list[str]], str], *, review
     for note in made_notes:
         _add_note(jane, note)
         pause()
-    jane.call("POST", "/v1/account/tokens", {**TOKEN, "vault": main, "password": reviewer_password})
+    jane.call("POST", "/v1/account/tokens", {**TOKEN, "vault": main, "password": filling})
     # The notice is written a moment after everything else, so it is always at the top of the list.
     pause()
-    _add_note(jane, notice(reset_at))
+    notice_id = _add_note(jane, notice(reset_at))
+    jane.call("POST", "/v1/account/password", {"current": filling, "new": reviewer_password})
     jane.call("DELETE", "/v1/session")
     return {"notes": len(made_notes) + 1, "household_notes": len(household_notes(today)), "receipts": len(made_receipts),
-            "vaults": {main: VAULT_NAME, household: HOUSEHOLD}}
+            "vaults": {main: VAULT_NAME, household: HOUSEHOLD},
+            # What keep_reviewer puts back if a visitor rewrites or removes it: "seen" is when Kaal last
+            # recorded a change to it, learnt at the first check.
+            "notice": {"id": notice_id, "note": notice(reset_at), "seen": None}}
 
 
 # --- keeping the reviewer's account as App Review was told it is
@@ -622,10 +630,12 @@ def seed(connect: Callable[[], Kaal], run: Callable[[list[str]], str], *, review
 # may keep the next visitor out until the night's reset.
 
 
-def what_is_wrong(password: str, vaults: dict[str, str]) -> list[str]:
+def what_is_wrong(password: str, vaults: dict[str, str], notice: dict | None = None) -> list[str]:
     """What a visitor has done to the reviewer's account that would keep others out or
     mislead them: "gone" (the account or one of its vaults was deleted or given away),
-    "password" (changed), "names" (a vault renamed, so the notice in its name is lost).
+    "password" (changed), "names" (a vault renamed, so the notice in its name is lost),
+    "notice" (the note that says this is a demo was rewritten, moved to the Trash or deleted),
+    "extra" (a vault was added, under whatever name its maker liked).
 
     Asks Kaal's own account store, so it signs nobody in and leaves the count of wrong passwords alone.
     """
@@ -644,14 +654,27 @@ def what_is_wrong(password: str, vaults: dict[str, str]) -> list[str]:
         found.append("password")
     if any(owned[vault] != name for vault, name in vaults.items()):
         found.append("names")
+    if any(vault not in vaults for vault in owned):
+        found.append("extra")
+    if notice is not None:
+        from kaal import core
+
+        main = next(vault for vault, name in vaults.items() if name == VAULT_NAME)
+        with core.use_vault(core.Vault(store.folder_of(store.vault(main)))):
+            kept = next((note for note in core.load_index().get("notes", []) if note.get("id") == notice["id"]), None)
+        if kept is not None and notice.get("seen") is None and not kept.get("trashed_at") and kept.get("title") == NOTICE_TITLE:
+            notice["seen"] = kept.get("updated")
+        if kept is None or kept.get("trashed_at") or kept.get("title") != NOTICE_TITLE or kept.get("updated") != notice.get("seen"):
+            found.append("notice")
     return found
 
 
 def keep_reviewer(connect: Callable[[], Kaal], run: Callable[[list[str]], str], password: str, vaults: dict[str, str],
-                  wrong: Callable[[str, dict[str, str]], list[str]] = what_is_wrong) -> list[str]:
-    """Put the reviewer's password and vault names back if a visitor changed them, and say what
-    was found. ["gone"] is for the caller: only starting again brings a deleted account or vault back."""
-    found = wrong(password, vaults)
+                  wrong: Callable[..., list[str]] = what_is_wrong, notice: dict | None = None) -> list[str]:
+    """Put the reviewer's password, vault names and the demo's notice back if a visitor changed
+    them, remove vaults a visitor added, and say what was found. ["gone"] is for the caller: only
+    starting again brings a deleted account or vault back."""
+    found = wrong(password, vaults, notice) if notice is not None else wrong(password, vaults)
     if not found or "gone" in found:
         return found
     person = connect()
@@ -672,6 +695,25 @@ def keep_reviewer(connect: Callable[[], Kaal], run: Callable[[list[str]], str], 
         for vault, name in vaults.items():
             person.call("POST", "/v1/session/vault", {"vault": vault})
             person.call("POST", "/v1/vault/name", {"name": name})
+    main = next(vault for vault, name in vaults.items() if name == VAULT_NAME)
+    if "extra" in found:
+        for vault in person.call("GET", "/v1/account")["vaults"]:
+            if vault["role"] == "owner" and vault["id"] not in vaults:
+                person.call("POST", "/v1/session/vault", {"vault": vault["id"]})
+                person.call("DELETE", "/v1/vault", {"password": password})
+    if "notice" in found and notice is not None:
+        person.call("POST", "/v1/session/vault", {"vault": main})
+        wanted = notice["note"]
+        try:
+            person.call("POST", f"/v1/library/notes/{notice['id']}/restore")
+        except DemoError:
+            pass   # it was not in the Trash
+        try:
+            person.call("PUT", f"/v1/library/notes/{notice['id']}", {"title": wanted.title, "body": wanted.body, "tags": wanted.tags})
+        except DemoError:
+            notice["id"] = _add_note(person, wanted)   # it had been deleted for good
+        notice["seen"] = None   # learnt again at the next check
+    person.call("POST", "/v1/session/vault", {"vault": main})
     person.call("DELETE", "/v1/session")
     return found
 
@@ -803,7 +845,7 @@ def serve() -> int:
                         break
                     if time.monotonic() >= check_at:
                         try:
-                            found = keep_reviewer(connect, run, reviewer_password, vaults)
+                            found = keep_reviewer(connect, run, reviewer_password, vaults, notice=made["notice"])
                         except Exception as error:   # a check that fails is tried again; it is no reason to start over
                             found = []
                             log.error("could not check the reviewer's account (%s: %s)", type(error).__name__, error)
@@ -817,6 +859,10 @@ def serve() -> int:
                             log.warning("the reviewer's password had been changed; it is back to the one App Review was given")
                         if "names" in found:
                             log.warning("a vault had been renamed; its name is back")
+                        if "notice" in found:
+                            log.warning("the note that says this is a demo had been changed or removed; it is back")
+                        if "extra" in found:
+                            log.warning("a vault had been added; it is removed")
                         check_at = time.monotonic() + CHECK_SECONDS
                     wake.wait(max(1.0, min(30.0, (when - datetime.now(timezone.utc)).total_seconds(), check_at - time.monotonic())))
                     wake.clear()
@@ -824,6 +870,8 @@ def serve() -> int:
                     log.info("putting the made-up data back, as asked")
             except Exception as error:   # Stopping is not an Exception, so it passes on
                 log.error("the made-up data could not be put in (%s: %s). Trying again in a minute.", type(error).__name__, error)
+                # Not left reachable, half filled, while waiting.
+                _stop(kaal_server)
                 wake.wait(60)
                 wake.clear()
             finally:

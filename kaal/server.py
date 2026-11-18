@@ -137,6 +137,10 @@ class Settings:
     download_memory_bytes: int = 1024 * MiB
     # Nothing new is accepted, and no export is written, when the disk has less than this free (0: no floor).
     free_space_bytes: int = 1024 * MiB
+    # One account here is used by many people at once (Kaal's demo, whose password is published):
+    # what is counted for each person (tokens an hour, proving a password a minute, files and
+    # pictures on their way out) is then not held against that one account (KAAL_SHARED_ACCOUNTS=1).
+    shared_accounts: bool = False
     # Tell browsers to use https only for this host name, for a year. It covers every port of the
     # name, so it is for a name that serves nothing over plain http (KAAL_HSTS=1).
     hsts: bool = False
@@ -169,6 +173,7 @@ class Settings:
             download_memory_bytes=max(1, int(env.get("KAAL_DOWNLOAD_MEMORY_MB") or 1024)) * MiB,
             free_space_bytes=max(0, int(env.get("KAAL_FREE_SPACE_MB") or 1024)) * MiB,
             hsts=(env.get("KAAL_HSTS") or "0").strip() == "1",
+            shared_accounts=(env.get("KAAL_SHARED_ACCOUNTS") or "0").strip() == "1",
         )
 
 
@@ -394,9 +399,11 @@ class Downloads:
 
     PER_CALLER = 6
 
-    def __init__(self, limit_bytes: int, per_caller: int = PER_CALLER) -> None:
+    def __init__(self, limit_bytes: int, per_caller: int = PER_CALLER, share: int = 4) -> None:
         self.limit = limit_bytes
         self.per_caller = per_caller
+        # One caller holds at most this fraction of the room (4: a quarter; 1: all of it).
+        self.share = max(1, share)
         self._held = 0
         self._by_caller: dict[str, int] = {}
         self._lock = threading.Lock()
@@ -410,7 +417,7 @@ class Downloads:
             # One file is always allowed, however large; more only while they fit, and one
             # caller holds at most a quarter of the room, so they cannot shut everyone else out.
             mine = self._bytes_by_caller.get(caller, 0)
-            if (self._held and self._held + size > self.limit) or (mine and mine + size > self.limit // 4):
+            if (self._held and self._held + size > self.limit) or (mine and mine + size > self.limit // self.share):
                 return None
             self._held += size
             self._by_caller[caller] = self._by_caller.get(caller, 0) + 1
@@ -1743,7 +1750,8 @@ def create_app(settings: Settings) -> FastAPI:
     app.state.kaal.strangers_shared = RateLimiter(settings.strangers_per_minute * 20)
     # Proving one's own password again (for a token, new codes, a deletion) costs the server as
     # much as a sign-in; nobody needs to do it more than a few times a minute.
-    app.state.kaal.proofs = RateLimiter(6)
+    crowd = settings.shared_accounts          # one account, many people: see Settings.shared_accounts
+    app.state.kaal.proofs = RateLimiter(600 if crowd else 6)
     # New accounts from one address in an hour, before the allowance everyone shares is touched.
     app.state.kaal.signups_from = Hourly(3)
     app.state.kaal.usage = Usage()
@@ -1752,15 +1760,15 @@ def create_app(settings: Settings) -> FastAPI:
     if store.get(HOST_COOKIE_SINCE) is None:
         # From now on a browser's sign-in is accepted only in the cookie tied to this host.
         store.put(HOST_COOKIE_SINCE, accounts._now())
-    app.state.kaal.downloads = Downloads(settings.download_memory_bytes)
+    app.state.kaal.downloads = Downloads(settings.download_memory_bytes, per_caller=10_000 if crowd else Downloads.PER_CALLER, share=1 if crowd else 4)
     # A whole vault written out for download sits on disk until its client has it: one at a time each.
-    app.state.kaal.exports = Downloads(1 << 62, per_caller=1)
+    app.state.kaal.exports = Downloads(1 << 62, per_caller=20 if crowd else 1)
     # Pictures of files being drawn for one person at a time.
-    app.state.kaal.previews = Downloads(1 << 62, per_caller=3)
+    app.state.kaal.previews = Downloads(1 << 62, per_caller=10_000 if crowd else 3)
     # Adding someone to a vault says whether that sign-in name exists; nobody needs to try many a minute.
     app.state.kaal.invites = RateLimiter(10)
     # Tokens, and apps signed in, per person: each leaves a record behind, and nobody makes many.
-    app.state.kaal.token_making = Hourly(TOKENS_PER_HOUR)
+    app.state.kaal.token_making = Hourly(10_000 if crowd else TOKENS_PER_HOUR)
     passwords.set_concurrency(settings.password_checks)
 
     def holds_credential(headers: dict[bytes, bytes]) -> str:

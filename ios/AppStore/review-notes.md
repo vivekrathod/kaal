@@ -133,9 +133,9 @@ next reviewer signs in with. (If it is deleted, we make it again.)
   right". Reviewed receipts can be marked reimbursed.
 - **Totals:** what was paid per person and per year, and what is still to
   claim.
-- **Notes:** search for `boiler` or `October`; the search also finds words in
-  the PDFs attached to notes. Open "Paint colours for the hall" to see a note
-  with a picture in it.
+- **Notes:** search for `boiler` or `radiators`; the search also finds words
+  in the PDFs attached to notes. Open "Made-up garden plan" to see a note with
+  a picture in it, and "Made-up house notes" for one with a PDF.
 - **Settings:** the account, the vault and who shares it, signed-in browsers
   and apps, "Delete my account" and "Sign out of this app".
 - **Without a connection:** turn on Airplane Mode and write a note. It waits
