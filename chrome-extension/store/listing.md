@@ -221,7 +221,7 @@ owner) before submitting.
 
 ```text
 Kaal for Chrome needs a Kaal server. Use our demo server, which holds only made-up data.
-1. Open the extension's Settings (the button in its popup). Type the address DEMO-ADDRESS and press "Connect with my Kaal sign-in". The demo server's sign-in page opens in a window: sign in with the name appreview and the password DEMO-PASSWORD, then press Allow. (If the window shows Allow at once because this browser was signed in to the demo server earlier, it asks for the same password before Allow.) The settings page says "Connected as …". (The identity permission is used only for this window.)
+1. Open the extension's Settings (the button in its popup). Type the address DEMO-ADDRESS and press "Connect with my Kaal sign-in". The demo server's sign-in page opens in a window: sign in with the name reviewer and the password DEMO-PASSWORD, then press Allow. (If the window shows Allow at once because this browser was signed in to the demo server earlier, it asks for the same password before Allow.) The settings page says "Connected as …". (The identity permission is used only for this window.)
 2. Open any web page and click the Kaal icon, then "Save to Kaal". Chrome shows its debugging bar for a moment while the page is printed to a PDF. The popup says "Saved to Kaal." with a link to the note.
 3. To try a receipt: open a page with a receipt or invoice on it (any page will do), click the Kaal icon, then "Save as a medical receipt instead". The side panel opens with what Kaal read; press "Looks right" or "Save for later".
 4. To see everything saved: open DEMO-ADDRESS in a tab and, if it asks, sign in with the same name and password.
