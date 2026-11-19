@@ -28,11 +28,20 @@ Notes, totals, the Trash and settings are in Kaal's web app.
 
 ## Setting it up
 
-1. Open `chrome://extensions`, turn on **Developer mode**, choose **Load
-   unpacked** and pick this `chrome-extension` folder. After an update, open
-   the Kaal popup and press **Finish updating** (or press the reload arrow on
-   the extension's card). Restarting Chrome is not enough: it reads the new
-   manifest but keeps running the old background worker.
+1. Install **Kaal** from the
+   [Chrome Web Store](https://chromewebstore.google.com/detail/kaal/jimjfomjjedakpipjfpagdmkecjiehll).
+   Chrome keeps it up to date. A Kaal server knows that copy from 1.0.0-rc2 on;
+   an older one says "This Kaal does not know that extension" until it is
+   updated.
+
+   To run this folder instead (to try a change to the extension), open
+   `chrome://extensions`, turn on **Developer mode**, choose **Load
+   unpacked** and pick this `chrome-extension` folder. It has an id of its
+   own, which Kaal servers also know; turn off the store's copy while you use
+   it. After an update, open the Kaal popup and press **Finish updating** (or
+   press the reload arrow on the extension's card). Restarting Chrome is not
+   enough: it reads the new manifest but keeps running the old background
+   worker.
 2. Open the extension's **Settings** (the button in the popup), enter Kaal's
    address (for example `https://kaal.example.ts.net`) and press **Connect
    with my Kaal sign-in**. Kaal's own page opens in a window of its own: sign

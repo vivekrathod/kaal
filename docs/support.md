@@ -103,7 +103,8 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.25.0 or newer.
   their ids in `KAAL_EXTENSION_IDS` (the id is on the extension's card at
   `chrome://extensions`).
 - **"This Kaal does not know that extension"** when connecting: the same
-  cause, and the same cure.
+  cause, and the same cure. A server older than 1.0.0-rc2 does not know the
+  copy from the Chrome Web Store: update it.
 - **"Connecting was cancelled, or Kaal's page could not be opened":** the
   sign-in window was closed before Allow was pressed, or the address is
   wrong. The button needs a Kaal server version 0.25.0 or newer; with an

@@ -8,7 +8,9 @@ at rest.
 - **Server:** `kaal-server`, which is the only process that opens the vault or reads the key.
 - **Web app:** served by the server at `/`, for a laptop or a phone.
 - **Command line:** `kaal`, on the server itself or pointed at it from another machine.
-- **Chrome extension:** saves the page in front of you ([`chrome-extension/`](chrome-extension/README.md)).
+- **Chrome extension:** saves the page in front of you; install it from the
+  [Chrome Web Store](https://chromewebstore.google.com/detail/kaal/jimjfomjjedakpipjfpagdmkecjiehll)
+  ([`chrome-extension/`](chrome-extension/README.md)).
 - **Encryption:** AES-256-GCM, with one key kept in a file outside the vault.
 
 ## Install

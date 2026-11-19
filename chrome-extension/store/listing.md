@@ -4,6 +4,12 @@ What to enter in the Chrome Web Store Developer Dashboard for Kaal for Chrome.
 Field limits are in the headings; `tests/test_store_material.py` checks that
 the text fits them and that the pictures here are the sizes the store wants.
 
+Published: version 1.2.0 was approved in November 2026 and is listed at
+<https://chromewebstore.google.com/detail/kaal/jimjfomjjedakpipjfpagdmkecjiehll>.
+For a new version, raise `version` in the manifest, build the zip, upload it on
+the item's Package tab and submit again; the same test instructions and demo
+server serve the new review.
+
 ## The package
 
 ```bash

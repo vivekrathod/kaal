@@ -7,8 +7,9 @@ everything in it is encrypted there. You reach it from:
 - **a web app**, on a laptop or a phone;
 - **Kaal for iPhone**, to write or speak a note, scan a receipt, and check
   receipts and totals, even without a connection for a while;
-- **Kaal for Chrome**, to save the page in front of you, or a medical receipt
-  and check it beside the page it came from;
+- **[Kaal for Chrome](https://chromewebstore.google.com/detail/kaal/jimjfomjjedakpipjfpagdmkecjiehll)**,
+  to save the page in front of you, or a medical receipt and check it beside
+  the page it came from;
 - **a command line**, on the server or another machine.
 
 Nothing you keep in Kaal goes to the people who make it.
