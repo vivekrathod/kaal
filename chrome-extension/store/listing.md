@@ -215,9 +215,12 @@ https://OWNER.github.io/REPO/privacy.html
 The dashboard has a field for these. They need the same demo server as the
 iPhone app's review (see `ios/AppStore/review-notes.md`), running Kaal 1.0.0-rc2
 or later, which knows the store's copy; an older one answers "This Kaal does
-not know that extension". Try the steps
-yourself with the store's own copy (the dashboard offers the draft to its
-owner) before submitting.
+not know that extension". Try the steps yourself before submitting, with a
+copy that has the store's extension id: a draft cannot be installed from the
+store, so unzip the uploaded package, put the store item's public key (the
+dashboard's Package tab, "View public key", the text between the BEGIN and
+END lines) in its manifest as `"key"`, and load that folder with "Load
+unpacked" on `chrome://extensions`. Chrome then gives it the store's id.
 
 ```text
 Kaal for Chrome needs a Kaal server. Use our demo server, which holds only made-up data.
