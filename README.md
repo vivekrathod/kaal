@@ -779,7 +779,8 @@ Only the owner can do the rest:
    reporting (Security tab), which the help page points to.
 2. Run the demo on a domain (`deploy/demo/run.sh --domain …`, which makes the
    `reviewer` account and fills it with made-up data), and keep it running
-   ([`review-notes.md`](ios/AppStore/review-notes.md)).
+   ([`review-notes.md`](ios/AppStore/review-notes.md)). A free cloud machine
+   with an sslip.io name will do ([`deploy/demo/README.md`](deploy/demo/README.md)).
 3. For the App Store: join the Apple Developer Program, register the bundle
    identifier under that team, create the app in App Store Connect (which is
    when the name is really tested), sign and upload a build from Xcode, fill
@@ -792,7 +793,9 @@ Only the owner can do the rest:
 4. For the Chrome Web Store: register as a developer (a one-time fee), upload
    the zip, fill in the listing and privacy tabs from
    [`chrome-extension/store/listing.md`](chrome-extension/store/listing.md),
-   and submit. The server knows the store's copy by its id from 1.0.0-rc2 on;
+   put the demo's address and the reviewer's password in its test
+   instructions, try them with the store's id first (loaded unpacked with the
+   item's public key, as that file says), and submit. The server knows the store's copy by its id from 1.0.0-rc2 on;
    an older server's operator allows it by hand (`KAAL_EXTENSION_IDS`).
 
 ## Licence

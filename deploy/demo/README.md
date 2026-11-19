@@ -49,7 +49,9 @@ night the demo looks the same, only a day later.
 You need a Linux machine with [Docker](https://docs.docker.com/engine/install/)
 and its Compose plugin (2.24 or newer), about 1 GB of memory and 2 GB of disk,
 and a domain name whose DNS points at the machine, with ports 80 and 443
-reachable from the internet. A small virtual server is plenty.
+reachable from the internet. A small virtual server is plenty; a free one with
+1 GB of memory does, with swap and smaller limits (see "On a free cloud
+machine" below), and an sslip.io name stands in for a domain.
 
 ```bash
 git clone REPOSITORY-ADDRESS kaal
@@ -84,6 +86,81 @@ regular one uses `--domain`, run the demo `--behind` and point that proxy at
 `127.0.0.1:8770`. `KAAL_DEMO_PROJECT=kaal-demo-2` runs a second demo, with
 its own settings file.
 
+### Without a domain of your own
+
+A name from [sslip.io](https://sslip.io) points at an IP address with no
+setting up: `203-0-113-7.sslip.io` is `203.0.113.7`. Caddy gets a certificate
+for it like any other name, so the demo is on HTTPS at once:
+
+```bash
+deploy/demo/run.sh --domain 203-0-113-7.sslip.io
+```
+
+The address changes if the machine's IP does, and then the reviewers'
+instructions must too.
+
+### On a free cloud machine (Oracle Cloud, as an example)
+
+Oracle Cloud's Always Free tier has machines that run the demo at no cost.
+The steps below are what it took there; another provider's free or smallest
+machine works the same way, with its own names for these things.
+
+1. **Make the machine.** Compute → Instances → Create instance. A free
+   machine can be made only in the account's home region. The Ampere (Arm)
+   shape, `VM.Standard.A1.Flex`, has plenty of room, but it is often out of
+   capacity ("Out of capacity for shape … in availability domain"); try each
+   availability domain, or try again later. Otherwise use
+   `VM.Standard.E2.1.Micro` (1 GB of memory), which some availability domains
+   offer and others do not, and which takes Ubuntu 22.04 but not 24.04: choose
+   the availability domain first, then "Canonical Ubuntu 22.04 Minimal", then
+   that shape (Change shape → Specialty and previous generation). Let the form
+   create a new virtual cloud network with a public subnet, and paste an SSH
+   public key of your own.
+2. **Give it a public address.** If the form could not, open the instance →
+   Networking → its VNIC → IP administration → the private address's ⋯ menu →
+   Edit → "Ephemeral public IP".
+3. **Let the web in.** In the network's default security list (Networking →
+   Virtual cloud networks → the network → Security), add an ingress rule from
+   `0.0.0.0/0` for TCP destination ports `80,443`. Oracle's Ubuntu images
+   also refuse everything but SSH in their own firewall, so on the machine:
+
+   ```bash
+   sudo iptables -I INPUT 5 -p tcp -m state --state NEW --dport 80 -j ACCEPT
+   sudo iptables -I INPUT 5 -p tcp -m state --state NEW --dport 443 -j ACCEPT
+   sudo sh -c 'iptables-save > /etc/iptables/rules.v4'
+   ```
+
+4. **On a 1 GB machine, add swap**, since reading a large photo needs more
+   than the machine has to spare:
+
+   ```bash
+   sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+   sudo mkswap /swapfile && sudo swapon /swapfile
+   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+   ```
+
+5. **Install Docker** from [Docker's own packages](https://docs.docker.com/engine/install/ubuntu/)
+   (`docker-ce` and `docker-compose-plugin`), clone Kaal, and start the demo
+   with the published image, which saves building it on a small machine:
+
+   ```bash
+   git clone REPOSITORY-ADDRESS kaal && cd kaal
+   deploy/demo/run.sh --domain 203-0-113-7.sslip.io --image ghcr.io/OWNER/kaal:VERSION
+   ```
+
+6. **On a 1 GB machine, shrink the demo** to fit beside the system and Caddy:
+   add these lines to `deploy/demo/kaal-demo.env` and run
+   `deploy/demo/run.sh` again.
+
+   ```text
+   KAAL_DEMO_MEMORY=700m
+   KAAL_DEMO_STORAGE=128m
+   ```
+
+Then check it from another machine: open the address, sign in as `reviewer`,
+and go through what the reviewers will do (see the store notes below). When
+the reviews are over, terminate the instance; its public address goes with it.
+
 ## What to give App Review
 
 In App Store Connect, under the version's **App Review Information**, tick
@@ -105,6 +182,19 @@ and in **Notes**, something like:
 Keep the demo running until the review is over. `deploy/demo/run.sh status`
 shows whether it is up, and the web app at the same address shows the same
 account.
+
+## What to give the Chrome Web Store
+
+The developer dashboard's Test instructions field takes the text in
+[`chrome-extension/store/listing.md`](../../chrome-extension/store/listing.md)
+("Test instructions"), with the demo's address and the reviewer's password
+put in. The sign-in name is `reviewer` there too. The address goes into the
+extension's own Settings page, not a browser tab: opening it in a tab shows
+the web app's sign-in page, which is the last step of those instructions.
+
+Try them yourself first with a copy that has the store's extension id (the
+same section says how: the uploaded package, loaded unpacked with the store
+item's public key). The demo lets that id in from Kaal 1.0.0-rc2 on.
 
 ## Resetting
 

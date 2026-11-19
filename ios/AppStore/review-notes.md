@@ -11,7 +11,8 @@ The app does nothing until it is signed in to a Kaal server, so App Review
 needs one it can reach from the internet, over HTTPS, holding nothing real.
 
 1. On a machine with Docker and a domain name pointing at it (for example
-   `demo.example.org`; any small server will do), start the demo:
+   `demo.example.org`; any small server will do, a free cloud machine with an
+   sslip.io name included, as the demo's README describes), start the demo:
 
    ```bash
    KAAL_DEMO_PASSWORD=CHOOSE-ONE deploy/demo/run.sh --domain DEMO-ADDRESS

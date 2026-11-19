@@ -222,6 +222,11 @@ dashboard's Package tab, "View public key", the text between the BEGIN and
 END lines) in its manifest as `"key"`, and load that folder with "Load
 unpacked" on `chrome://extensions`. Chrome then gives it the store's id.
 
+In the text, DEMO-ADDRESS is the demo's https address and DEMO-PASSWORD the
+reviewer's password: the `KAAL_DEMO_PASSWORD` line of
+`deploy/demo/kaal-demo.env` on the demo's machine (not
+`KAAL_DEMO_ADMIN_PASSWORD`, which is the administrator's).
+
 ```text
 Kaal for Chrome needs a Kaal server. Use our demo server, which holds only made-up data.
 1. Open the extension's Settings (the button in its popup). Type the address DEMO-ADDRESS and press "Connect with my Kaal sign-in". The demo server's sign-in page opens in a window: sign in with the name reviewer and the password DEMO-PASSWORD, then press Allow. (If the window shows Allow at once because this browser was signed in to the demo server earlier, it asks for the same password before Allow.) The settings page says "Connected as …". (The identity permission is used only for this window.)
