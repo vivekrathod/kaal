@@ -36,7 +36,7 @@ async function connection() {
 
 async function call(method, path, { json, form } = {}) {
   const { server, token } = await connection();
-  if (!server || !token) throw new Problem("Kaal isn't connected yet.", "Open the extension's settings and enter Kaal's address and a token.", true);
+  if (!server || !token) throw new Problem("Kaal isn't connected yet.", "Open the extension's settings, enter Kaal's address and connect with your Kaal sign-in.", true);
   const headers = { Authorization: `Bearer ${token}`, Accept: "application/json" };
   if (json !== undefined) headers["Content-Type"] = "application/json";
   let response;

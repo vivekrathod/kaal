@@ -80,7 +80,7 @@ async function start() {
     primary.textContent = "Connect to Kaal";
     primary.hidden = false;
     primary.addEventListener("click", () => chrome.runtime.openOptionsPage());
-    say(element("p", "hint", "Enter Kaal's address and a token once, in the settings."));
+    say(element("p", "hint", "Enter Kaal's address and sign in once, in the settings."));
     return;
   }
 

@@ -109,7 +109,7 @@ export function fileNameFor(title, address, type = "") {
 // What to tell the person when Kaal or Chrome says no, and what they can do.
 export function explain(status, serverMessage = "") {
   if (status === 0) return { message: "Can't reach Kaal.", hint: "Check that this computer is on your network, then try again." };
-  if (status === 401) return { message: "Kaal didn't accept this extension's token.", hint: "Open the extension's settings and paste a current token.", settings: true };
+  if (status === 401) return { message: "Kaal didn't accept this extension's token.", hint: "Open the extension's settings and connect again.", settings: true };
   if (status === 403) return { message: "This extension's token isn't allowed to do that.", hint: "It needs the read, reveal and write permissions." };
   if (status === 413) return { message: "This is too large for Kaal to accept.", hint: "" };
   if (status === 429) return { message: "Kaal is busy.", hint: "Wait a minute and try again." };
