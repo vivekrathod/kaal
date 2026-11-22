@@ -237,3 +237,18 @@ console.log(JSON.stringify({
     assert printing.index('"Page.getLayoutMetrics"') < printing.index('"Emulation.setEmulatedMedia", { media: "screen" }') < printing.index('"Page.printToPDF"')
     assert "...paperFor(wide)" in printing and "preferCSSPageSize: false" in printing
 
+
+def test_what_was_read_for_a_tab_is_checked_before_it_is_kept():
+    worker = (EXT / "background.js").read_text()
+    whole = worker[worker.index("async function tabAsFile("):worker.index("function pageAsFile(")]
+    shown = whole[:whole.index("// An address that ends in .pdf")]
+    # A tab that shows a PDF is kept only if what its site answers with is a PDF; otherwise nothing is.
+    assert shown.index("await showsPdf(command)") < shown.index("fileFrom(command, page.url, page.title)") < shown.index("if (await isPdf(file)) return file;") < shown.index("throw new Problem(")
+    # A PDF inside a web page is tried before the page is printed, and a wrong answer falls back to the print.
+    rest = whole[len(shown):]
+    assert "return await isPdf(file) ? file : printPage(command, page);" in rest, "an address ending in .pdf that answers with a web page"
+    inside = rest[rest.index("await pdfInside(command)"):]
+    assert inside.index("if (file && await isPdf(file)) return file;") < inside.index("return printPage(command, page);")
+    assert 'child.frame.mimeType === "application/pdf"' in worker and "inside.length === 1 ? inside[0]" in worker
+    assert "return withDebugger(page, (command) => tabAsFile(command, page));" in worker
+

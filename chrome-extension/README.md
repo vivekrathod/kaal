@@ -13,7 +13,8 @@ medical receipt beside the page it came from.
   styles it has on the screen, not the site's print version, and on paper as
   wide as the page, so nothing is cut off at the right. A tab that is already
   a PDF, a linked file, and a file opened from this computer are kept
-  unchanged.
+  unchanged, and so is a PDF that a web page shows inside itself: the PDF is
+  what is saved, not a print of the page around it.
 - **A receipt opens in the side panel**, beside the page. It shows the values
   Kaal read and where each came from. "Looks right" marks it reviewed; "Save
   for later" leaves it in the inbox. The panel then closes.
@@ -109,6 +110,11 @@ The popup or the side panel says what happened and what to do. The common ones:
 - **"Can't reach Kaal"**: this computer is not on the network the server is on.
 - **"Chrome wouldn't let Kaal print this page"**: the developer tools are open
   on that tab, or it is one of Chrome's own pages.
+- **"This PDF can't be fetched a second time"**: to keep a file, Kaal asks
+  its site for it again, and this site answered with a web page instead. That
+  happens when a PDF is made for one viewing, such as a statement shown after
+  you press a button. Download it with the arrow at the top right of the PDF,
+  open the downloaded file in Chrome and save that, or add it in the web app.
 - **A file on this computer** (a PDF opened from a folder, at a `file://`
   address) is saved as the file it is. A copy of the extension from the Chrome
   Web Store may not read files until you allow it: right-click the Kaal icon,

@@ -56,6 +56,11 @@ WIDE_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Made-up s
 <table><tr><td>FIRST-COLUMN</td>""" + "".join(f"<td>Column {number} of a made-up year</td>" for number in range(2, 9)) + """<td>LAST-COLUMN</td></tr></table>
 </body></html>"""
 
+# A made-up portal with one address for everything. Its home page is what a plain request gets;
+# the statement, a PDF, is the answer to a form that is posted to the same address.
+PORTAL_HOME = """<!doctype html><html><head><meta charset="utf-8"><title>Made-up portal</title></head>
+<body><h1>MADE-UP PORTAL HOME</h1><form method="post" action="/portal.php" id="ask"><input type="hidden" name="module" value="statement"><button>View statement</button></form></body></html>"""
+
 
 def made_up_pdf() -> bytes:
     """A one-page PDF with a line of text, written by hand so the test needs no PDF library."""
@@ -125,6 +130,11 @@ def stage(tmp_path, request):
     site_dir.mkdir()
     (site_dir / "receipt.html").write_text(RECEIPT_PAGE)
     (site_dir / "wide.html").write_text(WIDE_PAGE)
+    # Three ways a web page shows a PDF inside itself.
+    for name, inside in (("framed", '<iframe src="/statement.pdf" width="600" height="400"></iframe>'),
+                         ("embedded", '<embed src="/statement.pdf" type="application/pdf" width="600" height="400">'),
+                         ("objected", '<object data="/statement.pdf" type="application/pdf" width="600" height="400"></object>')):
+        (site_dir / f"{name}.html").write_text(f'<!doctype html><html><head><meta charset="utf-8"><title>Made-up statement viewer</title></head><body><h1>YOUR STATEMENT</h1>{inside}</body></html>')
     (site_dir / "statement.pdf").write_bytes(made_up_pdf())
     class Site(http.server.SimpleHTTPRequestHandler):
         """A made-up portal. One file always refuses, one refuses twice and then gives in,
@@ -143,8 +153,28 @@ def stage(tmp_path, request):
             elif self.path.startswith(("/stubborn.pdf", "/tab-refuses.pdf")):
                 self.path = "/statement.pdf"
                 super().do_GET()
+            elif self.path.startswith("/portal.php"):
+                # A portal's one address: asked for plainly, it answers with its home page.
+                self.answer(PORTAL_HOME.encode(), "text/html; charset=utf-8")
             else:
                 super().do_GET()
+
+        def do_POST(self):
+            # The same address hands out a statement only to the form that asks for one.
+            Site.asked.append(f"POST {self.path}")
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            if self.path.startswith("/portal.php"):
+                self.answer(made_up_pdf(), "application/pdf")
+            else:
+                self.send_error(404)
+
+        def answer(self, body, kind):
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
 
         def log_message(self, *args):
             pass
@@ -354,3 +384,23 @@ def test_a_web_page_is_kept_as_it_looks_on_the_screen_and_nothing_is_cut_off(sta
         text = out["text"]
         assert "SEEN-ON-THE-SCREEN" in text and "FIRST-COLUMN" in text and "LAST-COLUMN" in text, "the whole width of the page"
         assert "ONLY-ON-PAPER" not in text and "glossary-made-up" not in text, "the site's print stylesheet is not what is kept"
+
+
+@pytest.mark.parametrize("page", ["framed.html", "embedded.html", "objected.html"])
+def test_a_pdf_shown_inside_a_web_page_is_saved_as_that_pdf(stage, page):
+    out = drive(stage, "shown.mjs", E2E_PAGE=page)
+    assert out["state"]["stage"] == "saved", out
+    # Printing the page would leave a blank where the PDF is: the PDF itself is kept, byte for byte.
+    assert out["file"] == {"name": out["file"]["name"], "size": stage.pdf_bytes, "startsAsPdf": True} and out["file"]["name"].endswith(".pdf")
+    assert out["source"] == f"{stage.site}/{page}", "saved from the page the person was on"
+    assert out["notesAfter"] == out["notesBefore"] + 1
+
+
+def test_a_pdf_the_site_will_not_hand_out_twice_is_never_replaced_by_a_web_page(stage):
+    out = drive(stage, "shown.mjs", E2E_PAGE="portal.php", E2E_SUBMIT="1")
+    # The tab shows the statement the form was answered with. Asked again, the portal answers with its home page.
+    assert "POST /portal.php" in stage.asked and stage.asked.count("/portal.php") >= 2
+    assert out["state"]["stage"] == "error" and out["state"]["message"] == "This PDF can't be fetched a second time."
+    assert "Download it with the arrow" in out["state"]["hint"] and out["state"]["site"] is None
+    assert out["notesAfter"] == out["notesBefore"], "nothing is saved in place of the PDF"
+

@@ -236,13 +236,59 @@ async function fileFrom(command, address, title) {
   }
 }
 
+// Whether what was read is a PDF, whatever it is called: a PDF says so in its first bytes.
+async function isPdf(file) {
+  return new TextDecoder("latin1").decode(await file.slice(0, 1024).arrayBuffer()).includes("%PDF-");
+}
+
+// A web page that shows one PDF inside itself (in a frame, an embed or an object): the address of
+// that PDF. Printing such a page leaves a blank where the PDF is, so the PDF itself is what is kept.
+async function pdfInside(command) {
+  try {
+    const { frameTree } = await command("Page.getFrameTree");
+    const inside = [];
+    const look = (node) => (node.childFrames || []).forEach((child) => {
+      if (child.frame.mimeType === "application/pdf" && /^https?:/.test(child.frame.url)) inside.push(child.frame.url);
+      look(child);
+    });
+    look(frameTree);
+    return inside.length === 1 ? inside[0] : "";
+  } catch {
+    return "";
+  }
+}
+
+// What the tab shows, as a file. Reading a file means asking its site for it a second time, and
+// some sites answer that with something else: a statement made for one viewing, after a form was
+// sent, comes back as the site's own web page. What comes back is checked, never taken on trust.
+async function tabAsFile(command, page) {
+  if (await showsPdf(command)) {
+    const file = await fileFrom(command, page.url, page.title);
+    if (await isPdf(file)) return file;
+    throw new Problem("This PDF can't be fetched a second time.",
+      "The site made it for one viewing, and answers Kaal's request with a web page. Download it with the arrow at the top right of the PDF, open the downloaded file in Chrome and save that. Or add it in Kaal's web app.");
+  }
+  // An address that ends in .pdf but shows a web page. A site that refuses the file is still
+  // said to have refused it, with the offer to ask for access to that site; a web page that
+  // comes back in the file's place is printed like any other page.
+  if (looksLikePdf(page.url)) {
+    const file = await fileFrom(command, page.url, page.title);
+    return await isPdf(file) ? file : printPage(command, page);
+  }
+  // A web page with a PDF inside it: the PDF if it can be read, otherwise the page as it looks.
+  const inside = await pdfInside(command);
+  if (inside) {
+    const file = await fileFrom(command, inside, page.title).catch(() => null);
+    if (file && await isPdf(file)) return file;
+  }
+  return printPage(command, page);
+}
+
 function pageAsFile(page) {
   if (isProtectedPage(page.url)) throw new Problem("Chrome doesn't let extensions save this kind of page.", "Open the page you want to keep and try again.");
   // A file on this computer is kept as it is, and read without the debugger, which cannot read one.
   if (page.url.startsWith("file:")) return fileFromComputer(page.url, page.title);
-  return withDebugger(page, async (command) => (looksLikePdf(page.url) || await showsPdf(command)
-    ? fileFrom(command, page.url, page.title)
-    : printPage(command, page)));
+  return withDebugger(page, (command) => tabAsFile(command, page));
 }
 
 const linkAsFile = (page, address) => withDebugger(page, (command) => fileFrom(command, address, page.title));
