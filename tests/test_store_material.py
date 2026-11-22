@@ -74,7 +74,7 @@ def test_the_web_store_text_fits_and_matches_the_manifest():
     listing = (WEB_STORE / "listing.md").read_text()
     # One justification for each permission the manifest asks for, and none for one it does not.
     reasons = dict(re.findall(r"^\*\*([A-Za-z]+)[^*\n]*\*\*\n\n```text\n(.*?)\n```", listing, re.M | re.S))
-    assert sorted(reasons) == sorted([*manifest["permissions"], "Host"]) and manifest["optional_host_permissions"] == ["*://*/*"]
+    assert sorted(reasons) == sorted([*manifest["permissions"], "Host"]) and manifest["optional_host_permissions"] == ["*://*/*", "file:///*"]
     for permission, reason in reasons.items():
         assert 0 < len(reason) <= 1000, f"the reason for {permission} is {len(reason)} characters; the store takes 1000"
     purpose = re.search(r"### Single purpose\n\n```text\n(.*?)\n```", listing, re.S)[1]

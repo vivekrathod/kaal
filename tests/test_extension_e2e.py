@@ -319,3 +319,14 @@ def test_connecting_by_signing_in_hands_the_extension_a_token_of_its_own(stage, 
     assert out["session"] == {"name": "Chrome extension", "scopes": ["read", "reveal", "write"]}
     made = [record for record in tokens.TokenStore(tmp_path / "tokens.json").list() if record["name"] == "Chrome extension"]
     assert len(made) == 1 and made[0].get("account") == person["id"] and not made[0].get("revoked_at")
+
+
+def test_a_pdf_opened_from_this_computer_is_saved_as_the_file_it_is(stage, tmp_path):
+    local = tmp_path / "On this computer.pdf"
+    local.write_bytes(made_up_pdf())
+    out = drive(stage, "local.mjs", E2E_LOCAL_FILE=str(local))
+    assert out["fileAccess"] is True, "a copy loaded from a folder may read files; one from the store needs the switch turned on"
+    assert out["heldBefore"] is False and out["heldAfter"] is True, "access to files is asked for when a file is first saved, not before"
+    assert out["first"]["stage"] == "saved", "one click: the popup asks Chrome for access to files in the click that saves"
+    assert out["state"]["stage"] == "saved", out
+    assert out["file"]["size"] == stage.pdf_bytes and out["file"]["name"].endswith(".pdf"), "the file itself, byte for byte, not a print of it"

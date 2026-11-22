@@ -106,8 +106,12 @@ The popup or the side panel says what happened and what to do. The common ones:
 - **"Can't reach Kaal"**: this computer is not on the network the server is on.
 - **"Chrome wouldn't let Kaal print this page"**: the developer tools are open
   on that tab, or it is one of Chrome's own pages.
-- **A file on this computer** (`file://`): turn on "Allow access to file URLs"
-  on the extension's card, or add the file in the web app.
+- **A file on this computer** (a PDF opened from a folder, at a `file://`
+  address) is saved as the file it is. A copy of the extension from the Chrome
+  Web Store may not read files until you allow it: right-click the Kaal icon,
+  choose Manage extension, and turn on "Allow access to file URLs". "Kaal
+  hasn't been let into files on this computer yet" has a button under it that
+  asks Chrome; press it and the file is saved. Or add the file in the web app.
 
 ## Upgrading from the earlier version
 

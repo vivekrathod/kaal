@@ -174,11 +174,12 @@ Keeps, on this computer, the address of the user's Kaal server, the token that s
 **Host permission (optional_host_permissions)**
 
 ```text
-Not requested at install: the extension asks for no access to websites of its own. Only when a file cannot be read through the tab, and the user presses "Let Kaal fetch from <that site>", does the extension ask Chrome for access to that one site, so it can fetch the file directly. The user answers Chrome's own prompt, and can take the access back on the extension's page.
+Not requested at install: the extension asks for no access to websites of its own. Only when a file cannot be read through the tab, and the user presses "Let Kaal fetch from <that site>", does the extension ask Chrome for access to that one site, so it can fetch the file directly. The user answers Chrome's own prompt, and can take the access back on the extension's page. The second pattern, file:///*, is for a PDF or other file the user has opened from their own computer: Chrome gives neither a tab nor the debugger a way to read one, so when the user presses Save on such a tab the extension asks for access to file addresses and reads that one file. Chrome grants this only if the user has themselves turned on "Allow access to file URLs" for the extension, which is off when it is installed.
 ```
 
-(The manifest names every site, `*://*/*`, as *optional*. That grants nothing
-by itself; it only lets the extension ask for one site at a time. Chrome's
+(The manifest names every site, `*://*/*`, and file addresses, `file:///*`, as
+*optional*. That grants nothing by itself; it only lets the extension ask for
+one site at a time, or for files on the computer when one is saved. Chrome's
 install warning, "Read and change all your data on all websites", comes from
 the debugger permission, not from this.)
 

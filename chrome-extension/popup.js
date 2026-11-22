@@ -1,7 +1,7 @@
 // The popup: one button for the likely thing to do with this page, the other
 // choice as a link beneath it, and what happened to the last save.
 
-import { MODES, chooseMode, isProtectedPage, stateKey } from "./lib.js";
+import { MODES, chooseMode, isProtectedPage, stateKey, accessAsk, THIS_COMPUTER } from "./lib.js";
 import { updateWaiting, finishUpdate } from "./fresh.js";
 
 const primary = document.getElementById("primary");
@@ -37,8 +37,9 @@ function show(state, tab, server) {
   if (state.stage === "error") {
     const fix = state.settings ? element("button", "button small", "Open settings") : null;
     if (fix) fix.addEventListener("click", () => chrome.runtime.openOptionsPage());
-    // The file could not be read through the tab: offer to ask Chrome for access to its one site.
-    const allow = state.site ? element("button", "button small", `Let Kaal fetch from ${new URL(state.site).host}`) : null;
+    // The file could not be read: offer to ask Chrome for access to its one site, or to this computer's files.
+    const ask = state.site ? accessAsk(state.site) : null;
+    const allow = ask ? element("button", "button small", ask.label) : null;
     if (allow) {
       allow.addEventListener("click", async () => {
         const granted = await chrome.permissions.request({ origins: [`${state.site}/*`] }).catch(() => false);
@@ -46,7 +47,7 @@ function show(state, tab, server) {
       });
     }
     return say(element("p", "notice error", state.message), state.hint ? element("p", "hint", state.hint) : null,
-      allow ? element("p", "hint", "Kaal has no access to websites. You can give it access to this one site, then save again.") : null, fix, allow);
+      allow ? element("p", "hint", ask.hint) : null, fix, allow);
   }
   if (state.stage === "review") {
     const review = element("button", "button small", "Check it now");
@@ -107,14 +108,16 @@ async function start() {
   const run = (mode) => async () => {
     primary.disabled = true;
     secondary.disabled = true;
-    if (mode === "medical") {
-      // The receipt is checked in the side panel, beside the page it came from.
-      const opened = openPanel(tab).catch(() => false);
-      chrome.runtime.sendMessage({ action: "save", mode, tabId: tab.id, url: tab.url, title: tab.title }).catch(() => {});
-      if ((await opened) !== false) window.close();
-      return;
-    }
+    // A file on this computer is read by the extension itself, which needs Chrome's leave for
+    // file addresses. It is asked for here, in the click itself (Chrome takes a request only
+    // from one), and granted without a question where the person has turned on "Allow access
+    // to file URLs". Both this and the panel are started before either is waited for.
+    const files = tab.url.startsWith(THIS_COMPUTER) ? chrome.permissions.request({ origins: [`${THIS_COMPUTER}/*`] }).catch(() => false) : null;
+    // The receipt is checked in the side panel, beside the page it came from.
+    const opened = mode === "medical" ? openPanel(tab).catch(() => false) : null;
+    await files;
     chrome.runtime.sendMessage({ action: "save", mode, tabId: tab.id, url: tab.url, title: tab.title }).catch(() => {});
+    if (opened && (await opened) !== false) window.close();
   };
   primary.addEventListener("click", run(likely));
   secondary.addEventListener("click", run(other));

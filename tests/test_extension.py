@@ -27,7 +27,8 @@ def test_the_extension_asks_for_what_it_uses_and_nothing_from_the_old_design():
     # No access to any website: pages are read through the tab, and the server names the extension.
     assert "host_permissions" not in data and "optional_permissions" not in data
     # One site at a time may be granted, by the person, when a file cannot be read through the tab.
-    assert data["optional_host_permissions"] == ["*://*/*"]
+    # Asked for one site at a time when a file needs it, and for this computer's files when one is saved.
+    assert data["optional_host_permissions"] == ["*://*/*", "file:///*"]
     assert data["background"] == {"service_worker": "background.js", "type": "module"}
     assert data["action"]["default_popup"] == "popup.html" and data["options_ui"]["page"] == "options.html"
     assert set(data["commands"]) == {"_execute_action", "save"}
@@ -94,12 +95,19 @@ def test_every_request_the_worker_makes_is_in_the_published_api():
     assert "Network.loadNetworkResource" in worker and "sender.id !== chrome.runtime.id" in worker
     # The only other request, a file fetched with the person's sign-in, happens after a check that they gave access to that site.
     assert worker.count("fetch(") == 2 and worker.count('credentials: "include"') == 1
-    direct = worker[worker.index("async function fileFrom"):worker.index("function pageAsFile")]
+    direct = worker[worker.index("async function fileFrom("):worker.index("function pageAsFile")]
     assert direct.index("chrome.permissions.contains({ origins: [`${site}/*`] })") < direct.index("fetchDirectly(address, title)")
-    assert worker.count("fetchDirectly(") == 2  # its definition and that one guarded call
-    # Access is asked for by the person pressing a button, for the one site named in the failure.
+    # A file on this computer cannot be read through a tab at all: the worker reads it itself, after
+    # the same two checks, that Chrome allows this extension files and that the person let it.
+    local = worker[worker.index("async function fileFromComputer("):worker.index("async function fileFrom(")]
+    assert local.index("chrome.extension.isAllowedFileSchemeAccess()") < local.index("chrome.permissions.contains({ origins: [`${THIS_COMPUTER}/*`] })") < local.index("fetchDirectly(address, title)")
+    assert worker.count("fetchDirectly(") == 3  # its definition and those two guarded calls
+    assert 'if (page.url.startsWith("file:")) return fileFromComputer(page.url, page.title);' in worker
+    # Access is asked for by the person pressing a button, for the one site named in the failure;
+    # the popup also asks for this computer's files in the click that saves one.
     for page in ("panel.js", "popup.js"):
         assert "chrome.permissions.request({ origins: [`${state.site}/*`] })" in (EXT / page).read_text()
+    assert "chrome.permissions.request({ origins: [`${THIS_COMPUTER}/*`] })" in (EXT / "popup.js").read_text()
     assert "permissions.request" not in worker
     # A grant covering every site, left over from an older version, is given up when the worker starts.
     assert "origins.filter(isBlanketAccess)" in worker and "chrome.permissions.remove({ origins: blanket })" in worker

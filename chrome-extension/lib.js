@@ -64,6 +64,17 @@ export function siteOf(address) {
   }
 }
 
+// Files on this computer stand where a site would, when access to them is what is missing.
+export const THIS_COMPUTER = "file://";
+
+// How to ask the person for the access a save turned out to need: one site, or this computer's files.
+export function accessAsk(site) {
+  if (site === THIS_COMPUTER) {
+    return { label: "Let Kaal read files on this computer", hint: "Kaal reads a file on this computer only when you save it, and only the one you are saving." };
+  }
+  return { label: `Let Kaal fetch from ${new URL(site).host}`, hint: "Kaal has no access to websites. You can give it access to this one site, then save again." };
+}
+
 // Access that covers every site, in whatever way Chrome writes it down.
 export function isBlanketAccess(pattern) {
   if (pattern === "<all_urls>") return true;

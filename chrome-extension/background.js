@@ -13,7 +13,7 @@
 // If a file cannot be read through the tab, the panel offers to ask Chrome
 // for access to that one site, and only then is it fetched directly.
 
-import { MODES, chooseMode, rememberSite, mergeSites, siteOf, isBlanketAccess, looksLikePdf, isProtectedPage, fileNameFor, explain, stateKey } from "./lib.js";
+import { MODES, chooseMode, rememberSite, mergeSites, siteOf, isBlanketAccess, looksLikePdf, isProtectedPage, fileNameFor, explain, stateKey, THIS_COMPUTER } from "./lib.js";
 
 const MENU_GENERAL = "kaal-save";
 const MENU_MEDICAL = "kaal-save-receipt";
@@ -124,7 +124,7 @@ async function loadThroughTab(command, address, title) {
     const { frameTree } = await command("Page.getFrameTree");
     ({ resource } = await command("Network.loadNetworkResource", { frameId: frameTree.frame.id, url: address, options: { disableCache: false, includeCredentials: true } }));
   } catch {
-    throw new Problem("Chrome couldn't read that file.", address.startsWith("file:") ? "Add a file from this computer in Kaal's web app." : FILE_HINT);
+    throw new Problem("Chrome couldn't read that file.", FILE_HINT);
   }
   const status = (resource && resource.httpStatusCode) || 0;
   if (!resource || !resource.success || !resource.stream || status >= 400) {
@@ -184,10 +184,35 @@ async function fetchDirectly(address, title) {
   return new File([blob], fileNameFor(title, address, blob.type), { type: blob.type || "application/octet-stream" });
 }
 
+// A file opened from this computer (a file:// address). Chrome reads one for an extension only,
+// never for a tab or the debugger, and only where the person has turned on "Allow access to file
+// URLs" for it and it holds access to file addresses, which it asks for the first time.
+const WEB_APP_HINT = "Or add the file in Kaal's web app.";
+async function fileFromComputer(address, title) {
+  if (!(await chrome.extension.isAllowedFileSchemeAccess())) {
+    throw new Problem("Chrome isn't letting Kaal read files on this computer.",
+      `Turn on “Allow access to file URLs” for Kaal: right-click the Kaal icon, choose Manage extension, and switch it on. Then save again. ${WEB_APP_HINT}`);
+  }
+  // The popup asks Chrome in its own click, before it sends the save here. A save started by
+  // the keyboard or the right-click menu arrives without that: the failure names this computer
+  // where a site would be named, and the popup and the panel offer a button that asks.
+  if (!(await chrome.permissions.contains({ origins: [`${THIS_COMPUTER}/*`] }))) {
+    const problem = new Problem("Kaal hasn't been let into files on this computer yet.", WEB_APP_HINT);
+    problem.site = THIS_COMPUTER;
+    throw problem;
+  }
+  try {
+    return await fetchDirectly(address, title);
+  } catch (error) {
+    throw error instanceof Problem && error.message === "That file is empty." ? error : new Problem("Chrome couldn't read that file.", `Add it in Kaal's web app.`);
+  }
+}
+
 // A file is read through the tab. Where that fails, it is fetched directly if
 // access to its site has been given; otherwise the failure names the site, so
 // that the panel can offer to ask for it. One site at a time, never all.
 async function fileFrom(command, address, title) {
+  if (address.startsWith("file:")) return fileFromComputer(address, title);
   try {
     return await loadThroughTab(command, address, title);
   } catch (error) {
@@ -201,7 +226,9 @@ async function fileFrom(command, address, title) {
 
 function pageAsFile(page) {
   if (isProtectedPage(page.url)) throw new Problem("Chrome doesn't let extensions save this kind of page.", "Open the page you want to keep and try again.");
-  return withDebugger(page, async (command) => (looksLikePdf(page.url) || page.url.startsWith("file:") || await showsPdf(command)
+  // A file on this computer is kept as it is, and read without the debugger, which cannot read one.
+  if (page.url.startsWith("file:")) return fileFromComputer(page.url, page.title);
+  return withDebugger(page, async (command) => (looksLikePdf(page.url) || await showsPdf(command)
     ? fileFrom(command, page.url, page.title)
     : printPage(command, page)));
 }
