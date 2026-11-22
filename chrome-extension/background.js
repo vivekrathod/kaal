@@ -13,7 +13,7 @@
 // If a file cannot be read through the tab, the panel offers to ask Chrome
 // for access to that one site, and only then is it fetched directly.
 
-import { MODES, chooseMode, rememberSite, mergeSites, siteOf, isBlanketAccess, looksLikePdf, isProtectedPage, fileNameFor, explain, stateKey, THIS_COMPUTER } from "./lib.js";
+import { MODES, chooseMode, rememberSite, mergeSites, siteOf, isBlanketAccess, looksLikePdf, isProtectedPage, fileNameFor, explain, stateKey, THIS_COMPUTER, paperFor } from "./lib.js";
 
 const MENU_GENERAL = "kaal-save";
 const MENU_MEDICAL = "kaal-save-receipt";
@@ -149,9 +149,21 @@ async function loadThroughTab(command, address, title) {
   return file;
 }
 
+// The page is kept as it looks on the screen. Left to itself Chrome prints with the site's print
+// stylesheet, on letter paper: many sites' print styles drop parts of the page or spell out every
+// link's address, and whatever is wider than the paper is cut off. So the screen's styles are kept
+// for the print, and the paper is made as wide as the page.
 async function printPage(command, page) {
   try {
-    const printed = await command("Page.printToPDF", { printBackground: true, preferCSSPageSize: true });
+    let wide = 0;
+    try {
+      const { cssLayoutViewport = {}, cssContentSize = {} } = await command("Page.getLayoutMetrics");
+      wide = Math.max(cssLayoutViewport.clientWidth || 0, cssContentSize.width || 0);
+    } catch {
+      // Without the measurements the page is printed on letter paper.
+    }
+    await command("Emulation.setEmulatedMedia", { media: "screen" }).catch(() => {});
+    const printed = await command("Page.printToPDF", { printBackground: true, preferCSSPageSize: false, ...paperFor(wide) });
     const bytes = Uint8Array.from(atob(printed.data), (character) => character.charCodeAt(0));
     return new File([bytes], fileNameFor(page.title, "", "application/pdf"), { type: "application/pdf" });
   } catch {

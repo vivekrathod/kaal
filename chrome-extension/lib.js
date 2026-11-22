@@ -82,6 +82,17 @@ export function isBlanketAccess(pattern) {
   return Boolean(parts) && parts[2] === "*";
 }
 
+// The paper a page is printed on: as wide as the page is on the screen, so that nothing is cut
+// off at the right edge and the layout is the one the person was looking at, and never narrower
+// than a letter page. Sizes are in inches, as Chrome takes them; a CSS pixel is 1/96 of one.
+export const PAPER_MARGIN = 0.25;
+export function paperFor(widthInPixels) {
+  const asked = Number(widthInPixels) > 0 ? Number(widthInPixels) / 96 + 2 * PAPER_MARGIN : 0;
+  const width = Math.round(Math.min(30, Math.max(8.5, asked)) * 100) / 100;
+  return { paperWidth: width, paperHeight: Math.round(width * (11 / 8.5) * 100) / 100,
+    marginTop: PAPER_MARGIN, marginBottom: PAPER_MARGIN, marginLeft: PAPER_MARGIN, marginRight: PAPER_MARGIN };
+}
+
 export function looksLikePdf(address) {
   try {
     return new URL(address).pathname.toLowerCase().endsWith(".pdf");

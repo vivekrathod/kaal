@@ -213,3 +213,27 @@ console.log(JSON.stringify({ seen, cookieFile, tokenFile, before, after: holdsTo
     assert len(out["seen"]) == 3  # the web app's own file needed no request of its own
     assert out["cookieFile"].startswith("/v1/") and out["tokenFile"] == "blob:made-here"
     assert (out["before"], out["after"]) == (False, True)
+
+
+@needs_node
+def test_a_page_is_printed_on_paper_as_wide_as_it_is_and_access_is_asked_for_in_plain_words(tmp_path):
+    out = run_node(tmp_path, """
+import * as lib from "./lib.mjs";
+console.log(JSON.stringify({
+  paper: [1500, 1200, 400, 0, undefined, 9000].map(lib.paperFor),
+  asks: ["https://portal.example.org", lib.THIS_COMPUTER].map((site) => lib.accessAsk(site).label),
+  files: `${lib.THIS_COMPUTER}/*`,
+}));
+""")
+    wide, window, narrow, unknown, missing, huge = out["paper"]
+    assert (wide["paperWidth"], wide["paperHeight"]) == (16.13, 20.87), "1500 pixels and a quarter inch each side, with a letter page's proportions"
+    assert window["paperWidth"] == 13.0 and {wide[side] for side in ("marginTop", "marginBottom", "marginLeft", "marginRight")} == {0.25}
+    assert narrow["paperWidth"] == unknown["paperWidth"] == missing["paperWidth"] == 8.5 and narrow["paperHeight"] == 11.0, "never narrower than a letter page"
+    assert huge["paperWidth"] == 30, "nor wider than Chrome will print"
+    assert out["asks"] == ["Let Kaal fetch from portal.example.org", "Let Kaal read files on this computer"] and out["files"] == "file:///*"
+    # The print keeps the screen's styles, and the paper is sized before it is made.
+    worker = (EXT / "background.js").read_text()
+    printing = worker[worker.index("async function printPage("):worker.index("// A PDF shown in a tab")]
+    assert printing.index('"Page.getLayoutMetrics"') < printing.index('"Emulation.setEmulatedMedia", { media: "screen" }') < printing.index('"Page.printToPDF"')
+    assert "...paperFor(wide)" in printing and "preferCSSPageSize: false" in printing
+

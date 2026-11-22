@@ -47,6 +47,15 @@ RECEIPT_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Lakesi
 <tr><td>Amount paid:</td><td>$64.50</td></tr><tr><td>Paid by:</td><td>Visa ending 1234</td></tr></table>
 <p>Thank you for your payment. This is a made-up receipt for testing.</p></body></html>"""
 
+# A made-up statement that is wider than paper and has a print stylesheet of the usual kind: it
+# hides part of the page, shows something else instead, and spells out every link's address.
+WIDE_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Made-up statement</title>
+<style>body{font:16px sans-serif;margin:20px}.onpaper{display:none}table{border-collapse:collapse;width:1500px}td{border:1px solid #999;padding:6px;white-space:nowrap}
+@media print{.onscreen{display:none}.onpaper{display:block}a:after{content:" (" attr(href) ")"}}</style></head>
+<body><p class="onscreen">SEEN-ON-THE-SCREEN</p><p class="onpaper">ONLY-ON-PAPER</p><p><a href="/glossary-made-up">Glossary</a></p>
+<table><tr><td>FIRST-COLUMN</td>""" + "".join(f"<td>Column {number} of a made-up year</td>" for number in range(2, 9)) + """<td>LAST-COLUMN</td></tr></table>
+</body></html>"""
+
 
 def made_up_pdf() -> bytes:
     """A one-page PDF with a line of text, written by hand so the test needs no PDF library."""
@@ -115,6 +124,7 @@ def stage(tmp_path, request):
     site_dir = tmp_path / "site"
     site_dir.mkdir()
     (site_dir / "receipt.html").write_text(RECEIPT_PAGE)
+    (site_dir / "wide.html").write_text(WIDE_PAGE)
     (site_dir / "statement.pdf").write_bytes(made_up_pdf())
     class Site(http.server.SimpleHTTPRequestHandler):
         """A made-up portal. One file always refuses, one refuses twice and then gives in,
@@ -330,3 +340,17 @@ def test_a_pdf_opened_from_this_computer_is_saved_as_the_file_it_is(stage, tmp_p
     assert out["first"]["stage"] == "saved", "one click: the popup asks Chrome for access to files in the click that saves"
     assert out["state"]["stage"] == "saved", out
     assert out["file"]["size"] == stage.pdf_bytes and out["file"]["name"].endswith(".pdf"), "the file itself, byte for byte, not a print of it"
+
+
+def test_a_web_page_is_kept_as_it_looks_on_the_screen_and_nothing_is_cut_off(stage):
+    out = drive(stage, "wide.mjs")
+    assert out["state"] == {"stage": "saved", "message": None}
+    pdf = out["pdf"]
+    assert pdf["startsAsPdf"] and pdf["name"].endswith(".pdf") and pdf["pages"] >= 1
+    # The table is 1500 pixels wide, which is 1125 points: the paper is as wide as that and its margins, not a letter page's 612.
+    assert pdf["widthInPoints"] > 1125 and round(pdf["heightInPoints"] / pdf["widthInPoints"], 2) == round(11 / 8.5, 2)
+    assert out["tabStillOnScreen"] is True
+    if shutil.which("pdftotext"):
+        text = out["text"]
+        assert "SEEN-ON-THE-SCREEN" in text and "FIRST-COLUMN" in text and "LAST-COLUMN" in text, "the whole width of the page"
+        assert "ONLY-ON-PAPER" not in text and "glossary-made-up" not in text, "the site's print stylesheet is not what is kept"

@@ -9,8 +9,11 @@ medical receipt beside the page it came from.
   or **Save receipt** on a site you have saved receipts from before. The other
   choice is a link underneath.
 - **A web page is kept as a PDF**, printed by Chrome from the tab you are
-  looking at, so a page behind a sign-in is saved as you see it. A tab that is
-  already a PDF, and a linked file, are kept unchanged.
+  looking at, so a page behind a sign-in is saved as you see it: with the
+  styles it has on the screen, not the site's print version, and on paper as
+  wide as the page, so nothing is cut off at the right. A tab that is already
+  a PDF, a linked file, and a file opened from this computer are kept
+  unchanged.
 - **A receipt opens in the side panel**, beside the page. It shows the values
   Kaal read and where each came from. "Looks right" marks it reviewed; "Save
   for later" leaves it in the inbox. The panel then closes.
