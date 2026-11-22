@@ -352,6 +352,9 @@ def test_every_route_works_on_the_servers_vault_and_never_on_the_default(tmp_pat
     call("POST", f"/v1/admin/people/{added}/admin", json={"on": True}, headers=person)
     call("POST", "/v1/vault/members", json={"login": "made-up-person", "role": "viewer"}, headers=person)
     call("DELETE", f"/v1/vault/members/{added}", headers=person)
+    assert result(call("POST", "/v1/vault/invitations", json={"name": "Made-up Guest", "role": "viewer"}, headers=person))["account"]["login"] == "made-upguest"
+    assert result(call("GET", "/v1/admin/setup", headers=person))["show"] is True
+    assert result(call("POST", "/v1/admin/setup", json={"key_saved": True}, headers=person))["items"][0] == {"id": "key", "done": True}
     call("POST", f"/v1/admin/people/{added}/disabled", json={"on": True}, headers=person)
     call("POST", "/v1/admin/sign-up", json={"signup": "open"}, headers=person)
     call("GET", "/v1/sign-in/options", headers={})

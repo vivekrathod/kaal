@@ -289,3 +289,126 @@ def test_tokens_are_each_persons_own_and_cannot_exceed_their_role(house):
     # A token made in the web app is still only a token: it cannot manage the account.
     assert script.get("/v1/account/tokens", headers={"Authorization": f"Bearer {mine['secret']}"}).status_code == 403
     assert script.post("/v1/account/tokens", headers={"Authorization": f"Bearer {mine['secret']}"}, json={"name": "y", "scopes": ["read"], "vault": own}).status_code == 403
+
+
+# --- inviting someone new, picking who to share with, and the name a person signs in with
+
+def test_an_administrator_invites_someone_new_straight_into_their_vault(house):
+    owner = house.signed_in("owner")
+    assert owner.post("/v1/library/notes", json={"title": "Household page", "body": "b"}).status_code == 200
+    main = owner.get("/v1/session").json()["result"]["vault"]["id"]
+    assert owner.get("/v1/vault/members").json()["result"]["can_invite"] is True
+
+    made = owner.post("/v1/vault/invitations", json={"name": " Sam Lee ", "role": "editor"}).json()["result"]
+    assert made["account"] == {"login": "samlee", "name": "Sam Lee"}, "the sign-in name is made from their name"
+    assert [(m["login"], m["role"]) for m in made["members"]] == [("owner", "owner"), ("samlee", "editor")]
+    assert GOOD not in str(made) and "password" not in str(made).lower()
+
+    sam = house.use_link(made["setup_path"])
+    session = sam.get("/v1/session").json()["result"]
+    assert session["vault"] == {"id": main, "name": "Main", "role": "editor"}, "the vault they were invited into is the one that opens"
+    assert sorted((v["name"], v["role"]) for v in session["vaults"]) == [("Main", "editor"), ("My notes", "owner")], "with a vault of their own beside it"
+    assert [n["title"] for n in sam.get("/v1/library/notes").json()["result"]] == ["Household page"]
+
+    # A second person of the same name gets a name of their own; a chosen name is kept as typed.
+    assert owner.post("/v1/vault/invitations", json={"name": "Sam Lee", "role": "viewer"}).json()["result"]["account"]["login"] == "samlee2"
+    assert owner.post("/v1/vault/invitations", json={"name": "Jo", "role": "viewer", "login": "Jo@Example.com"}).json()["result"]["account"]["login"] == "jo@example.com"
+    assert owner.post("/v1/vault/invitations", json={"name": "Jo", "role": "viewer", "login": "jo@example.com"}).status_code == 409
+    assert owner.post("/v1/vault/invitations", json={"name": "Jo", "role": "viewer", "login": "not a name"}).status_code == 400
+    assert owner.post("/v1/vault/invitations", json={"name": "   ", "role": "viewer"}).status_code == 400
+    assert owner.post("/v1/vault/invitations", json={"name": "Jo", "role": "boss"}).status_code == 400
+
+
+def test_only_an_administrator_who_owns_the_vault_may_invite(house):
+    owner = house.signed_in("owner")
+    made = owner.post("/v1/admin/people", json={"login": "sam", "name": "Sam"}).json()["result"]
+    sam = house.use_link(made["setup_path"])
+    assert sam.get("/v1/vault/members").json()["result"]["can_invite"] is False
+    refused = sam.post("/v1/vault/invitations", json={"name": "Friend", "role": "viewer"})
+    assert refused.status_code == 403 and "administrator" in refused.text, "an owner who is no administrator cannot make accounts"
+    assert house.store.account_named("friend") is None
+
+    assert owner.post("/v1/vault/members", json={"login": "sam", "role": "editor"}).status_code == 200
+    main = owner.get("/v1/session").json()["result"]["vault"]["id"]
+    assert sam.post("/v1/session/vault", json={"vault": main}).status_code == 200
+    assert sam.post("/v1/vault/invitations", json={"name": "Friend", "role": "viewer"}).status_code == 403, "nor may an editor"
+    token = {"Authorization": f"Bearer {house.old_token}"}
+    assert house.browser().post("/v1/vault/invitations", json={"name": "Friend", "role": "viewer"}, headers=token).status_code == 403
+
+
+def test_an_owner_picks_who_to_share_with_only_while_accounts_are_by_invitation(house):
+    owner = house.signed_in("owner")
+    house.store.add_account("zed", "Zed")
+    house.store.add_account("amy", "Amy")
+    house.store.add_account("gone", "Gone")
+    house.store.set_disabled("gone", True)
+
+    shown = owner.get("/v1/vault/members").json()["result"]
+    assert shown["others"] == [{"login": "amy", "name": "Amy"}, {"login": "zed", "name": "Zed"}], "by name; nobody switched off, nobody already in"
+    shared = owner.post("/v1/vault/members", json={"login": "amy", "role": "viewer"}).json()["result"]
+    assert [person["login"] for person in shared["others"]] == ["zed"]
+    back = owner.delete(f"/v1/vault/members/{house.store.account('amy')['id']}").json()["result"]
+    assert [person["login"] for person in back["others"]] == ["amy", "zed"]
+
+    missing = owner.post("/v1/vault/members", json={"login": "nobody", "role": "viewer"})
+    assert missing.status_code == 404 and "need an account" in missing.text
+
+    # With sign-up open the people here are strangers to each other: nobody is listed.
+    assert owner.post("/v1/admin/sign-up", json={"signup": "open"}).status_code == 200
+    assert owner.get("/v1/vault/members").json()["result"]["others"] == []
+
+
+def test_a_person_chooses_their_sign_in_name_when_they_first_set_up(house):
+    fresh = house.browser()
+    code = house.store.new_setup_code("owner")
+    assert fresh.post("/v1/setup/check", json={"code": code}).json()["result"] == {"login": "owner", "name": "Owner", "fresh": True, "named": False}
+
+    assert fresh.post("/v1/setup", json={"code": code, "password": GOOD, "login": "not a name"}).status_code == 400
+    house.store.add_account("taken")
+    assert fresh.post("/v1/setup", json={"code": code, "password": GOOD, "login": "Taken"}).status_code == 409
+    assert fresh.post("/v1/setup/check", json={"code": code}).status_code == 200, "a refused name leaves the link usable"
+
+    done = fresh.post("/v1/setup", json={"code": code, "password": GOOD, "name": "Alex Doe", "login": " Alex "})
+    assert done.status_code == 200, done.text
+    assert done.json()["result"]["account"]["login"] == "alex" and done.json()["result"]["account"]["name"] == "Alex Doe"
+    assert house.store.account_named("owner") is None and house.store.account_named("alex")["admin"] is True
+    assert house.browser().post("/v1/sign-in", json={"login": "alex", "password": GOOD}).status_code == 200
+    assert house.browser().post("/v1/sign-in", json={"login": "owner", "password": GOOD}).status_code == 401
+
+    # Once the account is in use its name is no longer the link holder's to change.
+    again = house.store.new_setup_code("alex")
+    assert fresh.post("/v1/setup/check", json={"code": again}).json()["result"] == {"login": "alex", "name": "Alex Doe", "fresh": False, "named": True}
+    assert fresh.post("/v1/setup", json={"code": again, "password": GOOD, "login": "mallory"}).status_code == 409
+    assert fresh.post("/v1/setup", json={"code": again, "password": GOOD, "login": "ALEX"}).status_code == 200, "the same name is no change"
+
+
+def test_a_new_installations_administrator_is_shown_what_is_left_to_do(house):
+    owner = house.signed_in("owner")
+    house.store.add_account("sam")
+    sam = house.signed_in("sam")
+    assert sam.get("/v1/admin/setup").status_code == 403 and sam.post("/v1/admin/setup", json={"hidden": True}).status_code == 403
+
+    def steps(answer):
+        return {item["id"]: item["done"] for item in answer.json()["result"]["items"]}
+
+    first = owner.get("/v1/admin/setup")
+    assert first.json()["result"]["show"] is True
+    assert steps(first) == {"key": False, "first": False, "chrome": False, "invite": True, "google": False}
+    assert {item["id"] for item in first.json()["result"]["items"] if item.get("optional")} == {"chrome", "invite", "google"}
+
+    assert owner.post("/v1/library/notes", json={"title": "First", "body": "b"}).status_code == 200
+    assert steps(owner.get("/v1/admin/setup")) == {"key": False, "first": True, "chrome": False, "invite": True, "google": False}
+
+    # Connecting the extension is seen for itself; the key is the administrator's word.
+    me = house.store.account_named("owner")["id"]
+    house.tokens.create("Chrome extension", ["read"], account=me, vault=owner.get("/v1/session").json()["result"]["vault"]["id"])
+    assert steps(owner.get("/v1/admin/setup"))["chrome"] is True and owner.get("/v1/admin/setup").json()["result"]["show"] is True
+    done = owner.post("/v1/admin/setup", json={"key_saved": True})
+    assert steps(done) == {"key": True, "first": True, "chrome": True, "invite": True, "google": False}
+    assert done.json()["result"]["show"] is False, "nothing is left but an optional step"
+
+    # Put away, it stays away even with steps left; and it can be brought back.
+    assert owner.post("/v1/admin/setup", json={"key_saved": False}).json()["result"]["show"] is True
+    assert owner.post("/v1/admin/setup", json={"hidden": True}).json()["result"]["show"] is False
+    assert owner.get("/v1/admin/setup").json()["result"]["show"] is False
+    assert owner.post("/v1/admin/setup", json={"hidden": False}).json()["result"]["show"] is True

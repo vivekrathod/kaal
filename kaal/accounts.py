@@ -490,6 +490,13 @@ class AccountStore:
                               "WHERE m.vault_id = ? ORDER BY m.rowid", (vault_id,))
             return [{"account": row["id"], "login": row["login"], "name": row["name"], "role": row["role"]} for row in rows]
 
+    def others(self, vault_id: str) -> list[dict[str, Any]]:
+        """The people with an account here who do not belong to this vault: who it could be shared with."""
+        with self._db() as db:
+            rows = db.execute("SELECT a.login, a.name FROM accounts a WHERE a.disabled_at IS NULL AND NOT EXISTS "
+                              "(SELECT 1 FROM memberships m WHERE m.account_id = a.id AND m.vault_id = ?) ORDER BY a.name COLLATE NOCASE, a.rowid", (vault_id,))
+            return [{"login": row["login"], "name": row["name"]} for row in rows]
+
     def vaults_of(self, account_id: str) -> list[dict[str, Any]]:
         with self._db() as db:
             rows = db.execute("SELECT v.*, m.role FROM memberships m JOIN vaults v ON v.id = m.vault_id "

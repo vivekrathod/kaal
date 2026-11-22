@@ -220,3 +220,14 @@ h2.sub { font-size: 1rem; margin: 18px 0 4px; }
 /* The buttons for signing in through another service. */
 .button.wide { width: 100%; justify-content: center; }
 .divider { text-align: center; margin: 4px 0 0; }
+
+/* What is left to set up, on a new Kaal's first screen. */
+.setup-list { margin-bottom: 16px; }
+.steps .step { display: flex; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+.steps .step:first-child { border-top: 0; }
+.step-mark { flex: none; width: 1.4em; text-align: center; color: var(--muted); }
+.step.done .step-mark { color: var(--good-text); }
+.step-body { min-width: 0; flex: 1; }
+.step-body p { margin: 4px 0 8px; }
+.command { display: block; margin: 0 0 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; overflow-wrap: anywhere; user-select: all; }
+div.empty p { margin: 0 0 12px; }

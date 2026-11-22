@@ -14,9 +14,18 @@ cd "$(dirname "$0")"
 say() { printf '\n==> %s\n' "$1"; }
 stop() { printf '\nStopped: %s\n' "$1" >&2; exit 1; }
 
+# This machine's own name on Tailscale (such as kaal.example.ts.net), or nothing.
+tailscale_name() {
+    command -v tailscale > /dev/null 2>&1 || return 0
+    found=$(tailscale status --json 2> /dev/null | grep -o '"DNSName": *"[^"]*"' | head -n 1 | sed -e 's/^.*: *"//' -e 's/\.\{0,1\}"$//') || true
+    printf '%s' "$found" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$' && printf '%s' "$found" || true
+}
+
 mode=""
 value=""
 image=""
+asked=0          # the questions are being answered by a person at the keyboard
+on_tailscale=0   # they chose this machine's own Tailscale name
 while [ $# -gt 0 ]; do
     case "$1" in
     --domain) mode=domain; value="${2:-}"; shift 2 ;;
@@ -57,9 +66,17 @@ Where will people open Kaal?
 ASK
     printf 'Choose 1, 2 or 3: '
     read -r choice
+    asked=1
     case "$choice" in
     1) mode=domain; printf 'The domain name, such as kaal.example.org: '; read -r value ;;
-    2) mode=behind; printf 'The full address people will open, such as https://kaal.example.ts.net: '; read -r value ;;
+    2) mode=behind
+       name=$(tailscale_name)
+       if [ -n "$name" ]; then
+           printf 'Tailscale is on this machine as %s. Use https://%s? [Y/n] ' "$name" "$name"
+           read -r answer
+           case "$answer" in n* | N*) ;; *) value="https://$name"; on_tailscale=1 ;; esac
+       fi
+       [ -n "$value" ] || { printf 'The full address people will open, such as https://kaal.example.ts.net: '; read -r value; } ;;
     3) mode=local ;;
     *) stop "that was not 1, 2 or 3" ;;
     esac
@@ -132,31 +149,61 @@ done
 [ "$(sed -n 's/^COMPOSE_PROFILES=//p' .env)" != https ] || [ "$first_time" -eq 1 ] || docker compose restart caddy > /dev/null 2>&1 || true
 
 say "Kaal is running at $address"
+
+# Behind Tailscale or a proxy, something has to pass requests on before the address works.
+case "$(sed -n 's/^COMPOSE_PROFILES=//p' .env)$(sed -n 's/^KAAL_COOKIE_SECURE=//p' .env)" in
+https*) printf '\nThe first visit can take a few seconds while the certificate for the domain is fetched.\n' ;;
+1) served=0
+   if [ "$on_tailscale" -eq 1 ]; then
+       printf '\nPublish Kaal to your own Tailscale devices now (tailscale serve --bg 8765)? [Y/n] '
+       read -r answer || answer=n
+       case "$answer" in
+       n* | N*) ;;
+       *) if tailscale serve --bg 8765 > /dev/null 2>&1; then served=1; printf 'Done: your devices on Tailscale can open %s\n' "$address"
+          else printf 'Tailscale would not do that from here. Run it yourself (it may need sudo, or HTTPS turned on for your tailnet).\n'; fi ;;
+       esac
+   fi
+   if [ "$served" -eq 0 ]; then
+       printf '\nKaal listens on 127.0.0.1:8765. Point your proxy at it; with Tailscale:\n\n  tailscale serve --bg 8765\n'
+       printf '\nA proxy of your own must pass on who is asking (the X-Forwarded-For header), or Kaal\ncannot tell visitors apart. Tailscale and Caddy do; for nginx add:\n\n  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n'
+   fi ;;
+esac
+
 # A link only for an administrator who has never signed in. A second run (another checkout over
 # the same data, say) must not hand whoever runs it a way to replace an existing password.
 link=""
 [ "$first_time" -eq 1 ] && link=$(docker compose exec -T kaal kaal-server account setup-link owner --new-only 2> /dev/null | tail -1) || true
 if [ "$first_time" -eq 1 ] && [ -z "$link" ]; then
     printf '\nThis Kaal already has its administrator, so no new sign-in link was made. Sign in as usual.\n'
-    printf 'If the password is lost: deploy/docker/kaalctl setup-link owner\n'
+    printf 'If the password is lost: deploy/docker/kaalctl setup-link NAME, with the name they sign in with\n'
+    printf '(deploy/docker/kaalctl run kaal-server account list shows the names).\n'
 elif [ "$first_time" -eq 1 ]; then
+    # The key is the one thing that cannot be made again. A person at the keyboard is asked for
+    # a place to put a copy now; otherwise they are told how.
+    key_copied=0
+    if [ "$asked" -eq 1 ]; then
+        default_key="${HOME:-.}/kaal-master.key"
+        printf '\nEverything in Kaal is encrypted with one key. If it is lost, nothing can be read again,\nby you or anyone. Save a copy of it now, to move off this machine afterwards.\n'
+        printf 'File to write it to [%s], or - to skip: ' "$default_key"
+        read -r key_file || key_file=-
+        [ -n "$key_file" ] || key_file=$default_key
+        case "$key_file" in "~/"*) key_file="${HOME:-.}/${key_file#\~/}" ;; esac
+        [ "$key_file" = - ] || { ./kaalctl key-backup "$key_file" && key_copied=1; } || true
+    fi
     cat << DONE
 
-Open this link once to choose your password (it works for 24 hours):
+Open this link once to choose your name and password (it works for 24 hours):
 
   $link
 
-You are the administrator. Add other people under Settings > People.
+You are the administrator. Kaal's first screen lists what is left to set up,
+and you invite other people under Settings > Vaults and sharing.
 
-Two things to do now:
-  1. Keep a copy of the key somewhere off this machine. Without it nothing in
-     Kaal can be read again:   deploy/docker/kaalctl key-backup ~/kaal-master.key
-  2. A copy of everything is made each day and the newest 14 are kept, but on
-     this same machine. To keep copies elsewhere too, see docs/install.md.
 DONE
+    if [ "$key_copied" -eq 1 ]; then
+        printf 'The copy of the key is still on this machine. Move it to a password manager, an\nencrypted drive or paper in a safe, and never keep it beside a backup.\n'
+    else
+        printf 'Keep a copy of the key somewhere off this machine. Without it nothing in Kaal\ncan be read again:   deploy/docker/kaalctl key-backup ~/kaal-master.key\n'
+    fi
+    printf '\nA copy of everything is made each day and the newest 14 are kept, but on this\nsame machine. To keep copies elsewhere too, see docs/install.md.\n'
 fi
-case "$(sed -n 's/^COMPOSE_PROFILES=//p' .env)$(sed -n 's/^KAAL_COOKIE_SECURE=//p' .env)" in
-https*) printf '\nThe first visit can take a few seconds while the certificate for the domain is fetched.\n' ;;
-1) printf '\nKaal listens on 127.0.0.1:8765. Point your proxy at it; with Tailscale:\n\n  tailscale serve --bg 8765\n'
-   printf '\nA proxy of your own must pass on who is asking (the X-Forwarded-For header), or Kaal\ncannot tell visitors apart. Tailscale and Caddy do; for nginx add:\n\n  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n' ;;
-esac

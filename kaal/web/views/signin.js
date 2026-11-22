@@ -40,7 +40,7 @@ export const SERVICE_PROBLEMS = {
   cancelled: "Signing in was cancelled.",
   expired: "That sign-in took too long, or was started in another browser. Try again.",
   failed: "The sign-in service could not confirm who you are. Try again, or sign in another way.",
-  "no-account": "No account here is connected to that sign-in. Sign in with your password and connect it in Settings, or ask whoever runs this Kaal for a setup link.",
+  "no-account": "No account here is connected to that sign-in. Whoever runs this Kaal has to invite you first: ask them for a link, and open it in this browser. If you already have an account here, sign in with your password and connect this sign-in in Settings.",
   "in-use": "That sign-in is already connected to a different account here.",
   off: "That account has been switched off.",
   busy: "Too many new accounts just now. Try again later.",
@@ -183,20 +183,35 @@ export function signInView({ onSignedIn, problem = "" }) {
 export function setupView(code, { onSignedIn }) {
   const page = h("main", { class: "page narrow" }, h("p", { class: "empty" }, "Checking your link…"));
   api.setupCheck(code).then((who) => {
-    const [nameLabel, name] = field("name", "Your name", { type: "text", autocomplete: "name", maxlength: "100", value: who.name === who.login ? "" : who.name });
+    // While nobody has used the account, the name it signs in with is the person's own to choose.
+    const fresh = who.fresh === true;
+    const [nameLabel, name] = field("name", "Your name", { type: "text", autocomplete: "name", maxlength: "100", value: who.named === false || who.name === who.login ? "" : who.name });
     name.required = false;
     const [passwordLabel, password] = field("new-password", "Password", { type: "password", autocomplete: "new-password" });
     const [againLabel, again] = field("again", "Password again", { type: "password", autocomplete: "new-password" });
-    // Lets a password manager file the new password under the right name.
-    const login = h("input", { type: "text", name: "username", autocomplete: "username", value: who.login, readonly: true, class: "quiet-field", "aria-label": "Sign-in name" });
+    // Named "username" so a password manager files the new password under the right name.
+    const login = h("input", { type: "text", id: "username", name: "username", autocomplete: "username", autocapitalize: "off", spellcheck: "false", maxlength: "64", value: who.login,
+      ...(fresh ? {} : { readonly: true, class: "quiet-field", "aria-label": "Sign-in name" }) });
+    const loginFields = fresh
+      ? [h("label", { for: "username" }, "Sign-in name"), login, h("p", { class: "muted small" }, "What you type to sign in, with your password. Letters and digits, no spaces.")]
+      : [login];
+    if (fresh && who.named === false) {
+      // Nobody gave this account a person's name (the first account of a new Kaal is "owner"):
+      // suggest a sign-in name from the name typed, until the person writes one of their own.
+      let own = false;
+      login.addEventListener("input", () => { own = true; });
+      name.addEventListener("input", () => {
+        if (!own) login.value = name.value.toLowerCase().replace(/[^a-z0-9._+-]/g, "").replace(/^[._+-]+/, "").slice(0, 56) || who.login;
+      });
+    }
     replace(page, form({
       title: "Welcome to Kaal",
-      intro: `Choose a password. You will sign in as “${who.login}”.`,
-      fields: [login, nameLabel, name, passwordLabel, password, againLabel, again],
+      intro: fresh ? "Choose how you sign in." : `Choose a password. You will sign in as “${who.login}”.`,
+      fields: fresh ? [nameLabel, name, ...loginFields, passwordLabel, password, againLabel, again] : [...loginFields, nameLabel, name, passwordLabel, password, againLabel, again],
       submitLabel: "Save and sign in",
       busyLabel: "Saving…",
-      check: () => (password.value.length < 10 ? "Choose a password of at least 10 characters." : password.value !== again.value ? "The two passwords don't match." : null),
-      send: () => api.setup(code, password.value, name.value.trim()),
+      check: () => (fresh && !login.value.trim() ? "Choose a sign-in name." : password.value.length < 10 ? "Choose a password of at least 10 characters." : password.value !== again.value ? "The two passwords don't match." : null),
+      send: () => api.setup(code, password.value, name.value.trim(), fresh ? login.value.trim() : ""),
       done: (signedIn) => replace(page, recoveryCodesCard(signedIn.recovery_codes || [], () => onSignedIn(signedIn))),
       wrong: (error) => error.message,
       footer: serviceButtons(code),

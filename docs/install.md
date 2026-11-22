@@ -29,8 +29,10 @@ where people will open Kaal:
    renewed automatically. Ports 80 and 443 must be reachable from the internet
    and not used by anything else.
 2. **Through Tailscale, or another proxy you run.** Kaal listens only on this
-   machine (`127.0.0.1:8765`) and your proxy provides HTTPS. With Tailscale,
-   `tailscale serve --bg 8765` publishes it to your own devices only.
+   machine (`127.0.0.1:8765`) and your proxy provides HTTPS. If Tailscale is
+   on the machine, the script finds its name (such as `kaal.example.ts.net`),
+   offers it as the address, and offers to publish Kaal to your own devices
+   for you (`tailscale serve --bg 8765`). Otherwise you type the address.
 3. **Only on this machine**, at `http://localhost:8765`, to try it out.
 
 The same choices without questions:
@@ -41,22 +43,31 @@ deploy/docker/install.sh --behind https://kaal.example.ts.net
 deploy/docker/install.sh --local
 ```
 
-It builds Kaal, starts it, and prints a link. Open the link once to choose
-your password; you are then the administrator and can add other people under
-Settings → People. Running the script again is safe: it keeps what is stored
-and only applies new answers.
+It builds Kaal, starts it, asks where to write a copy of the key (see the next
+section), and prints a link. Open the link once to choose your name, the name
+you sign in with, and your password; you are then the administrator. Kaal's
+first screen lists what is left to set up, until you have done it or put the
+list away: keeping the key, adding a first receipt or note, the Chrome
+extension, inviting someone, and signing in with Google. You invite other
+people under Settings → Vaults and sharing: you type their name, send them the
+link you are given, and they land in your vault with a vault of their own
+beside it. Running the script again is safe: it keeps what is stored and only
+applies new answers.
 
 ## Keep a copy of the key
 
 Everything in Kaal is encrypted with one key, which lives on the machine but
 apart from the data. **If the key is lost, nothing in Kaal can be read again**,
-by you or anyone else. Copy it somewhere off the machine straight away:
+by you or anyone else. The install script asks where to write a copy when you
+answer its questions yourself (Enter takes `~/kaal-master.key`; `-` skips it).
+With `--domain`, `--behind` or `--local` it asks nothing, and you make the copy
+yourself:
 
 ```bash
 deploy/docker/kaalctl key-backup ~/kaal-master.key
 ```
 
-Move that file to a password manager, an encrypted drive, or paper in a safe.
+Either way the copy is still on the machine. Move that file to a password manager, an encrypted drive, or paper in a safe.
 Anyone who has both the key and a copy of the data can read everything, so do
 not keep them together.
 
@@ -69,7 +80,7 @@ start instead of making a new key. Put the saved one back with
 ```bash
 deploy/docker/kaalctl status                 # is it running, which version, where
 deploy/docker/kaalctl logs                   # what the server has said
-deploy/docker/kaalctl setup-link sam         # a single-use link for sam to choose a password
+deploy/docker/kaalctl setup-link sam         # a single-use link for the person who signs in as sam
 deploy/docker/kaalctl run kaal-server account list
 deploy/docker/kaalctl stop                   # and start; nothing stored is touched
 ```

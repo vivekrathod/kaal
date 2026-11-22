@@ -124,7 +124,10 @@ export function notesView(container, params, { expired }) {
       total = page.meta ? page.meta.total : shown.length;
       status.replaceChildren();
       if (!shown.length) {
-        replace(list, h("p", { class: "empty" }, query ? "Nothing matches that search." : trash ? "The Trash is empty." : "No notes yet."));
+        replace(list, query || trash
+          ? h("p", { class: "empty" }, query ? "Nothing matches that search." : "The Trash is empty.")
+          : h("div", { class: "empty" }, h("p", {}, "No notes yet. A note holds text, and pictures, PDFs or other files beside it."),
+            h("a", { href: "#/notes/new", class: "button primary" }, "Write your first note")));
       } else {
         replace(list, shown.map((note) => h("a", { class: "row", href: `#/note/${encodeURIComponent(note.id)}` },
           h("span", { class: "row-main" },

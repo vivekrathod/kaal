@@ -1071,6 +1071,10 @@ def exact_cookie(request: Request, name: str) -> str:
 
 
 HOST_COOKIE_SINCE = "host_cookie_since"
+# Kept with the accounts: the administrator has said a copy of the key is kept elsewhere, and
+# whether they have put the list of setup steps away.
+SETUP_KEY_SAVED = "setup_key_saved"
+SETUP_HIDDEN = "setup_hidden"
 
 
 def _older_than_the_host_cookie(state: Any, presented: str) -> bool:
@@ -1594,6 +1598,8 @@ class SetupFinish(BaseModel):
     code: str = Field(min_length=1, max_length=200)
     password: str = Field(min_length=1, max_length=1024)
     name: str = Field(default="", max_length=100)
+    # A sign-in name of the person's own choosing, for an account nobody has used yet.
+    login: str = Field(default="", max_length=64)
 
 
 class PasswordChange(BaseModel):
@@ -1631,6 +1637,18 @@ class SignUp(BaseModel):
 class MemberChange(BaseModel):
     login: str = Field(min_length=1, max_length=64)
     role: Literal["owner", "editor", "viewer"]
+
+
+class Invitation(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    role: Literal["owner", "editor", "viewer"]
+    # Left out, a sign-in name is made from the person's name.
+    login: str = Field(default="", max_length=64)
+
+
+class SetupList(BaseModel):
+    key_saved: bool | None = None
+    hidden: bool | None = None
 
 
 class VaultNew(BaseModel):
@@ -1934,6 +1952,10 @@ def create_app(settings: Settings) -> FastAPI:
             told["vault"] = next((vault for vault in told["vaults"] if vault["id"] == record["vault"]), None)
         return told
 
+    def account_in_use(state: Any, account_id: str) -> bool:
+        """Whether anyone has ever set this account up: it has a password, or a sign-in service is connected."""
+        return state.accounts.password_hash(account_id) is not None or bool(state.accounts.identities_of(account_id))
+
     def open_session(request: Request, state: Any, account: dict[str, Any]) -> tuple[dict[str, Any], str]:
         """A new session for a person on this browser, on their first vault, and its cookie value."""
         theirs = state.accounts.vaults_of(account["id"])
@@ -2057,7 +2079,10 @@ def create_app(settings: Settings) -> FastAPI:
             if refused_too_often(request, state):
                 raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
             return _error(404, "This setup link has been used or has run out. Ask for a new one.", "not_found")
-        return answer({"login": account["login"], "name": account["name"]})
+        # ``fresh``: nobody has used this account yet, so its sign-in name may still be chosen.
+        # ``named``: whoever made the account gave the person's own name.
+        return answer({"login": account["login"], "name": account["name"], "fresh": not account_in_use(state, account["id"]),
+                       "named": account["name"].strip().lower() != account["login"]})
 
     @app.post("/v1/setup", tags=["session"], dependencies=[STRANGERS])
     def setup_finish(request: Request, body: SetupFinish):
@@ -2068,15 +2093,34 @@ def create_app(settings: Settings) -> FastAPI:
             if refused_too_often(request, state):
                 raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
             return _error(404, "This setup link has been used or has run out. Ask for a new one.", "not_found")
+        in_use = account_in_use(state, account["id"])
+        wanted = body.login.strip().lower()
+        if wanted and wanted != account["login"]:
+            # Only before the account is first used: afterwards tokens, scripts and the people it
+            # shares with know it by its name, and whoever runs the server renames it.
+            if in_use:
+                return _error(409, "This account is already in use, so its sign-in name cannot be changed here.", "conflict")
+            try:
+                wanted = accounts.clean_login(wanted)
+            except accounts.AccountError as error:
+                return _error(400, str(error), "invalid")
+            if state.accounts.account_named(wanted) is not None:
+                return _error(409, "Someone here already has that sign-in name. Choose another.", "conflict")
+        else:
+            wanted = account["login"]
         try:
-            passwords.check_new(body.password, login=account["login"])
+            passwords.check_new(body.password, login=wanted)
         except passwords.PasswordError as error:
             return _error(400, str(error), "invalid")
         # Hashed before the link is used up: a server too busy to hash answers so with the link intact.
         hashed = passwords.hash_password(body.password)
-        in_use = state.accounts.password_hash(account["id"]) is not None or bool(state.accounts.identities_of(account["id"]))
         if state.accounts.setup_account(body.code, spend=True) is None:
             return _error(404, "This setup link has been used or has run out. Ask for a new one.", "not_found")
+        if wanted != account["login"]:
+            try:
+                state.accounts.set_login(account["id"], wanted)
+            except accounts.AccountError:
+                pass                # taken a moment ago by someone else: the name the account had stands
         state.accounts.set_password(account["id"], hashed)
         state.accounts.rename(account["id"], body.name)
         state.accounts.end_sessions(account["id"])
@@ -2370,8 +2414,43 @@ def create_app(settings: Settings) -> FastAPI:
     @app.get("/v1/vault/members", tags=["account"])
     def vault_members(request: Request, person: dict[str, Any] = require_owner()):
         state = S(request)
-        return answer({"vault": next(vault for vault in who(person)["vaults"] if vault["id"] == person["vault"]),
-                       "members": state.accounts.members(person["vault"])})
+        return answer({"vault": next(vault for vault in who(person)["vaults"] if vault["id"] == person["vault"]), **sharing(state, person)})
+
+    def sharing(state: Any, person: dict[str, Any]) -> dict[str, Any]:
+        """Who shares the open vault, who else could, and whether this person may invite someone new.
+
+        The others are named only while accounts are by invitation: everyone here was then let in by
+        an administrator, as in a household. With sign-up open they are strangers to each other, and
+        an owner types the sign-in name of the person they mean."""
+        return {"members": state.accounts.members(person["vault"]),
+                "others": state.accounts.others(person["vault"]) if signup_setting(state) == "invitation" else [],
+                "listed": signup_setting(state) == "invitation", "can_invite": bool(person["person"]["admin"])}
+
+    @app.post("/v1/vault/invitations", tags=["account"])
+    def vault_invite(request: Request, body: Invitation, person: dict[str, Any] = require_owner()):
+        """Invite someone who has no account yet into this vault: an account, a vault of their own,
+        a place in this one, and a single-use link with which they choose how to sign in. Making
+        accounts is an administrator's job, so only an owner who is one may."""
+        state = S(request)
+        if not person["person"]["admin"]:
+            return _error(403, "Only an administrator of this Kaal can invite someone new. Ask whoever runs it to add them, then share this vault with them.", "forbidden")
+        if not state.invites.allow(person["account"]):
+            return _error(429, "You are adding people too quickly. Try again in a minute.", "rate_limited", headers={"Retry-After": "60"})
+        name = body.name.strip()
+        if not name:
+            return _error(400, "Enter their name.", "invalid")
+        try:
+            login = accounts.clean_login(body.login) if body.login.strip() else state.accounts.free_login(name)
+            made = state.accounts.add_account(login, name)
+            # Their place in this vault comes first, so it is the one that opens when they sign in.
+            state.accounts.grant(made["id"], person["vault"], body.role)
+            create_vault(state.accounts, "My notes", made["id"])
+        except accounts.AccountError as error:
+            return _error(409 if "already" in str(error) else 400, str(error), "conflict" if "already" in str(error) else "invalid")
+        except core.KaalError as error:
+            return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind)
+        log.info("someone was invited into a vault")
+        return answer({"account": {"login": made["login"], "name": made["name"]}, "setup_path": setup_path(state, made["id"]), **sharing(state, person)})
 
     @app.post("/v1/vault/members", tags=["account"])
     def vault_member_set(request: Request, body: MemberChange, person: dict[str, Any] = require_owner()):
@@ -2383,8 +2462,9 @@ def create_app(settings: Settings) -> FastAPI:
             state.accounts.grant(body.login.strip().lower(), person["vault"], body.role, by_name=True)
         except accounts.AccountError as error:
             missing = str(error).startswith("No account")
-            return _error(404 if missing else 409, "Nobody here has that sign-in name." if missing else str(error), "not_found" if missing else "conflict")
-        return answer({"members": state.accounts.members(person["vault"])})
+            return _error(404 if missing else 409, "Nobody here has that sign-in name. They need an account on this Kaal first: an administrator can invite them."
+                          if missing else str(error), "not_found" if missing else "conflict")
+        return answer(sharing(state, person))
 
     @app.delete("/v1/vault/members/{account_id}", tags=["account"])
     def vault_member_remove(request: Request, account_id: str, person: dict[str, Any] = require_owner()):
@@ -2393,7 +2473,7 @@ def create_app(settings: Settings) -> FastAPI:
             state.accounts.ungrant(account_id, person["vault"])
         except accounts.AccountError as error:
             return _error(409, str(error), "conflict")
-        return answer({"members": state.accounts.members(person["vault"])})
+        return answer(sharing(state, person))
 
     # --- who may use this installation (administrators)
 
@@ -2490,6 +2570,49 @@ def create_app(settings: Settings) -> FastAPI:
         state = S(request)
         state.accounts.put("signup", body.signup)
         return answer({"signup": signup_setting(state)})
+
+    # --- what is left to do on a new installation (administrators)
+
+    def setup_list(state: Any, person: dict[str, Any]) -> dict[str, Any]:
+        """The steps a new installation's administrator has and has not taken. Most are read off
+        what is there; keeping a copy of the key happens outside Kaal, so they say when it is done.
+        The list is shown until the steps that are not optional are done, or it is put away."""
+        me = person["account"]
+        added = False
+        vault = state.vaults.get(person["vault"]) if person["vault"] else None
+        if vault is not None and vault.request_lock.acquire(timeout=2):
+            try:
+                with core.use_vault(vault):
+                    added = bool(core.load_index().get("notes"))
+            except (core.KaalError, OSError, ValueError):
+                added = False
+            finally:
+                vault.request_lock.release()
+        first_account = state.accounts.defaults()[0]
+        mine = [token for token in state.tokens.list() if not token.get("revoked_at")
+                and (token.get("account") == me or (token.get("account") is None and me == first_account))]
+
+        items = [{"id": "key", "done": state.accounts.get(SETUP_KEY_SAVED) == "1"},
+                 {"id": "first", "done": added},
+                 {"id": "chrome", "done": any("extension" in token["name"].lower() for token in mine), "optional": True},
+                 {"id": "invite", "done": len(state.accounts.accounts()) > 1, "optional": True},
+                 {"id": "google", "done": bool(offered(state)), "optional": True}]
+        left = [item["id"] for item in items if not item["done"] and not item.get("optional")]
+        return {"show": bool(left) and state.accounts.get(SETUP_HIDDEN) != "1", "items": items, "address": public_address(state)}
+
+    @app.get("/v1/admin/setup", tags=["admin"])
+    def admin_setup(request: Request, person: dict[str, Any] = require_admin()):
+        return answer(setup_list(S(request), person))
+
+    @app.post("/v1/admin/setup", tags=["admin"])
+    def admin_setup_change(request: Request, body: SetupList, person: dict[str, Any] = require_admin()):
+        """Say that a copy of the key is kept somewhere else, or put the list away (or bring it back)."""
+        state = S(request)
+        if body.key_saved is not None:
+            state.accounts.put(SETUP_KEY_SAVED, "1" if body.key_saved else "0")
+        if body.hidden is not None:
+            state.accounts.put(SETUP_HIDDEN, "1" if body.hidden else "0")
+        return answer(setup_list(state, person))
 
     @app.get("/v1/sign-in/options", tags=["session"])
     def sign_in_options(request: Request):

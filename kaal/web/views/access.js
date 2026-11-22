@@ -136,21 +136,61 @@ export function sharingView(container, _params, context) {
       form);
   }
 
-  function draw(shared) {
+  // Letting in someone who already has an account here. While accounts are by invitation they are
+  // picked from a list; with sign-up open nobody is listed, and their sign-in name is typed.
+  function shareForm(shared, redraw) {
+    const role = h("select", { id: "member-role", "aria-label": "Role" }, ROLES.map(([value, label]) => h("option", { value }, label)));
+    if (shared.listed && !shared.others.length) {
+      // Nobody left to pick. Alone on this Kaal, there is nothing to say; inviting is what is next.
+      return shared.members.length > 1 ? h("div", { class: "stack" }, h("h2", { class: "sub" }, "Let someone in"),
+        h("p", { class: "muted" }, "Everyone with an account on this Kaal already shares this vault.")) : null;
+    }
+    const who = shared.listed
+      ? h("select", { id: "member-login" }, h("option", { value: "" }, "Choose a person…"),
+        shared.others.map((person) => h("option", { value: person.login }, person.name !== person.login ? `${person.name} (${person.login})` : person.login)))
+      : h("input", { type: "text", id: "member-login", maxlength: "64", placeholder: "Their sign-in name", autocomplete: "off", autocapitalize: "off", spellcheck: "false" });
+    const form = h("form", { class: "stack", novalidate: true }, h("label", { for: "member-login" }, "Let someone in"), who, role,
+      h("div", {}, h("button", { type: "submit", class: "button" }, "Share")));
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (!who.value.trim()) {
+        replace(status, notice(shared.listed ? "Choose who to let in." : "Enter the sign-in name of someone who has an account here.", "error"));
+        return;
+      }
+      attempt(async () => redraw(await api.setMember(who.value.trim(), role.value)));
+    });
+    return form;
+  }
+
+  // Someone with no account here yet: one link gives them an account and a place in this vault.
+  function inviteForm(shared, redraw) {
+    if (!shared.can_invite) {
+      return h("p", { class: "muted small" }, "Someone who has no account on this Kaal yet? Ask whoever runs it to add them, then let them in here.");
+    }
+    const name = h("input", { type: "text", id: "invite-name", maxlength: "100", placeholder: "Their name", autocomplete: "off" });
+    const role = h("select", { id: "invite-role", "aria-label": "Role" }, ROLES.map(([value, label]) => h("option", { value, selected: value === "editor" }, label)));
+    const form = h("form", { class: "stack", novalidate: true }, h("label", { for: "invite-name" }, "Invite someone new"),
+      h("p", { class: "muted small" }, "For someone who has no account on this Kaal yet. You get a link to send them."), name, role,
+      h("div", {}, h("button", { type: "submit", class: "button" }, "Invite and make a link")));
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (!name.value.trim()) {
+        replace(status, notice("Enter their name.", "error"));
+        return;
+      }
+      attempt(async () => {
+        const made = await api.invite(name.value.trim(), role.value);
+        redraw(made, { name: made.account.name, login: made.account.login, path: made.setup_path });
+      });
+    });
+    return form;
+  }
+
+  function draw(shared, invited = null) {
     let membersCard = null;
     if (shared) {
-      const login = h("input", { type: "text", id: "member-login", maxlength: "64", placeholder: "Their sign-in name", autocomplete: "off", autocapitalize: "off", spellcheck: "false" });
-      const role = h("select", { id: "member-role", "aria-label": "Role" }, ROLES.map(([value, label]) => h("option", { value }, label)));
-      const form = h("form", { class: "stack", novalidate: true }, h("label", { for: "member-login" }, "Let someone in"), login, role,
-        h("div", {}, h("button", { type: "submit", class: "button" }, "Share")));
-      form.addEventListener("submit", (event) => {
-        event.preventDefault();
-        if (!login.value.trim()) {
-          replace(status, notice("Enter the sign-in name of someone who has an account here.", "error"));
-          return;
-        }
-        attempt(async () => draw({ ...shared, members: await api.setMember(login.value.trim(), role.value) }));
-      });
+      // What a change answers replaces who shares the vault and who else could; the vault itself stays.
+      const redraw = (now, link = null) => draw({ ...shared, ...now }, link);
       const newName = h("input", { type: "text", id: "vault-rename", maxlength: "80", value: shared.vault.name, autocomplete: "off" });
       const renameForm = h("form", { class: "inline-form", novalidate: true }, newName, h("button", { type: "submit", class: "button" }, "Rename"));
       renameForm.addEventListener("submit", (event) => {
@@ -170,14 +210,21 @@ export function sharingView(container, _params, context) {
         h("h2", { class: "sub" }, "Who shares it"),
         h("ul", { class: "plain" }, shared.members.map((member) => {
           const pick = h("select", { "aria-label": `Role of ${member.login}` }, ROLES.map(([value, label]) => h("option", { value, selected: value === member.role }, label.split(":")[0])));
-          pick.addEventListener("change", () => attempt(async () => draw({ ...shared, members: await api.setMember(member.login, pick.value) })).then(() => { pick.value = member.role; }));
+          pick.addEventListener("change", () => attempt(async () => redraw(await api.setMember(member.login, pick.value))).then(() => { pick.value = member.role; }));
           return h("li", { class: "line" },
             h("span", {}, member.name, member.name !== member.login ? h("span", { class: "muted-text" }, ` · ${member.login}`) : null),
-            h("span", { class: "row" }, pick, twoStepButton("Remove", "Really remove?", () => attempt(async () => draw({ ...shared, members: await api.removeMember(member.account) })))));
+            h("span", { class: "row" }, pick, twoStepButton("Remove", "Really remove?", () => attempt(async () => redraw(await api.removeMember(member.account))))));
         })),
-        form);
+        shareForm(shared, redraw),
+        inviteForm(shared, redraw));
     }
-    replace(container, backLink(), status, vaultsCard(),
+    replace(container, backLink(), status,
+      invited ? h("section", { class: "card section" },
+        h("h1", {}, `A link for ${invited.name}`),
+        notice(`Send ${invited.name} this link. It works once, for 24 hours, and is not shown again. They choose a password, or continue with a sign-in service if this Kaal offers one, and “${shared.vault.name}” opens for them.`, "warn"),
+        copyBox("Their link", `${location.origin}${invited.path}`),
+        h("p", { class: "muted small" }, `Their sign-in name is “${invited.login}”; they can change it when they open the link. If the link runs out, make a new one under Settings, People.`)) : null,
+      vaultsCard(),
       membersCard || (session.vault ? h("section", { class: "card section" }, h("h1", {}, `Who shares “${session.vault.name}”`),
         h("p", { class: "muted" }, "Only an owner of this vault can see or change who shares it.")) : null),
       shared ? deleteVaultCard(shared.vault) : null);

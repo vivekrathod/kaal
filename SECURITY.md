@@ -50,8 +50,11 @@ protects, what stays readable, and what the server records. In short:
 - **The `read` scope as a privacy boundary for a note's wording.** It hides
   receipt values, identity numbers and full saved-from addresses, not the text
   of notes.
-- **Finding out that a sign-in name exists.** Someone who owns a vault learns
-  it by sharing with that name; this is limited to a few tries a minute.
+- **Finding out who has an account.** While accounts are by invitation, the
+  people on an installation were all let in by its administrators, and someone
+  who owns a vault is shown their names and sign-in names so as to share with
+  them. With sign-up open nobody is listed; an owner still learns that a
+  sign-in name exists by sharing with it, limited to a few tries a minute.
 
 ## For people running Kaal
 

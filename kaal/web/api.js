@@ -79,7 +79,7 @@ export const api = {
   signInWithPassword: (login, password) => result(request("POST", "/v1/sign-in", { json: { login, password } })),
   recover: (login, code, password) => result(request("POST", "/v1/sign-in/recover", { json: { login, code, password } })),
   setupCheck: (code) => result(request("POST", "/v1/setup/check", { json: { code } })),
-  setup: (code, password, name) => result(request("POST", "/v1/setup", { json: { code, password, name } })),
+  setup: (code, password, name, login = "") => result(request("POST", "/v1/setup", { json: { code, password, name, login } })),
   chooseVault: (vault) => result(request("POST", "/v1/session/vault", { json: { vault } })),
 
   signInOptions: () => result(request("GET", "/v1/sign-in/options")),
@@ -112,8 +112,13 @@ export const api = {
   deleteAccount: (password, confirm) => result(request("DELETE", "/v1/account", { json: { password, confirm } })),
   adminRemovalPlan: (accountId) => result(request("GET", `/v1/admin/people/${id(accountId)}/removal`)),
   adminRemove: (accountId, confirm) => result(request("DELETE", `/v1/admin/people/${id(accountId)}`, { json: { confirm } })),
-  setMember: (login, role) => result(request("POST", "/v1/vault/members", { json: { login, role } })).then((data) => data.members),
-  removeMember: (accountId) => result(request("DELETE", `/v1/vault/members/${id(accountId)}`)).then((data) => data.members),
+  // Each answers who shares the vault now, and who else could: { members, others, listed, can_invite }.
+  setMember: (login, role) => result(request("POST", "/v1/vault/members", { json: { login, role } })),
+  removeMember: (accountId) => result(request("DELETE", `/v1/vault/members/${id(accountId)}`)),
+  // Someone with no account yet: answers the same, with { account, setup_path } for the link to send them.
+  invite: (name, role) => result(request("POST", "/v1/vault/invitations", { json: { name, role } })),
+  setupList: () => result(request("GET", "/v1/admin/setup")),
+  changeSetupList: (change) => result(request("POST", "/v1/admin/setup", { json: change })),
 
   everyone: () => result(request("GET", "/v1/admin/people")),
   addPerson: (person) => result(request("POST", "/v1/admin/people", { json: person })),

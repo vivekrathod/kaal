@@ -43,7 +43,7 @@ def house(tmp_path):
 def test_a_setup_link_lets_its_holder_choose_a_password_once(house):
     code = house.store.new_setup_code("owner")
     client = house.browser()
-    assert client.post("/v1/setup/check", json={"code": code}).json()["result"] == {"login": "owner", "name": "Owner"}
+    assert client.post("/v1/setup/check", json={"code": code}).json()["result"] == {"login": "owner", "name": "Owner", "fresh": True, "named": False}
     assert client.post("/v1/setup/check", json={"code": "not-a-code"}).status_code == 404
 
     # A poor password is refused and the link is still good afterwards.

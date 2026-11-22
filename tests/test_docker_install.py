@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -96,3 +97,91 @@ def test_the_key_is_kept_apart_from_the_data_and_only_this_machine_reaches_kaal_
     assert "KAAL_KEY_FILE=/etc/kaal/master.key" in dockerfile and "USER kaal" in dockerfile
     for line in dockerfile.splitlines():
         assert not line.startswith("COPY .") or line.startswith("COPY ./"), "copy named files only, so nothing private in the folder ends up in an image"
+
+
+# --- install.sh, with stand-ins for Docker and Tailscale
+
+DOCKER_STUB = '''#!/bin/sh
+echo "docker $*" >> "$CALLS"
+case "$*" in
+"compose version --short") echo 2.30.0 ;;
+"compose ps -q kaal") echo abc ;;
+inspect*) echo healthy ;;
+*"account setup-link owner --new-only") echo "https://kaal.example/#/setup/made-up-code" ;;
+*"cat /etc/kaal/master.key") echo made-up-key ;;
+esac
+exit 0
+'''
+TAILSCALE_STUB = '''#!/bin/sh
+echo "tailscale $*" >> "$CALLS"
+[ "$TAILSCALE_WORKS" = 1 ] || exit 1
+case "$*" in
+"status --json") printf '{"Version": "1", "TailscaleIPs": ["100.64.0.1"],\\n "Self": {"ID": "n1", "HostName": "box", "DNSName": "box.tail-made-up.ts.net.", "OS": "linux"},\\n "Peer": {"k": {"DNSName": "other.tail-made-up.ts.net."}}}\\n' ;;
+esac
+exit 0
+'''
+
+
+@pytest.fixture()
+def installer(tmp_path):
+    """install.sh in a copy of its folder, so the settings it writes land in the copy."""
+    folder = tmp_path / "docker"
+    shutil.copytree(DOCKER, folder, ignore=shutil.ignore_patterns(".env*"))
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    for name, text in (("docker", DOCKER_STUB), ("tailscale", TAILSCALE_STUB)):
+        (stubs / name).write_text(text)
+        (stubs / name).chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+
+    def run(*arguments, typed="", tailscale=False):
+        env = {"PATH": f"{stubs}{os.pathsep}/usr/bin{os.pathsep}/bin", "CALLS": str(tmp_path / "calls"), "HOME": str(home), "TAILSCALE_WORKS": "1" if tailscale else "0"}
+        done = subprocess.run(["sh", str(folder / "install.sh"), *arguments], env=env, input=typed, text=True, capture_output=True)
+        calls = (tmp_path / "calls").read_text().splitlines() if (tmp_path / "calls").exists() else []
+        settings = dict(line.split("=", 1) for line in (folder / ".env").read_text().splitlines() if "=" in line and not line.startswith("#")) if (folder / ".env").exists() else {}
+        return done, calls, settings
+
+    return SimpleNamespace(run=run, home=home)
+
+
+def test_the_installer_finds_tailscale_publishes_kaal_and_saves_a_copy_of_the_key(installer):
+    # Typed: through Tailscale; yes to the name it found; yes to publishing; Enter for the usual key file.
+    done, calls, settings = installer.run(typed="2\n\n\n\n", tailscale=True)
+    assert done.returncode == 0, done.stderr
+    assert "Tailscale is on this machine as box.tail-made-up.ts.net" in done.stdout, "this machine's own name, not another's"
+    assert settings["KAAL_PUBLIC_URL"] == "https://box.tail-made-up.ts.net" and settings["KAAL_LISTEN"] == "127.0.0.1:8765"
+    assert "tailscale serve --bg 8765" in calls
+    key = installer.home / "kaal-master.key"
+    assert key.read_text() == "made-up-key\n" and key.stat().st_mode & 0o777 == 0o600
+    assert "https://kaal.example/#/setup/made-up-code" in done.stdout
+    assert "still on this machine" in done.stdout and "kaalctl key-backup" not in done.stdout
+    assert "Point your proxy at it" not in done.stdout, "nothing is left for the person to publish"
+
+
+def test_the_installer_asks_for_the_address_without_tailscale_and_the_key_copy_can_be_skipped(installer):
+    done, calls, settings = installer.run(typed="2\nhttps://kaal.example.ts.net\n-\n")
+    assert done.returncode == 0, done.stderr
+    assert settings["KAAL_PUBLIC_URL"] == "https://kaal.example.ts.net"
+    assert "Tailscale is on this machine" not in done.stdout and "tailscale serve --bg 8765" not in calls
+    assert "Point your proxy at it" in done.stdout
+    assert not (installer.home / "kaal-master.key").exists()
+    assert "kaalctl key-backup ~/kaal-master.key" in done.stdout, "skipped, the person is still told how"
+
+    # A name Tailscale offers can be turned down, and the key written where the person says.
+    (installer.home / "keys").mkdir()
+    again = installer.home.parent / "docker" / ".env"
+    again.unlink()
+    done, calls, settings = installer.run(typed="2\nn\nhttps://other.example.org\n~/keys/kaal.key\n", tailscale=True)
+    assert done.returncode == 0, done.stderr
+    assert settings["KAAL_PUBLIC_URL"] == "https://other.example.org" and "tailscale serve --bg 8765" not in calls
+    assert (installer.home / "keys" / "kaal.key").read_text() == "made-up-key\n"
+
+
+def test_the_installer_asks_nothing_when_told_where_kaal_is_reached(installer):
+    done, calls, settings = installer.run("--local")
+    assert done.returncode == 0, done.stderr
+    assert settings["KAAL_PUBLIC_URL"] == "http://localhost:8765"
+    assert not any(call.startswith("tailscale") for call in calls)
+    assert "kaalctl key-backup ~/kaal-master.key" in done.stdout and "File to write it to" not in done.stdout
+    assert "Settings > Vaults and sharing" in done.stdout

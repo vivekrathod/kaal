@@ -68,6 +68,22 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.25.0 or newer.
   iPhone app for a year, unless the session is signed out under Settings, the
   password is changed, or a recovery code is used.
 
+### Sharing a vault
+
+- **Someone is not in the list**, or **"Nobody here has that sign-in name"**:
+  they have no account on this Kaal yet. An administrator who owns the vault
+  invites them under Settings → Vaults and sharing → Invite someone new, and
+  sends them the link; otherwise ask whoever runs your Kaal to add them, then
+  let them in.
+- **Seeing someone else's vault:** they share it with you, from their own
+  Settings → Vaults and sharing. Being the administrator does not let you
+  into anyone's vault.
+- **Which name is my sign-in name?** Settings → Your account shows it in
+  quotes after "Signed in as", however you signed in.
+- **"No account here is connected to that sign-in"** after pressing Continue
+  with Google: whoever runs this Kaal has to invite you first. Open the link
+  they send you in the same browser and press Continue with Google there.
+
 ### Kaal for iPhone
 
 - **"That doesn't look like an address":** type just the address you open

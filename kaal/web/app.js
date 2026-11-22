@@ -8,6 +8,7 @@ import { trashView } from "/web/views/trash.js";
 import { settingsView } from "/web/views/settings.js";
 import { tokensView, sharingView, peopleView, signInServicesView } from "/web/views/access.js";
 import { notesView, noteView, noteEditView } from "/web/views/notes.js";
+import { setupListCard } from "/web/views/setup.js";
 
 const root = document.querySelector("#app");
 let session = null;
@@ -133,7 +134,8 @@ async function render() {
     replace(root, shell("notes", content));
     leaveView = rest[1] === "edit" ? noteEditView(content, rest[0], context) : noteView(content, rest[0], context);
   } else {
-    replace(root, shell("receipts", content));
+    // The first screen: a new Kaal's administrator sees what is left to set up above it.
+    replace(root, shell("receipts", [setupListCard(context), content]));
     leaveView = inboxView(content, params, context);
   }
   window.scrollTo(0, 0);

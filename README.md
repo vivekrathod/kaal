@@ -202,7 +202,13 @@ the same session, which the two share through the iPhone's keychain.
 In the web app, Settings has more pages for people signed in as
 themselves. **Vaults and sharing**: rename your vault, open another, create one,
 and (as an owner) let someone into the open vault as viewer, editor or owner,
-or take them out. **Tokens**: make and revoke tokens for your own scripts and
+or take them out. While accounts are by invitation, the people who have an
+account are picked from a list; with sign-up open nobody is listed and their
+sign-in name is typed. An owner who is also an administrator can **invite
+someone new** there: they type the person's name and get a single-use link.
+Whoever opens it chooses their sign-in name and password (or continues with
+Google), and the vault they were invited into opens for them, with a vault of
+their own beside it. **Tokens**: make and revoke tokens for your own scripts and
 the browser extension; a token can do no more than your role in its vault, and
 its secret is shown once. **People**, for administrators: add a person and get
 their setup link, make a new link for someone who lost their password, switch
@@ -448,8 +454,10 @@ from getting in the way of the rest; they are not protection against a
 determined flood, which belongs to the proxy or the network in front. The
 programs that read files run as the same user as the server, so a flaw in one
 of them that a crafted file could exploit would reach the key: keep the system
-(or the container image) updated. Someone who owns a vault can find out whether
-a sign-in name exists by trying to share with it, slowly. With sign-up open,
+(or the container image) updated. While accounts are by invitation, someone who
+owns a vault is shown the names of everyone with an account, to share with
+them; with sign-up open they are not, but can find out whether a sign-in name
+exists by trying to share with it, slowly. With sign-up open,
 set the quota and the hourly sign-up allowance to what the disk can bear. See
 [SECURITY.md](SECURITY.md) for reporting a problem.
 

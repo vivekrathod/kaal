@@ -344,6 +344,37 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "Invitation": {
+        "properties": {
+          "login": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Login",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "editor",
+              "viewer"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "role"
+        ],
+        "title": "Invitation",
+        "type": "object"
+      },
       "LibraryCreate": {
         "properties": {
           "body": {
@@ -924,6 +955,12 @@
             "title": "Code",
             "type": "string"
           },
+          "login": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Login",
+            "type": "string"
+          },
           "name": {
             "default": "",
             "maxLength": 100,
@@ -942,6 +979,34 @@
           "password"
         ],
         "title": "SetupFinish",
+        "type": "object"
+      },
+      "SetupList": {
+        "properties": {
+          "hidden": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hidden"
+          },
+          "key_saved": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Saved"
+          }
+        },
+        "title": "SetupList",
         "type": "object"
       },
       "SignIn": {
@@ -1961,6 +2026,63 @@
           }
         },
         "summary": "Admin Person Link",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/setup": {
+      "get": {
+        "operationId": "admin_setup_v1_admin_setup_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Admin Setup",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "Say that a copy of the key is kept somewhere else, or put the list away (or bring it back).",
+        "operationId": "admin_setup_change_v1_admin_setup_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupList"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Setup Change",
         "tags": [
           "admin"
         ]
@@ -4797,6 +4919,46 @@
           }
         },
         "summary": "Vault Export Readable",
+        "tags": [
+          "account"
+        ]
+      }
+    },
+    "/v1/vault/invitations": {
+      "post": {
+        "description": "Invite someone who has no account yet into this vault: an account, a vault of their own,\na place in this one, and a single-use link with which they choose how to sign in. Making\naccounts is an administrator's job, so only an owner who is one may.",
+        "operationId": "vault_invite_v1_vault_invitations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Invitation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Vault Invite",
         "tags": [
           "account"
         ]

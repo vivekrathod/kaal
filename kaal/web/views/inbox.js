@@ -53,7 +53,10 @@ export function inboxView(container, params, { go, expired }) {
       counts[reviewed ? "review" : "reviewed"].textContent = other.meta ? other.meta.total : "";
       status.replaceChildren();
       if (!shown.result.length) {
-        replace(list, h("p", { class: "empty" }, query ? "Nothing matches that search." : reviewed ? "Reviewed receipts appear here." : "Add your first receipt: a PDF from a provider's site, or a photo of a paper one."));
+        replace(list, query || reviewed
+          ? h("p", { class: "empty" }, query ? "Nothing matches that search." : "Reviewed receipts appear here.")
+          : h("div", { class: "empty" }, h("p", {}, "No receipts to check. Add one: a PDF from a provider's site, or a photo of a paper receipt. Kaal reads the amount, dates and names for you to check."),
+            h("label", { for: "capture", class: "button primary" }, "Add your first receipt")));
       } else {
         replace(list, shown.result.map(row));
       }
