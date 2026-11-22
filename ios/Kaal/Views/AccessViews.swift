@@ -40,13 +40,13 @@ struct VaultsView: View {
                         HStack {
                             VStack(alignment: .leading) {
                                 Text(vault.name.text)
-                                Text("You are \(vault.role.text == "owner" ? "an owner" : vault.role.text == "editor" ? "an editor" : "a viewer")").font(.footnote).foregroundStyle(.secondary)
+                                Text(Standing.words(vault.role.text)).font(.footnote).foregroundStyle(.secondary)
                             }
                             Spacer()
                             if vault.id.text == model.vault.id.text {
                                 Text("Open now").font(.footnote).foregroundStyle(.secondary)
                             } else {
-                                AsyncButton("Open") { await change { _ = try await $0.chooseVault(vault.id.text) } }.buttonStyle(.bordered).font(.footnote)
+                                AsyncButton("Open") { await change { _ in try await model.open(vault: vault.id.text) } }.buttonStyle(.bordered).font(.footnote)
                             }
                         }
                     }
@@ -60,7 +60,7 @@ struct VaultsView: View {
                             }
                             await change {
                                 let made = try await $0.createVault(name: name)
-                                _ = try await $0.chooseVault(made.id.text)
+                                try await model.open(vault: made.id.text)
                                 newVault = ""
                             }
                         }

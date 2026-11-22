@@ -144,4 +144,98 @@ final class OutboxTests: XCTestCase {
         XCTAssertEqual(box.waiting.count, 1)
         XCTAssertTrue(box.refused.isEmpty)
     }
+
+    // MARK: More than one vault
+
+    func testWhatIsTakenDownGoesToTheVaultThatWasOpenAndWaitsWhileAnotherIs() async {
+        kaal()
+        let box = Outbox(folder: folder)
+        box.opened(("v1", "Household"))
+        box.addNote(title: "Milk", body: "Milk and eggs")       // no connection yet: it waits
+        XCTAssertEqual(box.waiting.map(\.vault), ["v1"])
+        XCTAssertEqual(box.waiting.map(\.vaultName), ["Household"])
+
+        // Another vault is opened before it could be sent. Kaal would save it there, so it is not sent.
+        box.opened(("v2", "Trip notes"))
+        box.api = StubServer.api()
+        box.flush()
+        await settled(box)
+        XCTAssertTrue(StubServer.asked.isEmpty)
+        XCTAssertTrue(box.waiting.isEmpty)
+        XCTAssertEqual(box.elsewhere.map(\.title), ["Milk"])
+
+        // What is taken down now is for the vault that is open, and goes at once.
+        box.addNote(title: "Tickets", body: "Platform 4")
+        await settled(box)
+        XCTAssertEqual(StubServer.asked.map(\.json.title.text), ["Tickets"])
+        XCTAssertEqual(box.elsewhere.map(\.title), ["Milk"])
+
+        // It survives the app closing, and goes when its own vault is open again.
+        let reopened = Outbox(folder: folder)
+        reopened.api = StubServer.api()
+        reopened.opened(("v2", "Trip notes"))
+        await settled(reopened)
+        XCTAssertEqual(reopened.elsewhere.map(\.vaultName), ["Household"])
+        reopened.opened(("v1", "Household"))
+        await settled(reopened)
+        XCTAssertTrue(reopened.items.isEmpty)
+        XCTAssertEqual(StubServer.asked.map(\.json.title.text), ["Tickets", "Milk"])
+    }
+
+    func testWhatWaitsForAnotherVaultCanBeSavedInTheOpenOneUnlessItIsPartWayThere() async {
+        // The note is made, and then its file cannot be added.
+        StubServer.reset { asked in asked.path == "/v1/library/notes" ? (200, ["result": ["note": ["id": "n1"]]]) : (503, ["error": "busy"]) }
+        let box = Outbox(folder: folder)
+        box.opened(("v1", "Household"))
+        box.api = StubServer.api()
+        box.addNote(title: "Scanned", body: "![Page](attachment:new1)", files: [Upload(name: "Page.jpg", data: Data("one".utf8), type: "image/jpeg")])
+        await settled(box)
+        box.api = nil
+        box.addReceipt(Upload(name: "receipt.jpg", data: Data("jpeg".utf8), type: "image/jpeg"))
+
+        kaal()
+        box.opened(("v2", "Trip notes"))
+        box.api = StubServer.api()
+        XCTAssertEqual(box.elsewhere.map(\.title), ["Scanned", "receipt.jpg"])
+        // Half of the note is in the other vault already: the rest belongs with it.
+        XCTAssertFalse(box.canMoveHere(box.elsewhere[0]))
+        box.moveHere(box.elsewhere[0])
+        XCTAssertTrue(box.canMoveHere(box.elsewhere[1]))
+        box.moveHere(box.elsewhere[1])
+        await settled(box)
+        XCTAssertEqual(StubServer.asked.map(\.path), ["/v1/medical/receipts"])
+        XCTAssertEqual(box.elsewhere.map(\.title), ["Scanned"])
+        box.discard(box.elsewhere[0])
+        XCTAssertTrue(box.items.isEmpty)
+    }
+
+    func testWhatWasKeptBeforeVaultsWereWrittenDownGoesToTheOpenOne() async {
+        kaal()
+        let before = Outbox(folder: folder)
+        before.addNote(title: "From an older app", body: "kept")
+        XCTAssertNil(before.waiting[0].vault)
+
+        let box = Outbox(folder: folder)
+        box.opened(("v2", "Trip notes"))
+        box.api = StubServer.api()
+        box.flush()
+        await settled(box)
+        XCTAssertTrue(box.items.isEmpty)
+        XCTAssertEqual(StubServer.asked.map(\.path), ["/v1/library/notes"])
+    }
+
+    func testNothingIsSentWhileTheSignInMovesToAnotherVault() async {
+        kaal()
+        let box = Outbox(folder: folder)
+        box.opened(("v1", "Household"))
+        box.api = StubServer.api()
+        await box.pause()
+        box.addNote(title: "Milk", body: "Milk and eggs")
+        await settled(box)
+        XCTAssertTrue(StubServer.asked.isEmpty)
+        XCTAssertEqual(box.waiting.count, 1)
+        box.resume()
+        await settled(box)
+        XCTAssertTrue(box.items.isEmpty)
+    }
 }

@@ -55,6 +55,7 @@ struct TotalsView: View {
             }
         }
         .navigationTitle("Totals")
+        .namesTheVault()
         .task(id: "\(year)|\(model.outbox.sentCount)") { await load() }
         .refreshable { await load() }
     }

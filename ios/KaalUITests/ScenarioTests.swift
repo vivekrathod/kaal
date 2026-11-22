@@ -605,6 +605,96 @@ final class ScenarioTests: XCTestCase {
         shot("30a-token-revoked")
     }
 
+    /// Someone with two vaults sees which is open on the main screens, and opens the other from there.
+    /// The second vault is made here, and stays on the server afterwards with one made-up note in it.
+    func test09bAnotherVaultIsOpenedFromTheMainScreens() {
+        launch()
+        let menu = app.buttons["vault-menu"]
+        /// A vault in the open menu, which says under each what the person is there.
+        func choice(_ vault: String) -> XCUIElement {
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS 'You are'", vault)).firstMatch
+        }
+        func open(_ vault: String) {
+            appears(menu, "the open vault's name in the bar")
+            menu.tap()
+            appears(choice(vault), "\(vault) in the menu")
+            choice(vault).tap()
+            happens("the bar naming \(vault)", timeout: 30) { menu.exists && menu.label == "Vault: \(vault)" }
+        }
+
+        tab("Notes")
+        let boiler = app.staticTexts["Boiler and radiators"].firstMatch
+        appears(boiler, "the first vault's notes", timeout: 30)
+
+        // What the vault that is open now is called, from Settings.
+        tab("Settings")
+        let line = labelled(app.staticTexts, containing: ". Your role there: ")
+        reach(line, "the open vault, in Settings")
+        let first = String(line.label.dropFirst("Vault: ".count)).components(separatedBy: ". Your role there: ")[0]
+
+        // Make a second vault, with a name of its own. Making one opens it.
+        let second = "Made-up vault \(Int(Date().timeIntervalSince1970) % 100_000)"
+        let sharing = app.staticTexts["Vaults and sharing"]
+        reach(sharing, "Vaults and sharing")
+        sharing.tap()
+        let name = app.textFields["For example: Household"]
+        appears(name, "the new vault's name", timeout: 30)
+        name.tap()
+        name.typeText(second + "\n")
+        app.buttons["Create"].tap()
+        appears(labelled(app.staticTexts, containing: "Who shares “\(second)”"), "the new vault, open", timeout: 30)
+
+        // The lists are the new vault's, and the bar says which vault that is.
+        tab("Notes")
+        happens("the bar naming the new vault", timeout: 30) { menu.exists && menu.label == "Vault: \(second)" }
+        appears(app.staticTexts["No notes yet."], "the new vault's empty list", timeout: 30)
+        XCTAssertFalse(boiler.exists, "the first vault's notes should not show in the second")
+
+        // A note written here says where it is saved, and is saved there.
+        app.buttons["New note"].tap()
+        let title = app.textFields["Title"]
+        appears(title, "the title field")
+        appears(labelled(app.staticTexts, containing: "It is saved to “\(second)”."), "where the note is saved")
+        title.tap()
+        title.typeText("Made-up note in the second vault")
+        let words = app.textViews.firstMatch
+        appears(words, "the note's text")
+        words.tap()
+        words.typeText("Kept apart from the first vault.")
+        shot("31-note-for-the-second-vault")
+        app.buttons["Save"].tap()
+        let mine = app.staticTexts["Made-up note in the second vault"].firstMatch
+        appears(mine, "the note in the second vault's list", timeout: 30)
+
+        // Open the first vault from the bar: its notes, and not the other's.
+        menu.tap()
+        appears(choice(first), "\(first) in the menu")
+        shot("32-vault-menu")
+        choice(first).tap()
+        appears(boiler, "the first vault's notes again", timeout: 30)
+        XCTAssertEqual(menu.label, "Vault: \(first)")
+        XCTAssertFalse(mine.exists, "the second vault's note should not show in the first")
+        shot("33-first-vault-again")
+
+        // The other main screens name the vault too, and each can open the other.
+        for screen in ["Add", "Receipts", "Totals"] {
+            tab(screen)
+            happens("\(screen) naming the open vault") { menu.exists && menu.label == "Vault: \(first)" }
+        }
+        appears(app.staticTexts["Total paid"], "the first vault's totals", timeout: 30)
+        open(second)
+        appears(app.staticTexts["No receipts in this period."], "the second vault's totals, which has no receipts", timeout: 30)
+        shot("34-second-vault-totals")
+        tab("Notes")
+        appears(mine, "the second vault's note", timeout: 30)
+
+        // Back to the first, which is what the tests after this one expect to find open.
+        tab("Receipts")
+        open(first)
+        tab("Notes")
+        appears(boiler, "the first vault's notes, at the end", timeout: 30)
+    }
+
     func test10SigningOutReturnsToTheFirstScreen() {
         launch()
         tab("Settings")

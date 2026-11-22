@@ -48,6 +48,7 @@ struct NotesView: View {
             }
         }
         .navigationTitle("Notes")
+        .namesTheVault()
         .navigationDestination(for: String.self) { NoteView(id: $0) }
         .searching($query, prompt: "Notes and their files")
         .toolbar {

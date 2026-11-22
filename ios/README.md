@@ -13,6 +13,13 @@ Trash and settings) and adds what a phone is good at:
 - **Works without a connection.** What you add from the Add screen is kept on
   the phone and sent when Kaal can be reached. It is left out of backups of
   the phone, and removed once Kaal has it.
+- **More than one vault.** If you have several, the bar at the top of Add,
+  Receipts, Notes and Totals names the one that is open; press it to open
+  another. What you add goes to the vault that was open when you added it:
+  something still waiting on the phone when you open another vault waits
+  until its own vault is open again, or can be saved in the open one instead.
+  "Save to Kaal" in other apps says which vault it saves to, which is the one
+  open in the app.
 - **Save from other apps.** Kaal is in the share menu of Photos, Safari,
   Files, Mail and other apps. It saves up to ten pictures, PDFs and other
   files, a web page or some text as a note, and pictures or a PDF as a medical
@@ -92,7 +99,8 @@ ios/install-on-iphone.sh
 
 The unit tests cover the API client, signing in, where the sign-in is kept,
 the offline queue, capture, the Markdown reader, who can be let into a vault
-or invited, the list of what is left to set up, and what "Save to Kaal" makes
+or invited, opening another vault and where what waits on the phone is sent
+then, the list of what is left to set up, and what "Save to Kaal" makes
 of what another app shares (what each thing is taken to be, titles, the note's
 text, the receipt's PDF, and the requests it sends):
 
@@ -106,7 +114,8 @@ page, the administrator's list of what is left to set up, writing, editing and
 trashing a note, a note's Markdown and files, checking a receipt and marking
 it reimbursed, totals, every Settings page, inviting someone new into the
 vault and letting them back in from the list of people, adding a receipt and
-a note from a photo, dictation, and signing out. It needs
+a note from a photo, dictation, making a second vault and opening each from
+the main screens, and signing out. It needs
 a Kaal that holds only made-up data (never a real vault), with a person who
 has a password and the notes and receipts `bin/demo-data.py` puts in (the
 tests open "Boiler and radiators" and check a receipt of $64.50):
@@ -123,7 +132,8 @@ receipts the tests look for, and prints its address, sign-in name and
 password. Its account is an administrator, so the tests go through the People
 and Sign-in services pages too, say that a copy of the key is kept (which puts
 the list of steps away on that Kaal), and invite a made-up person, whose
-account stays on that Kaal afterwards.
+account stays on that Kaal afterwards, as does the second vault they make,
+with one made-up note in it.
 
 They also save from other apps (`ShareScenarioTests.swift`): a web page shared
 from Safari becomes a note, two of the simulator's sample photos shared from

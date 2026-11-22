@@ -11,14 +11,19 @@ struct MainView: View {
             QuickAddView()
                 .tabItem { Label("Add", systemImage: "plus.circle.fill") }
                 .tag(MainTab.add)
+            // Each of these is made again when another vault is opened: its lists, what was
+            // searched for and any note or receipt left open were the other vault's.
             NavigationStack { ReceiptsView() }
+                .id(model.vault.id.text)
                 .tabItem { Label("Receipts", systemImage: "doc.text.magnifyingglass") }
                 .badge(model.toReview)
                 .tag(MainTab.receipts)
             NavigationStack { NotesView() }
+                .id(model.vault.id.text)
                 .tabItem { Label("Notes", systemImage: "note.text") }
                 .tag(MainTab.notes)
             NavigationStack { TotalsView() }
+                .id(model.vault.id.text)
                 .tabItem { Label("Totals", systemImage: "sum") }
                 .tag(MainTab.totals)
             NavigationStack { SettingsView() }

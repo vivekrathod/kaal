@@ -82,6 +82,7 @@ struct ReceiptsView: View {
             }
         }
         .navigationTitle("Receipts")
+        .namesTheVault()
         .navigationDestination(for: String.self) { ReceiptView(id: $0) }
         .navigationDestination(item: $opened) { ReceiptView(id: $0) }
         .searching($query, prompt: "Provider, person or title")

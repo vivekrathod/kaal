@@ -22,7 +22,7 @@ final class AppModel {
     var notice: String?
     /// How many receipts wait to be checked, for the tab's badge.
     var toReview = 0
-    let outbox = Outbox()
+    let outbox: Outbox
 
     private let defaults: UserDefaults
     nonisolated private static let addressKey = "kaal.server"
@@ -30,9 +30,10 @@ final class AppModel {
     /// The oldest Kaal the app can use: the first that takes an app's session in a header.
     static let neededVersion = [0, 25, 0]
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, outbox: Outbox? = nil) {
         self.defaults = defaults
-        outbox.signedOut = { [weak self] in self?.expired() }
+        self.outbox = outbox ?? Outbox()
+        self.outbox.signedOut = { [weak self] in self?.expired() }
     }
 
     var serverAddress: String { defaults.string(forKey: Self.addressKey) ?? "" }
@@ -43,6 +44,8 @@ final class AppModel {
     var isAdmin: Bool { who.account.admin.isTrue }
     var vault: JSON { who.vault }
     var vaults: [JSON] { who.vaults.list }
+    /// Said where something is about to be saved, to someone who has more than one vault it could go to.
+    var savesTo: String? { vaults.count > 1 && !vault.name.text.isEmpty ? "It is saved to “\(vault.name.text)”." : nil }
 
     /// Pick up where the app left off. It opens signed in even with no network, so a note can still be taken down.
     func start() async {
@@ -60,7 +63,7 @@ final class AppModel {
             return
         }
         shareSignIn()
-        if let kept = defaults.data(forKey: Self.whoKey) { who = JSON.parse(kept) }
+        if let kept = defaults.data(forKey: Self.whoKey) { know(JSON.parse(kept)) }
         use(KaalAPI(server: url, session: session))
         await refresh()
     }
@@ -93,8 +96,28 @@ final class AppModel {
     }
 
     private func remember(_ told: JSON) {
-        who = told
+        know(told)
         if let data = try? JSONSerialization.data(withJSONObject: told.any) { defaults.set(data, forKey: Self.whoKey) }
+    }
+
+    /// What is taken down from now on is for the vault that is open, so the outbox is told which that is.
+    private func know(_ told: JSON) {
+        who = told
+        outbox.opened(told.vault.id.text.isEmpty ? nil : (told.vault.id.text, told.vault.name.text))
+    }
+
+    /// Open another of the person's vaults: what the app shows, and what is added from now on,
+    /// is that vault's. The share sheet follows, since it uses this same sign-in.
+    func open(vault id: String) async throws {
+        guard let api else { return }
+        // What was taken down for the vault being left is not sent while the sign-in moves.
+        await outbox.pause()
+        defer { outbox.resume() }
+        let told = try await api.chooseVault(id)
+        // The pictures kept in memory are the other vault's.
+        ImageStore.shared.empty()
+        if told.vault.id.text == id { remember(told) } else { await refresh() }
+        await refreshToReview()
     }
 
     func refreshToReview() async {
@@ -163,12 +186,20 @@ final class AppModel {
         api = nil
         outbox.api = nil
         who = .null
+        outbox.opened(nil)
         toReview = 0
         ImageStore.shared.empty()
         phase = .signedOut
     }
 
     #if DEBUG
+    /// Carry on as someone already signed in, with what Kaal last said about them. Only test
+    /// builds can ask for this: a test has no browser to sign in with.
+    func use(_ api: KaalAPI, who told: JSON) {
+        know(told)
+        use(api)
+    }
+
     /// Forget the sign-in and everything waiting to be sent. Only test builds can ask for this.
     nonisolated static func startFresh() {
         Keychain.remove(Keychain.session)

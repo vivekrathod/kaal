@@ -25,6 +25,11 @@ struct OutboxItem: Codable, Identifiable, Equatable {
     var textSettled = false
     /// Why Kaal refused it. Such an item waits for the person, not for the network.
     var refused: String?
+    /// The vault that was open when it was taken down, and what that vault was called: it is
+    /// sent there and nowhere else. Nil on what was kept before the app wrote this down, which
+    /// goes to whichever vault is open.
+    var vault: String?
+    var vaultName: String?
 }
 
 /// Notes and receipts wait here until Kaal has them, so nothing typed, spoken
@@ -41,6 +46,11 @@ final class Outbox {
 
     var api: KaalAPI?
     var signedOut: () -> Void = {}
+    /// The vault that is open, as far as the app knows. What is added is for it, and only what
+    /// is for it is sent: Kaal saves into whichever vault the sign-in is on at that moment.
+    private(set) var open: (id: String, name: String)?
+    /// Nothing is sent while the sign-in moves from one vault to another.
+    private var paused = false
 
     private let folder: URL
     private let monitor = NWPathMonitor()
@@ -63,8 +73,34 @@ final class Outbox {
         monitor.start(queue: DispatchQueue(label: "kaal.outbox.network"))
     }
 
-    var waiting: [OutboxItem] { items.filter { $0.refused == nil } }
+    /// What is sent as soon as Kaal can be reached.
+    var waiting: [OutboxItem] { items.filter { $0.refused == nil && isForOpenVault($0) } }
+    /// What was taken down while another vault was open. It is sent when that vault is open again.
+    var elsewhere: [OutboxItem] { items.filter { $0.refused == nil && !isForOpenVault($0) } }
     var refused: [OutboxItem] { items.filter { $0.refused != nil } }
+
+    private func isForOpenVault(_ item: OutboxItem) -> Bool { item.vault == nil || item.vault == open?.id }
+
+    // MARK: Which vault is open
+
+    /// Say which vault is open now. Whatever waits for it is sent.
+    func opened(_ vault: (id: String, name: String)?) {
+        let changed = vault?.id != open?.id
+        open = vault
+        if changed { flush() }
+    }
+
+    /// Stop sending, and wait for what is being sent now to get there. Called before the
+    /// sign-in moves to another vault, so that nothing lands in a vault it was not written for.
+    func pause() async {
+        paused = true
+        while sending { try? await Task.sleep(for: .milliseconds(50)) }
+    }
+
+    func resume() {
+        paused = false
+        flush()
+    }
 
     // MARK: Adding
 
@@ -81,6 +117,8 @@ final class Outbox {
 
     private func add(_ made: OutboxItem, _ files: [Upload]) {
         var item = made
+        item.vault = open?.id
+        item.vaultName = open?.name
         let home = folder.appendingPathComponent(item.id.uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         for (index, file) in files.enumerated() {
@@ -101,7 +139,7 @@ final class Outbox {
             again = true
             return
         }
-        guard api != nil, !waiting.isEmpty else { return }
+        guard !paused, api != nil, !waiting.isEmpty else { return }
         sending = true
         Task {
             await sendAll()
@@ -115,7 +153,8 @@ final class Outbox {
 
     private func sendAll() async {
         for item in waiting {
-            guard let api else { return }
+            guard !paused, let api else { return }
+            guard isForOpenVault(item) else { continue }
             do {
                 let id = try await send(item, with: api)
                 lastSent = (item.kind, item.title, id)
@@ -177,6 +216,20 @@ final class Outbox {
     }
 
     func discard(_ item: OutboxItem) { remove(item) }
+
+    /// Whether something that waits for another vault can go to the open one instead. Not a note
+    /// that is already part-way into the other vault: the rest of it belongs with what is there.
+    func canMoveHere(_ item: OutboxItem) -> Bool { open != nil && item.note == nil }
+
+    /// Send it to the vault that is open now, not the one it was taken down for.
+    func moveHere(_ item: OutboxItem) {
+        guard canMoveHere(item) else { return }
+        update(item.id) {
+            $0.vault = open?.id
+            $0.vaultName = open?.name
+        }
+        flush()
+    }
 
     // MARK: Keeping
 

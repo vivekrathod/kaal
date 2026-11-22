@@ -53,6 +53,7 @@ struct QuickAddView: View {
                 .padding()
             }
             .navigationTitle("Add")
+            .namesTheVault()
             .task(id: SetupAsked(admin: model.isAdmin, vault: model.vault.id.text, sent: model.outbox.sentCount)) { await loadSetup() }
             .captures($source) { files in
                 if !forReceipt {
@@ -122,6 +123,17 @@ struct QuickAddView: View {
             .padding()
             .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
         }
+        ForEach(box.elsewhere) { item in
+            VStack(alignment: .leading, spacing: 8) {
+                Notice(text: "“\(item.title.isEmpty ? "Untitled" : item.title)” is for “\(item.vaultName ?? "another vault")”. It is kept on this phone and sent when that vault is open.", tone: .warn)
+                HStack {
+                    if box.canMoveHere(item), let open = box.open { Button("Save to “\(open.name)” instead") { box.moveHere(item) } }
+                    Spacer()
+                    ConfirmButton(title: "Discard", question: "Discard it? It is only on this phone.") { box.discard(item) }
+                }
+                .buttonStyle(.bordered)
+            }
+        }
         ForEach(box.refused) { item in
             VStack(alignment: .leading, spacing: 8) {
                 Notice(text: "Kaal did not take “\(item.title.isEmpty ? "Untitled" : item.title)”: \(item.refused ?? "")", tone: .error)
@@ -190,6 +202,7 @@ struct QuickNote: View {
                     DictateButton(dictation: dictation, text: $text)
                 }
                 .padding()
+                if let vault = model.savesTo { Text(vault).font(.footnote).foregroundStyle(.secondary).padding(.bottom, 8) }
             }
             .navigationTitle(start == .speaking ? "Speak a note" : "Note")
             .inlineTitle()
@@ -271,7 +284,11 @@ struct FilesAsNote: View {
                         }
                     }
                 }
-                Section { SectionIntro(text: "Kaal reads the text in pictures and PDFs, so you can search for it later.") }
+                Section {
+                    SectionIntro(text: "Kaal reads the text in pictures and PDFs, so you can search for it later.")
+                } footer: {
+                    if let vault = model.savesTo { Text(vault) }
+                }
             }
             .navigationTitle("New note")
             .inlineTitle()

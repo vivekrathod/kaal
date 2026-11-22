@@ -47,7 +47,8 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
-        .task { await load() }
+        // Asked again when another vault is opened from one of the other screens: the family and the role are that vault's.
+        .task(id: model.vault.id.text) { await load() }
         .refreshable { await load() }
     }
 
