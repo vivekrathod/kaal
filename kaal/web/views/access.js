@@ -91,7 +91,7 @@ export function tokensView(container, _params, context) {
         h("p", { class: "muted" }, "A token lets a script, the command-line tool or the browser extension use a vault as you, within the limits you give it. It can never change your password or make other tokens."),
         tokens.length
           ? h("ul", { class: "plain" }, tokens.map((token) => h("li", { class: "line" },
-              h("span", {}, h("strong", {}, token.name), h("span", { class: "muted-text" }, ` · ${token.scopes.join(", ")}${vaults.length > 1 ? ` · ${token.vault_name}` : ""} · since ${formatDate(token.created.slice(0, 10))}`)),
+              h("span", {}, h("strong", {}, token.name), h("span", { class: "muted-text" }, ` · ${token.scopes.join(", ")}${token.every_vault ? " · every vault you belong to" : vaults.length > 1 ? ` · ${token.vault_name}` : ""} · since ${formatDate(token.created.slice(0, 10))}`)),
               twoStepButton("Revoke", "Really revoke?", () => attempt(async () => { await api.revokeToken(token.id); draw(await api.tokens()); })))))
           : h("p", { class: "empty" }, "No tokens.")),
       h("section", { class: "card section" }, h("h1", {}, "Make a token"), form));

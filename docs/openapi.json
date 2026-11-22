@@ -59,6 +59,11 @@
             "title": "Confirm",
             "type": "string"
           },
+          "every_vault": {
+            "default": false,
+            "title": "Every Vault",
+            "type": "boolean"
+          },
           "extension": {
             "default": "",
             "pattern": "^[a-p]{0,32}$",
@@ -2360,7 +2365,7 @@
     },
     "/v1/extension-sign-ins": {
       "post": {
-        "description": "The browser extension collects the sign-in a browser approved for it, as a token of its own\nfor the vault that was open: read, reveal and write, as far as the person's role there allows.",
+        "description": "The browser extension collects the sign-in a browser approved for it, as a token of its own\nfor the vault that was open: read, reveal and write, as far as the person's role there allows.\nWhere the person allowed it, the token works in every vault of theirs, each as far as their\nrole there allows; a request then says which vault it means in ``X-Kaal-Vault``.",
         "operationId": "extension_sign_in_finish_v1_extension_sign_ins_post",
         "requestBody": {
           "content": {

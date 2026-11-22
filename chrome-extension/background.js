@@ -13,7 +13,7 @@
 // If a file cannot be read through the tab, the panel offers to ask Chrome
 // for access to that one site, and only then is it fetched directly.
 
-import { MODES, chooseMode, rememberSite, mergeSites, siteOf, isBlanketAccess, looksLikePdf, isProtectedPage, fileNameFor, explain, stateKey, THIS_COMPUTER, paperFor } from "./lib.js";
+import { MODES, chooseMode, rememberSite, mergeSites, siteOf, isBlanketAccess, looksLikePdf, isProtectedPage, fileNameFor, explain, stateKey, THIS_COMPUTER, paperFor, savingInto } from "./lib.js";
 
 const MENU_GENERAL = "kaal-save";
 const MENU_MEDICAL = "kaal-save-receipt";
@@ -30,14 +30,20 @@ class Problem extends Error {
 // --- talking to Kaal
 
 async function connection() {
-  const { server = "", token = "" } = await chrome.storage.local.get(["server", "token"]);
-  return { server, token };
+  const { server = "", token = "", vault = "", vaults = [] } = await chrome.storage.local.get(["server", "token", "vault", "vaults"]);
+  // The vault a request names: the one chosen, where the token works in more than one.
+  const into = savingInto(vaults, vault);
+  return { server, token, vault: into ? into.id : "", vaultName: into ? into.name : "" };
 }
 
-async function call(method, path, { json, form } = {}) {
-  const { server, token } = await connection();
+// `vault` is the vault a request means. Left out, it is the one chosen in the popup; "" names
+// none, and the request is then in the vault the token was made in.
+async function call(method, path, { json, form, vault } = {}) {
+  const { server, token, vault: chosen } = await connection();
   if (!server || !token) throw new Problem("Kaal isn't connected yet.", "Open the extension's settings, enter Kaal's address and connect with your Kaal sign-in.", true);
+  const named = vault === undefined ? chosen : vault;
   const headers = { Authorization: `Bearer ${token}`, Accept: "application/json" };
+  if (named) headers["X-Kaal-Vault"] = named;
   if (json !== undefined) headers["Content-Type"] = "application/json";
   let response;
   try {
@@ -53,10 +59,32 @@ async function call(method, path, { json, form } = {}) {
     data = null;
   }
   if (!response.ok) {
+    if (response.status === 403 && named) {
+      // Kaal never saves somewhere else instead: the person is told, and the list of vaults is read again.
+      refreshVaults();
+      throw new Problem("Kaal wouldn't do that in the vault you chose.", "You may only be allowed to view it, or you no longer belong to it. Choose another vault with the Kaal button, then try again.");
+    }
     const told = explain(response.status, data && data.error);
     throw new Problem(told.message, told.hint, Boolean(told.settings));
   }
   return data;
+}
+
+// The vaults this extension's token works in, as Kaal knows them now: someone may have been let
+// into another one, or taken out of the one chosen. Asked without naming a vault, so that the
+// answer comes even when the chosen one is gone, and says which vault the token was made in.
+async function refreshVaults() {
+  try {
+    const who = (await call("GET", "/v1/session", { vault: "" })).result || {};
+    const vaults = who.every_vault === true && Array.isArray(who.vaults) ? who.vaults.map(({ id, name, role }) => ({ id, name, role })) : [];
+    const home = who.vault && typeof who.vault === "object" ? who.vault : null;
+    await chrome.storage.local.set({ vaults, home: home ? String(home.name || "") : "", elsewhere: Number(who.elsewhere) || 0 });
+    const { vault = "" } = await chrome.storage.local.get("vault");
+    const wanted = vaults.length > 1 ? (vaults.some((entry) => entry.id === vault) ? vault : (home ? home.id : vaults[0].id)) : "";
+    if (wanted !== vault) await chrome.storage.local.set({ vault: wanted });
+  } catch {
+    // Not connected, or offline: what was known stays as it was.
+  }
 }
 
 // --- what the popup and the side panel are told
@@ -351,7 +379,9 @@ const linkAsFile = (page, address) => withDebugger(page, (command) => fileFrom(c
 // `page` is { id, url, title }: the tab a save was asked for on.
 async function save(page, mode, { linkUrl = "", selectionText = "", again = false } = {}) {
   if (!page || !Number.isInteger(page.id)) return;
-  const about = { mode, url: page.url || "", title: page.title || "", linkUrl };   // kept so "Try again" can repeat it
+  // Where this save goes is settled now, for all of it, whatever is chosen while it runs.
+  const { vault, vaultName } = await connection();
+  const about = { mode, url: page.url || "", title: page.title || "", linkUrl, vault, vaultName };   // kept so "Try again" can repeat it
   await setState(page.id, { stage: "saving", ...about });
   badge(page.id, "…");
   const source = { source_url: linkUrl || page.url || "", source_title: page.title || "", captured_at: new Date().toISOString() };
@@ -359,13 +389,13 @@ async function save(page, mode, { linkUrl = "", selectionText = "", again = fals
     if (!page.url) throw new Problem("Chrome didn't tell Kaal which page this is.", "Use the Kaal button in the toolbar, or right-click the page.");
     let saved;
     if (selectionText.trim() && mode === "general") {
-      saved = await call("POST", "/v1/captures/text", { json: { text: selectionText.slice(0, 100000), title: page.title || "", ...source } });
+      saved = await call("POST", "/v1/captures/text", { vault, json: { text: selectionText.slice(0, 100000), title: page.title || "", ...source } });
     } else {
       const file = linkUrl ? await linkAsFile(page, linkUrl) : await pageAsFile(page, again);
       const form = new FormData();
       form.append("file", file, file.name);
       for (const [name, value] of Object.entries(source)) form.append(name, value);
-      saved = mode === "medical" ? await call("POST", "/v1/medical/receipts", { form }) : await call("POST", "/v1/captures", { form });
+      saved = mode === "medical" ? await call("POST", "/v1/medical/receipts", { vault, form }) : await call("POST", "/v1/captures", { vault, form });
     }
     if (mode === "medical") {
       const { receiptSites = [] } = await chrome.storage.local.get("receiptSites");
@@ -415,7 +445,8 @@ function install() {
   refresh();
 }
 
-const refresh = () => Promise.all([refreshCount(), refreshSites()]);
+// The vaults first: the count and the sites are those of the vault that is chosen.
+const refresh = () => refreshVaults().then(() => Promise.all([refreshCount(), refreshSites()]));
 
 chrome.runtime.onInstalled.addListener(install);
 chrome.runtime.onStartup.addListener(refresh);

@@ -78,6 +78,14 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.25.0 or newer.
 - **Seeing someone else's vault:** they share it with you, from their own
   Settings → Vaults and sharing. Being the administrator does not let you
   into anyone's vault.
+- **Working in a vault someone shared with you:** once you belong to more
+  than one vault, the web app shows the open one at the top right of every
+  page. Pick another there to work in it. What you may do there follows your
+  role: a viewer reads, an editor also adds, changes and deletes notes, and
+  only an owner shares, renames, exports or deletes the vault.
+- **"This is in “…”"** after following a link: the note is in another of
+  your vaults than the one open in this browser. Press the button under it to
+  open that vault.
 - **Which name is my sign-in name?** Settings → Your account shows it in
   quotes after "Signed in as", however you signed in.
 - **"No account here is connected to that sign-in"** after pressing Continue
@@ -113,6 +121,17 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.25.0 or newer.
   Allow (if you were already signed in there for a while, Kaal asks for your
   password again first). Or paste a token made in the web app under
   Settings → Tokens.
+- **Saving into another of your vaults:** when you belong to more than one,
+  the popup says "Saving into" above its button, with the list of your
+  vaults. The choice is kept until you change it, and the popup says where
+  each save went. A vault you may only view is listed but cannot be chosen.
+  If the popup instead says "To choose another of your vaults here, connect
+  again in the settings", the extension was connected before it could do
+  this, or with a pasted token, which works in one vault: press "Connect with
+  my Kaal sign-in" once more. This needs a Kaal server newer than 1.0.0-rc3.
+- **"Kaal wouldn't do that in the vault you chose":** you may only view that
+  vault, or you no longer belong to it. Nothing was saved anywhere else.
+  Choose another vault in the popup and save again.
 - **"Can't reach Kaal":** this computer is not on a network that can reach
   your Kaal server; or the server does not allow this copy of the extension.
   A Kaal server answers only the extensions it knows: whoever runs it lists

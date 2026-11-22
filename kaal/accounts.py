@@ -142,6 +142,10 @@ _MIGRATIONS: tuple[str, ...] = (
     """
     ALTER TABLE app_signins ADD COLUMN kind TEXT NOT NULL DEFAULT 'app';
     """,
+    # 6: the extension may be let into every vault its person belongs to, not only the open one.
+    """
+    ALTER TABLE app_signins ADD COLUMN every_vault INTEGER NOT NULL DEFAULT 0;
+    """,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 SESSION_PREFIX = "ks"
@@ -609,14 +613,15 @@ class AccountStore:
 
     # --- app sign-ins: a browser the person is signed in on lets an app on their device in
 
-    def start_app_signin(self, account_id: str, vault_id: str | None, challenge: str, kind: str = "app") -> str:
+    def start_app_signin(self, account_id: str, vault_id: str | None, challenge: str, kind: str = "app", every_vault: bool = False) -> str:
         """Approve one app sign-in. Returns a code that works once, for a few minutes, and
-        only together with the secret whose SHA-256 (base64url, unpadded) is ``challenge``."""
+        only together with the secret whose SHA-256 (base64url, unpadded) is ``challenge``.
+        ``every_vault`` records that the person let it into all their vaults, not only this one."""
         code = secrets.token_urlsafe(32)
         with self._db(write=True) as db:
             db.execute("DELETE FROM app_signins WHERE expires <= ?", (_now(),))
-            db.execute("INSERT INTO app_signins (code_sha256, account_id, vault_id, challenge, created, expires, kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                       (_sha(code), account_id, vault_id, challenge, _now(), _later(minutes=APP_SIGNIN_MINUTES), kind))
+            db.execute("INSERT INTO app_signins (code_sha256, account_id, vault_id, challenge, created, expires, kind, every_vault) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (_sha(code), account_id, vault_id, challenge, _now(), _later(minutes=APP_SIGNIN_MINUTES), kind, 1 if every_vault else 0))
         return code
 
     def end_app_signins(self, account_id: str) -> int:
@@ -635,7 +640,7 @@ class AccountStore:
         made = base64.urlsafe_b64encode(hashlib.sha256((verifier or "").encode()).digest()).decode().rstrip("=")
         if row["expires"] <= _now() or not hmac.compare_digest(made, row["challenge"]) or row["kind"] != kind:
             return None
-        return {"account": row["account_id"], "vault": row["vault_id"]}
+        return {"account": row["account_id"], "vault": row["vault_id"], "every_vault": bool(row["every_vault"])}
 
     # --- recovery codes: a way back in when the password is forgotten
 

@@ -200,9 +200,10 @@ with a token for that server, and to nothing else.
 sign-in page in a window of its own. You sign in there as you usually do and
 press Allow (if that browser was signed in more than ten minutes ago, your
 Kaal asks for your password again first); your Kaal then makes a token for
-the extension (to read, reveal
-and write in the vault you had open, as far as your role there allows) and
-hands it over. The extension never sees your password. You can paste a token
+the extension and hands it over. The token lets it read, reveal and write in
+every vault you belong to, now or later, as far as your role in each allows;
+your Kaal's page says so before you press Allow. (A Kaal server older than
+this gives it the vault you had open, and no other.) The extension never sees your password. You can paste a token
 you made yourself instead. Either way the token is listed in the web app
 under Settings → Tokens, where you can revoke it.
 
@@ -211,13 +212,14 @@ that tab), or the PDF or file you are saving, or the text you selected; with
 it, the page's title and address. Kaal keeps the address without the part
 after `?` or `#`, where sites often put session codes.
 
-**What it keeps in Chrome:** your Kaal's address and token, and the names of
+**What it keeps in Chrome:** your Kaal's address and token, the names of the
+vaults you belong to and the one you chose to save into, and the names of
 the sites that receipts in your vault were saved from, by you or by anyone
 who shares the vault (so it can offer "Save receipt" there), in this Chrome
 profile on this computer; and, while a save is under way, its progress, which
 Chrome forgets when it closes. Every ten minutes it asks your Kaal how many
-receipts are waiting to be checked, for the number on its icon, and for that
-list of sites.
+receipts are waiting to be checked, for the number on its icon, for that
+list of sites, and for the list of your vaults.
 "Disconnect" in its settings removes the address and token; removing the
 extension removes everything it kept.
 

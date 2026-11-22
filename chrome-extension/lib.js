@@ -145,3 +145,29 @@ export function explain(status, serverMessage = "") {
 }
 
 export const stateKey = (tabId) => `tab:${tabId}`;
+
+// --- vaults: someone who belongs to more than one chooses where a save goes
+
+// The vault saves go into, out of those the extension's token works in. Null when there is no
+// choice to speak of (one vault, or a Kaal that knows nothing of this), and then nothing is said
+// about vaults and no request names one.
+export function savingInto(vaults, chosen) {
+  const list = (Array.isArray(vaults) ? vaults : []).filter((vault) => vault && typeof vault.id === "string" && vault.id);
+  if (list.length < 2) return null;
+  return list.find((vault) => vault.id === chosen) || null;
+}
+
+// A viewer of a vault reads it and saves nothing into it.
+export const canSaveInto = (vault) => Boolean(vault) && vault.role !== "viewer";
+
+// A page of Kaal's web app, saying which vault it is in when that needs saying: the browser may
+// have another one open, and Kaal then offers to open the right one.
+export function inKaal(server, path, vaultId = "") {
+  return `${server}/#/${path}${vaultId ? `?vault=${encodeURIComponent(vaultId)}` : ""}`;
+}
+
+// What is said once something is saved, naming the vault when there was a choice of them.
+export function savedLine(mode, vaultName = "") {
+  if (mode === "medical") return vaultName ? `Receipt saved in “${vaultName}”. It still needs checking.` : "Receipt saved. It still needs checking.";
+  return vaultName ? `Saved to Kaal, in “${vaultName}”.` : "Saved to Kaal.";
+}

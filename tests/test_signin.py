@@ -255,7 +255,10 @@ def test_a_token_can_never_manage_the_account_it_acts_for(house):
         assert house.browser().delete("/v1/account/sessions/abc", headers=headers).status_code == 403
     assert house.browser().get("/v1/account").status_code == 401
     # The token still does what it always did, and its session answer has no account in it.
-    assert house.browser().get("/v1/session", headers=bearer).json()["result"] == {"name": "old-token", "scopes": ["read", "reveal", "write", "delete", "admin"]}
+    # It is told the one vault it works in, and nothing about the person.
+    told = house.browser().get("/v1/session", headers=bearer).json()["result"]
+    assert (told["name"], told["scopes"]) == ("old-token", ["read", "reveal", "write", "delete", "admin"]) and "account" not in told
+    assert told["every_vault"] is False and told["vaults"] == [told["vault"]] and sorted(told) == ["elsewhere", "every_vault", "name", "scopes", "vault", "vaults"]
 
 
 # --- which vault a person is on

@@ -50,9 +50,16 @@ Notes, totals, the Trash and settings are in Kaal's web app.
    address (for example `https://kaal.example.ts.net`) and press **Connect
    with my Kaal sign-in**. Kaal's own page opens in a window of its own: sign
    in as you usually do (password or Google) and press **Allow**. The
-   extension gets a token of its own for the vault you had open, allowed to
-   read, reveal and write as far as your role there allows. It appears under
-   Settings, Tokens, in the web app, where you can revoke it.
+   extension gets a token of its own, allowed to read, reveal and write in
+   every vault you belong to, as far as your role in each allows; Kaal's page
+   says so before you allow it. It appears under Settings, Tokens, in the web
+   app, where you can revoke it.
+
+   If you belong to more than one vault, the popup says **Saving into** above
+   its button and lets you choose. Each request the extension makes names
+   that vault (`X-Kaal-Vault`), and Kaal refuses one it may not work in
+   rather than saving anywhere else. A pasted token works in the one vault it
+   was made for.
 
    The single-use code Kaal hands back goes only to this extension's own
    address, which Kaal chooses itself, and is useless without a secret the

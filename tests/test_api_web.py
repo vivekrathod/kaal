@@ -74,7 +74,8 @@ def test_a_signed_in_browser_can_read_but_must_prove_writes_come_from_the_app(se
 
 def test_sessions_follow_the_token_scopes_revocation_and_sign_out(service):
     reader = {"Cookie": f"__Host-kaal_session={service.secrets['reader']}"}
-    assert service.client.get("/v1/session", headers=reader).json()["result"] == {"name": "reader", "scopes": ["read"]}
+    told = service.client.get("/v1/session", headers=reader).json()["result"]
+    assert (told["name"], told["scopes"]) == ("reader", ["read"]) and "account" not in told and told["every_vault"] is False
     assert service.client.get("/v1/medical/receipts", headers=reader).status_code == 403
     assert service.client.get("/v1/session").status_code == 401
     assert service.client.get("/v1/session", headers={"Cookie": "__Host-kaal_session=kaal_made_up"}).status_code == 401
@@ -84,7 +85,7 @@ def test_sessions_follow_the_token_scopes_revocation_and_sign_out(service):
 
     # Changing what the token may do reaches a signed-in browser without a new sign-in.
     service.store.set_scopes("reader", ["read", "reveal", "delete"])
-    assert service.client.get("/v1/session", headers=reader).json()["result"] == {"name": "reader", "scopes": ["read", "reveal", "delete"]}
+    assert service.client.get("/v1/session", headers=reader).json()["result"]["scopes"] == ["read", "reveal", "delete"]
     assert service.client.get("/v1/medical/receipts", headers=reader).status_code == 200
 
     service.store.revoke("reader")

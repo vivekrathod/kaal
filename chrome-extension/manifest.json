@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Kaal",
-  "version": "1.2.4",
+  "version": "1.3.0",
   "description": "Save the page in front of you to your Kaal server, and check a medical receipt beside the page it came from.",
   "minimum_chrome_version": "116",
   "icons": {

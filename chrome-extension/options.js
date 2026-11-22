@@ -44,7 +44,9 @@ document.getElementById("signin").addEventListener("click", async () => {
   try {
     const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
     const challenge = base64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
-    const page = `${address}/#/app-sign-in/${challenge}?for=extension&id=${chrome.runtime.id}`;
+    // "vaults=all" asks to work in every vault the person belongs to; Kaal's page tells them so
+    // before they allow it, and a Kaal from before that gives a token for the open vault as ever.
+    const page = `${address}/#/app-sign-in/${challenge}?for=extension&id=${chrome.runtime.id}&vaults=all`;
     let back;
     try {
       back = await chrome.identity.launchWebAuthFlow({ url: page, interactive: true });
@@ -59,12 +61,13 @@ document.getElementById("signin").addEventListener("click", async () => {
     }
     connect(address, "");
     const made = await api.extensionSignIn(code, verifier, "Chrome extension");
-    await chrome.storage.local.set({ server: address, token: made.token });
+    const vaults = made.every_vault === true && Array.isArray(made.vaults) ? made.vaults.map(({ id, name, role }) => ({ id, name, role })) : [];
+    await chrome.storage.local.set({ server: address, token: made.token, vaults, vault: vaults.length > 1 ? made.vault_id : "", home: made.vault || "", elsewhere: 0 });
     server.value = address;
     token.value = "";
     token.placeholder = "A token is saved";
     chrome.runtime.sendMessage({ action: "count" }).catch(() => {});
-    replace(status, notice(`Connected as “${made.account}”, saving into “${made.vault}”.`));
+    replace(status, notice(`Connected as “${made.account}”, saving into “${made.vault}”.${vaults.length > 1 ? " You can choose another of your vaults from the Kaal button." : ""}`));
   } catch (error) {
     replace(status, notice(error.status === 0 ? `Can't reach Kaal at ${address}.` : String(error.message || error), "error"),
       h("p", { class: "hint" }, "Nothing was saved."));
@@ -92,7 +95,8 @@ form.addEventListener("submit", async (event) => {
     connect(address, secret);
     const session = await api.session();
     const missing = NEEDED.filter((scope) => !session.scopes.includes(scope));
-    await chrome.storage.local.set({ server: address, token: secret });
+    // A pasted token works in the vault it was made for; the worker then asks Kaal what it may reach.
+    await chrome.storage.local.set({ server: address, token: secret, vaults: [], vault: "", home: "", elsewhere: 0 });
     server.value = address;
     token.value = "";
     token.placeholder = "A token is saved";
@@ -109,7 +113,7 @@ form.addEventListener("submit", async (event) => {
 });
 
 document.getElementById("forget").addEventListener("click", async () => {
-  await chrome.storage.local.remove(["server", "token"]);
+  await chrome.storage.local.remove(["server", "token", "vault", "vaults", "home", "elsewhere"]);
   token.value = "";
   chrome.runtime.sendMessage({ action: "count" }).catch(() => {});
   replace(status, notice("Disconnected. The address and token were removed from this browser."));

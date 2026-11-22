@@ -233,8 +233,9 @@ export const APP_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
 export const EXTENSION_ID = /^[a-p]{32}$/;
 
 export function appSignInView(asked, { session, onDone, signOut }) {
-  const { challenge, kind, extension } = typeof asked === "string" ? { challenge: asked, kind: "app", extension: "" } : asked;
+  const { challenge, kind, extension, everyVault } = typeof asked === "string" ? { challenge: asked, kind: "app", extension: "" } : asked;
   const forExtension = kind === "extension" && EXTENSION_ID.test(extension || "");
+  const inEvery = forExtension && everyVault === true;
   const problem = h("div", {});
   const leave = (query) => {
     onDone();
@@ -256,7 +257,7 @@ export function appSignInView(asked, { session, onDone, signOut }) {
     try {
       const typed = proof.value;
       const handed = await api.appSignIn(challenge, forExtension ? "extension" : "app", forExtension ? extension : "",
-        proof.type === "password" ? typed : "", proof.type === "password" ? "" : typed.trim());
+        proof.type === "password" ? typed : "", proof.type === "password" ? "" : typed.trim(), inEvery);
       onDone();
       location.assign(handed.redirect);
     } catch (error) {
@@ -274,7 +275,9 @@ export function appSignInView(asked, { session, onDone, signOut }) {
   });
   return h("main", { class: "page narrow" }, h("div", { class: "card form" },
     h("h1", {}, forExtension ? "Connect the Kaal extension?" : "Sign in the Kaal app?"),
-    h("p", { class: "muted" }, forExtension
+    h("p", { class: "muted" }, inEvery
+      ? `The Kaal extension in this browser will be connected as “${session.account.login}”, to save pages and receipts and to check them, in every vault you belong to, now or later, as far as your role in each allows. It starts in “${(session.vault || {}).name || "your vault"}”, and you choose another in the extension. You can revoke its token under Settings, Tokens. Allow this only if you pressed Connect in the extension just now.`
+      : forExtension
       ? `The Kaal extension in this browser will get a token for “${(session.vault || {}).name || "your vault"}” as “${session.account.login}”, to save pages and receipts and to check them. You can revoke it under Settings, Tokens. Allow this only if you pressed Connect in the extension just now.`
       : `The Kaal app on this device will be signed in as “${session.account.login}” and can do everything you can here. Allow this only if you opened the app yourself just now.`),
     problem, proof, allow, cancel,

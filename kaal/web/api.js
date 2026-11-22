@@ -18,12 +18,15 @@ export const updateWaiting = () => newerVersion;
 
 // The web app is served by Kaal and signed in with a cookie, so it needs
 // neither of these. A client that lives elsewhere and holds its own token (the
-// browser extension) calls connect() once before anything else.
+// browser extension) calls connect() once before anything else. A token that
+// works in more than one vault says which vault it means with each request.
 let server = "";
 let bearer = "";
-export function connect(address, token) {
+let inVault = "";
+export function connect(address, token, vault = "") {
   server = String(address || "").replace(/\/+$/, "");
   bearer = String(token || "");
+  inVault = bearer ? String(vault || "") : "";
 }
 export const serverAddress = () => server;
 export const holdsToken = () => Boolean(bearer);
@@ -41,6 +44,7 @@ async function request(method, path, { json, form, params } = {}) {
   // page on another site cannot add it.
   const headers = { "X-Kaal-Request": "1", Accept: "application/json" };
   if (bearer) headers.Authorization = `Bearer ${bearer}`;
+  if (inVault) headers["X-Kaal-Vault"] = inVault;
   let body;
   if (json !== undefined) {
     headers["Content-Type"] = "application/json";
@@ -91,8 +95,9 @@ export const api = {
   // { code, redirect }, where redirect is the only place the code may be sent.
   // The browser extension collecting its own token with the code the person's sign-in page handed it.
   extensionSignIn: (code, verifier, name) => result(request("POST", "/v1/extension-sign-ins", { json: { code, verifier, name } })),
-  appSignIn: (challenge, kind = "app", extension = "", password = "", confirm = "") =>
-    result(request("POST", "/v1/account/app-sign-ins", { json: { challenge, kind, extension, password, confirm } })),
+  // everyVault: the extension asked to work in every vault of the person's, and they were told so.
+  appSignIn: (challenge, kind = "app", extension = "", password = "", confirm = "", everyVault = false) =>
+    result(request("POST", "/v1/account/app-sign-ins", { json: { challenge, kind, extension, password, confirm, every_vault: everyVault } })),
   signInServices: () => result(request("GET", "/v1/admin/sign-in-services")),
   addSignInService: (service) => result(request("POST", "/v1/admin/sign-in-services", { json: service })),
   removeSignInService: (service) => result(request("DELETE", `/v1/admin/sign-in-services/${id(service)}`)),
@@ -177,7 +182,7 @@ export async function fileAddress(path) {
   if (!bearer) return path;
   let response;
   try {
-    response = await fetch(server + path, { headers: { Authorization: `Bearer ${bearer}` }, credentials: "omit" });
+    response = await fetch(server + path, { headers: { Authorization: `Bearer ${bearer}`, ...(inVault ? { "X-Kaal-Vault": inVault } : {}) }, credentials: "omit" });
   } catch {
     throw new ApiError(0, "Can't reach Kaal. Check your connection and try again.", "unavailable");
   }

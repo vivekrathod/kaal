@@ -77,6 +77,7 @@ Notes, totals per person and year, reimbursements, the Trash and settings are in
 PRIVATE BY DESIGN
 • What you save goes only to the Kaal server you connect. Nothing goes to Kaal's authors: no analytics, no ads, no tracking.
 • You connect it by signing in on your Kaal's own page. The extension never sees your password, and gets a token of its own that you can revoke.
+• If you share vaults with your household, the popup says which vault a save goes into and lets you choose.
 • The extension asks for no access to websites of its own. It reads the page you save through that tab, at the moment you save, and nothing else. Chrome's warning when you install it is broad because of the debugger permission, which Chrome describes for everything a debugger could do; this extension uses it only on the tab you save, while it saves.
 • If a file cannot be read that way, it offers to ask Chrome for access to that one site, and only if you press the button.
 
@@ -138,7 +139,7 @@ To know which page the user means when they click the toolbar button, a right-cl
 **alarms**
 
 ```text
-Every ten minutes, asks the user's own Kaal server how many receipts are waiting to be checked, to show that number on the toolbar icon, and for the host names of the sites that receipts in the user's vault were saved from, so that "Save receipt" is offered first on those sites.
+Every ten minutes, asks the user's own Kaal server how many receipts are waiting to be checked, to show that number on the toolbar icon, and for the host names of the sites that receipts in the user's vault were saved from, so that "Save receipt" is offered first on those sites, and for the names of the user's vaults there, so that the popup can say where a save goes.
 ```
 
 **contextMenus**
@@ -168,7 +169,7 @@ After the user saves a medical receipt, shows Kaal's review screen in the side p
 **storage**
 
 ```text
-Keeps, on this computer, the address of the user's Kaal server, the token that server gave the extension (or one the user pasted), the host names of the sites that receipts in their vault were saved from (the ones saved here, and the list their server gives), and the progress of a save under way (session storage, cleared when Chrome closes).
+Keeps, on this computer, the address of the user's Kaal server, the token that server gave the extension (or one the user pasted), the names of the user's vaults on that server and the one they chose to save into, the host names of the sites that receipts in their vault were saved from (the ones saved here, and the list their server gives), and the progress of a save under way (session storage, cleared when Chrome closes).
 ```
 
 **Host permission (optional_host_permissions)**

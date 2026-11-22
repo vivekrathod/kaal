@@ -74,7 +74,7 @@ OFFICIAL_EXTENSION_ID = "ebmkcbpcihgiaoimcpncmadadogclmld"
 STORE_EXTENSION_ID = "jimjfomjjedakpipjfpagdmkecjiehll"
 OUR_EXTENSIONS = tuple(f"chrome-extension://{known}" for known in (OFFICIAL_EXTENSION_ID, STORE_EXTENSION_ID))
 CORS_METHODS = b"GET, POST, PUT, PATCH, DELETE"
-CORS_HEADERS = b"Authorization, Content-Type, Accept, X-Kaal-Request"
+CORS_HEADERS = b"Authorization, Content-Type, Accept, X-Kaal-Request, X-Kaal-Vault"
 
 
 def extension_origins(environ: dict[str, str] | None = None) -> tuple[str, ...]:
@@ -554,7 +554,7 @@ class ExtensionCorsMiddleware:
 
 
 UPLOAD_ROUTE = re.compile(r"/v1/(?:captures|medical/receipts|notes/[^/]+/attachments|library/notes/[^/]+/attachments)")
-ONCE_ONLY = (b"content-type", b"content-length", b"authorization", b"transfer-encoding", b"x-kaal-session")
+ONCE_ONLY = (b"content-type", b"content-length", b"authorization", b"transfer-encoding", b"x-kaal-session", b"x-kaal-vault")
 BODY_IDLE_SECONDS = 60.0
 
 
@@ -973,14 +973,27 @@ def person_record(state: AppState, session: dict[str, Any]) -> dict[str, Any] | 
             "scopes": list(accounts.ROLE_SCOPES[current["role"]]) if current else []}
 
 
-def who_may(state: AppState, record: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
+def token_vault(state: AppState, record: dict[str, Any]) -> str | None:
+    """The vault a token works in when a request names none."""
+    return record.get("vault") or state.accounts.defaults()[1]
+
+
+def who_may(state: AppState, record: dict[str, Any], asked: str = "") -> tuple[dict[str, Any] | None, str | None, str | None]:
     """The account a token acts for, the vault it acts in, and that account's role there.
 
     The account is None when it is missing or switched off; the role is None
-    when the account does not belong to the vault.
+    when the account does not belong to the vault. ``asked`` is the vault a
+    request names: only a token for every vault of its account is moved by it,
+    and such a token whose own vault is gone works in the account's first.
     """
-    default_account, default_vault = state.accounts.defaults()
-    account_id, vault_id = record.get("account") or default_account, record.get("vault") or default_vault
+    account_id, vault_id = record.get("account") or state.accounts.defaults()[0], token_vault(state, record)
+    if account_id and record.get("every_vault"):
+        if asked:
+            vault_id = asked
+        else:
+            theirs = [vault["id"] for vault in state.accounts.vaults_of(account_id)]
+            if theirs and vault_id not in theirs:
+                vault_id = theirs[0]
     if not account_id or not vault_id:
         return None, None, None
     account, role = state.accounts.standing(account_id, vault_id)
@@ -1037,6 +1050,10 @@ SESSION_COOKIE = "kaal_session"
 HOST_SESSION_COOKIE = "__Host-kaal_session"
 # Apps (the iPhone app) send their session in this header instead of a cookie.
 SESSION_HEADER = "x-kaal-session"
+# The vault a request means, from a client whose token works in more than one (the browser
+# extension). It is never a wish that may be passed over: a request that names a vault its
+# credential does not work in is refused, so that nothing is saved somewhere else instead.
+VAULT_HEADER = "x-kaal-vault"
 SESSION_SECONDS = 30 * 24 * 3600
 # Held by the browser for one trip to a sign-in service and back, so the trip
 # can only be finished by the browser that started it.
@@ -1231,11 +1248,14 @@ def require(*scopes: str, adds: bool = False) -> Callable:
         state: AppState = request.app.state.kaal
         request.state.needed = scopes
         scheme, _, presented = request.headers.get("authorization", "").partition(" ")
+        asked = request.headers.get(VAULT_HEADER, "").strip()[:64]
         from_cookie = False
         if scheme.lower() != "bearer":
             # A signed-in browser: a session, or (older sign-ins) a token, in a cookie page scripts cannot read.
             person = _signed_in_person(request, state)
             if person is not None:
+                if asked and asked != person["vault"]:
+                    raise HTTPException(403, "Another vault is open here. Open that vault first.")
                 missing = [scope for scope in scopes if scope not in person["scopes"]]
                 if scopes and person["vault"] is None:
                     raise HTTPException(403, "You do not belong to a vault yet.")
@@ -1255,12 +1275,14 @@ def require(*scopes: str, adds: bool = False) -> Callable:
         request.state.token_name = record["name"]
         if not state.limiter.allow(record["id"]):
             raise HTTPException(429, "Too many requests.", headers={"Retry-After": "60"})
-        account, vault_id, role = who_may(state, record)
+        if asked and not record.get("every_vault") and asked != token_vault(state, record):
+            raise HTTPException(403, "This token works in one vault only, and that is another one.")
+        account, vault_id, role = who_may(state, record, asked)
         if account is None:
             raise HTTPException(401, "A valid bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
         vault = state.vaults.get(vault_id) if role else None
         if vault is None:
-            raise HTTPException(403, "This token's account does not belong to its vault.")
+            raise HTTPException(403, "You do not belong to that vault." if asked else "This token's account does not belong to its vault.")
         # A role caps what any token of that person may do in that vault.
         allowed = [scope for scope in record.get("scopes", []) if scope in accounts.ROLE_SCOPES[role]]
         missing = [scope for scope in scopes if scope not in allowed]
@@ -1271,7 +1293,7 @@ def require(*scopes: str, adds: bool = False) -> Callable:
         request.state.caller, request.state.scopes = f"account:{account['id']}", allowed
         if adds:
             _room_checked(request, state, vault)
-        return {**record, "scopes": allowed, "account": account["id"], "vault": vault_id, "role": role}
+        return {**record, "scopes": allowed, "account": account["id"], "vault": vault_id, "role": role, "home": token_vault(state, record)}
 
     return Depends(dependency)
 
@@ -1685,6 +1707,8 @@ class AppSignInStart(BaseModel):
     # account without one, the sign-in name typed.
     password: str = Field(default="", max_length=1024)
     confirm: str = Field(default="", max_length=200)
+    # For the browser extension: let it into every vault the person belongs to, not only the open one.
+    every_vault: bool = False
 
 
 class ExtensionSignInFinish(BaseModel):
@@ -1950,6 +1974,14 @@ def create_app(settings: Settings) -> FastAPI:
                                "has_password": app.state.kaal.accounts.password_hash(person["id"]) is not None}
             told["vaults"] = [{"id": vault["id"], "name": vault["name"], "role": vault["role"]} for vault in record["vaults"]]
             told["vault"] = next((vault for vault in told["vaults"] if vault["id"] == record["vault"]), None)
+        elif record.get("account") and record.get("vault"):
+            # A token: the vaults it works in (one, unless its person let it into all of theirs),
+            # the one this request is in, and how many more its person has that it cannot reach.
+            theirs = [{"id": vault["id"], "name": vault["name"], "role": vault["role"]} for vault in app.state.kaal.accounts.vaults_of(record["account"])]
+            told["every_vault"] = bool(record.get("every_vault"))
+            told["vaults"] = theirs if told["every_vault"] else [vault for vault in theirs if vault["id"] == record.get("home")]
+            told["vault"] = next((vault for vault in theirs if vault["id"] == record["vault"]), None)
+            told["elsewhere"] = len(theirs) - len(told["vaults"])
         return told
 
     def account_in_use(state: Any, account_id: str) -> bool:
@@ -2164,7 +2196,7 @@ def create_app(settings: Settings) -> FastAPI:
         if not state.token_making.allow(person["account"]):
             return _error(429, "You have connected a lot of apps in the last hour. Try again later.", "rate_limited", headers={"Retry-After": "600"})
         if body.kind == "extension":
-            code = state.accounts.start_app_signin(person["account"], person["vault"], body.challenge, kind="extension")
+            code = state.accounts.start_app_signin(person["account"], person["vault"], body.challenge, kind="extension", every_vault=body.every_vault)
             return answer({"code": code, "redirect": f"https://{body.extension}.chromiumapp.org/kaal?code={quote(code)}"})
         code = state.accounts.start_app_signin(person["account"], person["vault"], body.challenge)
         return answer({"code": code, "redirect": f"kaal://signed-in?code={quote(code)}"})
@@ -2172,7 +2204,9 @@ def create_app(settings: Settings) -> FastAPI:
     @app.post("/v1/extension-sign-ins", tags=["session"], dependencies=[STRANGERS])
     def extension_sign_in_finish(request: Request, body: ExtensionSignInFinish):
         """The browser extension collects the sign-in a browser approved for it, as a token of its own
-        for the vault that was open: read, reveal and write, as far as the person's role there allows."""
+        for the vault that was open: read, reveal and write, as far as the person's role there allows.
+        Where the person allowed it, the token works in every vault of theirs, each as far as their
+        role there allows; a request then says which vault it means in ``X-Kaal-Vault``."""
         state = S(request)
         found = state.accounts.finish_app_signin(body.code, body.verifier, kind="extension")
         account = state.accounts.account(found["account"]) if found else None
@@ -2186,18 +2220,21 @@ def create_app(settings: Settings) -> FastAPI:
             return _error(403, "You do not belong to a vault yet.", "forbidden")
         if sum(1 for token in state.tokens.list() if token.get("account") == account["id"] and not token.get("revoked_at")) >= MAX_TOKENS_PER_PERSON:
             return _error(409, f"You have {MAX_TOKENS_PER_PERSON} tokens already. Revoke one you no longer use first.", "conflict")
-        scopes = [scope for scope in ("read", "reveal", "write") if scope in accounts.ROLE_SCOPES[vault["role"]]]
+        roams = bool(found.get("every_vault"))
+        # A role caps a token wherever it is used, so one for every vault carries all three.
+        scopes = [scope for scope in ("read", "reveal", "write") if roams or scope in accounts.ROLE_SCOPES[vault["role"]]]
         base = body.name.strip() or "Chrome extension"
         for number in range(1, 100):
             try:
-                record, secret = state.tokens.create(base if number == 1 else f"{base} {number}", scopes, account=account["id"], vault=vault["id"])
+                record, secret = state.tokens.create(base if number == 1 else f"{base} {number}", scopes, account=account["id"], vault=vault["id"], every_vault=roams)
                 break
             except tokens.TokenError:
                 continue
         else:
             return _error(409, "Could not choose a name for the token. Revoke an older one first.", "conflict")
         request.state.token_name = record["name"]
-        return answer({"token": secret, "name": record["name"], "scopes": scopes, "account": account["login"], "vault": vault["name"]})
+        return answer({"token": secret, "name": record["name"], "scopes": scopes, "account": account["login"], "vault": vault["name"], "vault_id": vault["id"],
+                       "every_vault": roams, "vaults": [{"id": entry["id"], "name": entry["name"], "role": entry["role"]} for entry in (theirs if roams else [vault])]})
 
     @app.post("/v1/app-sign-ins", tags=["session"], dependencies=[STRANGERS])
     def app_sign_in_finish(request: Request, body: AppSignInFinish):
@@ -2293,7 +2330,8 @@ def create_app(settings: Settings) -> FastAPI:
         default_vault = state.accounts.defaults()[1]
         names = {vault["id"]: vault["name"] for vault in person["vaults"]}
         return [{"id": record["id"], "name": record["name"], "scopes": record["scopes"], "created": record["created"],
-                 "vault": record.get("vault") or default_vault, "vault_name": names.get(record.get("vault") or default_vault, "")}
+                 "vault": record.get("vault") or default_vault, "vault_name": names.get(record.get("vault") or default_vault, ""),
+                 "every_vault": bool(record.get("every_vault"))}
                 for record in state.tokens.list() if not record.get("revoked_at") and record.get("account") in mine]
 
     @app.get("/v1/account/tokens", tags=["account"])

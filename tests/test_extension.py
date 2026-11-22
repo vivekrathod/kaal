@@ -47,7 +47,7 @@ def test_the_side_panel_shares_the_web_apps_own_files():
     copied = sorted(str(path.relative_to(EXT / "web")) for path in (EXT / "web").rglob("*") if path.is_file())
     assert copied == sorted(SHARED)
     panel = (EXT / "panel.js").read_text()
-    assert 'from "/web/views/review.js"' in panel and "connect(server, token)" in panel and "backLink: null" in panel
+    assert 'from "/web/views/review.js"' in panel and 'connect(server, token, state.vault || "")' in panel and "backLink: null" in panel
 
 
 def test_shared_screens_never_point_a_picture_or_link_straight_at_the_server():
@@ -80,7 +80,7 @@ def test_every_request_the_worker_makes_is_in_the_published_api():
     spec = json.loads((ROOT / "docs" / "openapi.json").read_text())["paths"]
     worker = (EXT / "background.js").read_text()
     calls = re.findall(r"""call\("([A-Z]+)",\s*"([^"?]+)""", worker)
-    assert sorted(set(calls)) == [("GET", "/v1/medical/receipts"), ("GET", "/v1/medical/sources"), ("POST", "/v1/captures"), ("POST", "/v1/captures/text"), ("POST", "/v1/medical/receipts")]
+    assert sorted(set(calls)) == [("GET", "/v1/medical/receipts"), ("GET", "/v1/medical/sources"), ("GET", "/v1/session"), ("POST", "/v1/captures"), ("POST", "/v1/captures/text"), ("POST", "/v1/medical/receipts")]
     for method, path in calls:
         assert method.lower() in spec[path], (method, path)
     # Only the worker and the shared request layer talk to the server.
@@ -264,3 +264,63 @@ def test_what_was_read_for_a_tab_is_checked_before_it_is_kept():
     assert 'child.frame.mimeType === "application/pdf"' in worker and "inside.length === 1 ? inside[0]" in worker
     assert "return withDebugger(page, (command) => tabAsFile(command, page, again));" in worker
 
+
+
+@needs_node
+def test_someone_with_several_vaults_chooses_where_a_save_goes(tmp_path):
+    out = run_node(tmp_path, """
+import * as lib from "./lib.mjs";
+import { api, connect, fileAddress } from "./api.mjs";
+const two = [{ id: "v1", name: "Mine", role: "owner" }, { id: "v2", name: "Theirs", role: "viewer" }];
+const seen = [];
+globalThis.fetch = async (url, options) => {
+  seen.push((options.headers || {})["X-Kaal-Vault"] || "");
+  return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ result: {} }), blob: async () => new Blob(["x"]) };
+};
+URL.createObjectURL = () => "blob:made-here";
+connect("https://kaal.example.ts.net", "kaal_made_up");
+await api.session();
+connect("https://kaal.example.ts.net", "kaal_made_up", "v2");
+await api.session();
+await fileAddress("/v1/medical/receipts/a/attachments/b/preview?page=1");
+connect("", "", "v2");   // the web app itself, signed in with a cookie, never names a vault
+await api.session();
+console.log(JSON.stringify({
+  into: [lib.savingInto(two, "v2"), lib.savingInto(two, "gone"), lib.savingInto(two.slice(0, 1), "v1"), lib.savingInto(undefined, "v1"), lib.savingInto([], "")],
+  may: two.map(lib.canSaveInto),
+  links: [lib.inKaal("https://k.example", "note/abc"), lib.inKaal("https://k.example", "note/abc", "v 2"), lib.inKaal("https://k.example", "receipts", "v2")],
+  said: [lib.savedLine("general"), lib.savedLine("general", "Theirs"), lib.savedLine("medical"), lib.savedLine("medical", "Theirs")],
+  seen,
+}));
+""")
+    assert out["into"] == [{"id": "v2", "name": "Theirs", "role": "viewer"}, None, None, None, None], "one vault, or none known, is no choice and names nothing"
+    assert out["may"] == [True, False]
+    assert out["links"] == ["https://k.example/#/note/abc", "https://k.example/#/note/abc?vault=v%202", "https://k.example/#/receipts?vault=v2"]
+    assert out["said"] == ["Saved to Kaal.", "Saved to Kaal, in “Theirs”.", "Receipt saved. It still needs checking.", "Receipt saved in “Theirs”. It still needs checking."]
+    assert out["seen"] == ["", "v2", "v2", ""]
+    worker = (EXT / "background.js").read_text()
+    # A save settles its vault once, at the start, and every request of it names that one.
+    saving = worker[worker.index("async function save("):worker.index("// Earlier versions held access")]
+    assert saving.index("const { vault, vaultName } = await connection();") < saving.index("await setState(page.id, { stage: \"saving\"")
+    assert saving.count('call("POST"') == 3 == saving.count(", { vault, ") and 'headers["X-Kaal-Vault"] = named' in worker
+    # The list of vaults is asked for without naming one, so a vault that is gone cannot hide it.
+    assert 'call("GET", "/v1/session", { vault: "" })' in worker and "who.every_vault === true" in worker
+    # A refusal in the chosen vault is said as that; nothing is tried anywhere else.
+    assert "response.status === 403 && named" in worker
+    # Connecting asks for every vault, and Kaal's own page is where the person is told.
+    assert "&vaults=all" in (EXT / "options.js").read_text()
+    assert 'params.vaults === "all"' in (WEB / "app.js").read_text() and "every vault you belong to" in (WEB / "views" / "signin.js").read_text()
+    popup = (EXT / "popup.js").read_text()
+    assert "option.disabled = !canSaveInto(entry)" in popup and 'chrome.storage.local.set({ vault: pick.value })' in popup
+
+
+def test_the_web_app_shows_which_vault_is_open_and_is_not_moved_by_a_link():
+    app = (WEB / "app.js").read_text()
+    picker = app[app.index("function vaultPicker("):app.index("function shell(")]
+    assert "vaults.length < 2" in picker and "session.account" in picker, "only for a person, and only with more than one vault"
+    assert "vaultPicker())" in app[app.index("function shell("):app.index("function inAnotherVault(")]
+    # A link naming another vault is answered with a card and a button; the browser moves only when it is pressed.
+    card = app[app.index("function inAnotherVault("):app.index("// An app on this device asked")]
+    assert "api.chooseVault(vault.id)" in card and "onClick" in card
+    arriving = app[app.index("const elsewhere ="):app.index('const content = h("div", { class: "view" });')]
+    assert "chooseVault" not in arriving and "inAnotherVault(elsewhere)" in arriving

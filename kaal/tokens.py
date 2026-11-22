@@ -15,7 +15,9 @@ Scopes:
 
 A token may name the account and the vault it acts for. One that names
 neither belongs to the installation's first account and its vault, which is
-what every token issued before accounts existed is.
+what every token issued before accounts existed is. A token marked
+``every_vault`` (the browser extension's, when its person allowed that) works
+in any vault its account belongs to: a request names the one it means.
 """
 from __future__ import annotations
 
@@ -107,7 +109,8 @@ class TokenStore:
             raise TokenError("A token needs at least one scope.")
         return wanted
 
-    def create(self, name: str, scopes: Iterable[str], *, account: str | None = None, vault: str | None = None) -> tuple[dict[str, Any], str]:
+    def create(self, name: str, scopes: Iterable[str], *, account: str | None = None, vault: str | None = None,
+               every_vault: bool = False) -> tuple[dict[str, Any], str]:
         name = name.strip()
         if not name:
             raise TokenError("A token needs a name.")
@@ -132,6 +135,10 @@ class TokenStore:
                 record["account"] = account
             if vault:
                 record["vault"] = vault
+            if every_vault and account:
+                # Works in any vault its account belongs to, as far as the role there allows; a
+                # request says which, and ``vault`` is the one it works in when none is named.
+                record["every_vault"] = True
             records.append(record)
             self._save(records)
         return self._public(record), f"{PREFIX}_{token_id}_{secret}"
@@ -160,12 +167,13 @@ class TokenStore:
         return self._public(match)
 
     def revoke_where(self, *, account: str | None = None, vault: str | None = None) -> int:
-        """Revoke every active token that names this account or this vault. Returns how many."""
+        """Revoke every active token that names this account, or that works in this vault only. Returns how many."""
         if not account and not vault:
             return 0
         with self._lock:
             records = [dict(r) for r in self._load()]
-            hit = [r for r in records if not r.get("revoked_at") and ((account and r.get("account") == account) or (vault and r.get("vault") == vault))]
+            hit = [r for r in records if not r.get("revoked_at")
+                   and ((account and r.get("account") == account) or (vault and r.get("vault") == vault and not r.get("every_vault")))]
             for record in hit:
                 record["revoked_at"] = _now()
             if hit:

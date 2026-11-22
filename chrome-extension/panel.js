@@ -4,7 +4,7 @@
 import { connect } from "/web/api.js";
 import { h, replace, notice } from "/web/ui.js";
 import { reviewView } from "/web/views/review.js";
-import { MODES, stateKey, accessAsk, LOAD_AGAIN } from "/lib.js";
+import { MODES, stateKey, accessAsk, LOAD_AGAIN, inKaal, savedLine } from "/lib.js";
 
 const tabId = Number(new URLSearchParams(location.search).get("tab"));
 const key = stateKey(tabId);
@@ -24,7 +24,7 @@ function close() {
 
 function heading(server, state) {
   const link = state && state.noteId
-    ? h("a", { href: `${server}/#/${state.stage === "review" ? "receipt" : "note"}/${encodeURIComponent(state.noteId)}`, target: "_blank", rel: "noopener", class: "button small" }, "Open in Kaal")
+    ? h("a", { href: inKaal(server, `${state.stage === "review" ? "receipt" : "note"}/${encodeURIComponent(state.noteId)}`, state.vault), target: "_blank", rel: "noopener", class: "button small" }, "Open in Kaal")
     : null;
   replace(head, h("div", { class: "panel-head" }, h("span", { class: "brand" }, "Kaal"),
     h("div", { class: "panel-links" }, link, h("button", { type: "button", class: "button small", onClick: close }, "Close"))));
@@ -77,14 +77,14 @@ async function render() {
     return;
   }
   if (state.stage === "saved") {
-    replace(root, notice("Saved to Kaal."), h("p", { class: "hint" }, "This panel closes by itself."));
+    replace(root, notice(savedLine("general", state.vaultName)), h("p", { class: "hint" }, "This panel closes by itself."));
     closing = setTimeout(close, 5000);
     return;
   }
-  // A receipt: check it here, beside the page it came from.
-  connect(server, token);
+  // A receipt: check it here, beside the page it came from, in the vault it was saved into.
+  connect(server, token, state.vault || "");
   const view = h("div", { class: "view" });
-  replace(root, view);
+  replace(root, state.vaultName ? h("p", { class: "hint" }, `In “${state.vaultName}”.`) : null, view);
   leave = reviewView(view, state.noteId, {
     go: close,
     backLink: null,

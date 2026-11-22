@@ -165,12 +165,12 @@ def test_an_installation_from_before_app_sign_ins_gains_the_table(tmp_path):
     with sqlite3.connect(tmp_path / "accounts.db") as db:
         db.execute("DROP TABLE app_signins")
         db.execute("PRAGMA user_version = 3")
-    # (layout 4 made the table; layout 5 gave it a kind)
+    # (layout 4 made the table; layout 5 gave it a kind; layout 6, whether every vault was allowed)
     again = accounts.AccountStore(tmp_path / "accounts.db", tmp_path)
     code = again.start_app_signin(made["id"], None, challenge_for(VERIFIER))
-    assert again.finish_app_signin(code, VERIFIER) == {"account": made["id"], "vault": None}
+    assert again.finish_app_signin(code, VERIFIER) == {"account": made["id"], "vault": None, "every_vault": False}
     with sqlite3.connect(tmp_path / "accounts.db") as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == accounts.SCHEMA_VERSION == 5
+        assert db.execute("PRAGMA user_version").fetchone()[0] == accounts.SCHEMA_VERSION == 6
 
 
 # --- the browser extension, through the same hand-over
@@ -209,6 +209,111 @@ def test_a_viewer_connects_the_extension_only_to_read(house):
     sam.post("/v1/session/vault", json={"vault": vault})
     code = approve_extension(sam).json()["result"]["code"]
     assert house.phone().post("/v1/extension-sign-ins", json={"code": code, "verifier": VERIFIER}).json()["result"]["scopes"] == ["read", "reveal"]
+
+
+# --- an extension let into every vault of its person
+
+def two_vaults(house):
+    """The owner with a second vault of their own, "Household", and the first one open."""
+    owner = house.signed_in("owner")
+    first = owner.get("/v1/session").json()["result"]["vault"]
+    second = owner.post("/v1/account/vaults", json={"name": "Household"}).json()["result"]["vault"]
+    return owner, first, second
+
+
+def connect_extension(house, client, every_vault=True):
+    approved = client.post("/v1/account/app-sign-ins", json={"challenge": challenge_for(VERIFIER), "kind": "extension", "extension": EXTENSION, "every_vault": every_vault})
+    assert approved.status_code == 200, approved.text
+    got = house.phone().post("/v1/extension-sign-ins", json={"code": approved.json()["result"]["code"], "verifier": VERIFIER})
+    assert got.status_code == 200, got.text
+    return got.json()["result"]
+
+
+def with_token(house, token, vault=""):
+    headers = {"Authorization": f"Bearer {token}"}
+    if vault:
+        headers["X-Kaal-Vault"] = vault
+    return TestClient(house.app, base_url=HERE, headers=headers)
+
+
+def keep(client, text):
+    made = client.post("/v1/captures/text", json={"text": text, "title": text})
+    assert made.status_code in (200, 201), made.text
+    return made.json()["result"]["id"]
+
+
+def test_an_extension_let_into_every_vault_saves_where_each_request_says(house):
+    owner, first, second = two_vaults(house)
+    made = connect_extension(house, owner)
+    assert made["every_vault"] is True and made["vault_id"] == first["id"]
+    assert [vault["id"] for vault in made["vaults"]] == [first["id"], second["id"]]
+    here = keep(with_token(house, made["token"]), "kept in the first")
+    there = keep(with_token(house, made["token"], second["id"]), "kept in the second")
+    # Each is in the vault that was named, and only there.
+    assert with_token(house, made["token"], first["id"]).get(f"/v1/library/notes/{here}").status_code == 200
+    assert with_token(house, made["token"], second["id"]).get(f"/v1/library/notes/{there}").status_code == 200
+    assert with_token(house, made["token"], second["id"]).get(f"/v1/library/notes/{here}").status_code == 404
+    assert with_token(house, made["token"]).get(f"/v1/library/notes/{there}").status_code == 404
+    # The token is told where it works and where a request of its is.
+    told = with_token(house, made["token"], second["id"]).get("/v1/session").json()["result"]
+    assert told["every_vault"] is True and told["vault"]["id"] == second["id"] and told["elsewhere"] == 0
+    assert [vault["name"] for vault in told["vaults"]] == [first["name"], "Household"]
+    assert "account" not in told   # still a token: no page for managing the account opens for it
+
+
+def test_a_vault_that_is_not_the_persons_is_refused_and_nothing_is_saved_elsewhere(house):
+    owner, first, _second = two_vaults(house)
+    house.store.add_account("sam")
+    sam = house.signed_in("sam")
+    theirs = sam.post("/v1/account/vaults", json={"name": "Sam's"}).json()["result"]["vault"]
+    made = connect_extension(house, owner)
+    refused = with_token(house, made["token"], theirs["id"]).post("/v1/captures/text", json={"text": "not here", "title": "not here"})
+    assert refused.status_code == 403 and "do not belong to that vault" in refused.text
+    assert with_token(house, made["token"], "no-such-vault").get("/v1/library/notes").status_code == 403
+    assert with_token(house, made["token"]).get("/v1/library/notes").json()["result"] == []
+    # Let in afterwards, the same token works there without connecting again.
+    assert sam.post("/v1/session/vault", json={"vault": theirs["id"]}).status_code == 200
+    assert sam.post("/v1/vault/members", json={"login": "owner", "role": "viewer"}).status_code == 200
+    assert with_token(house, made["token"], theirs["id"]).get("/v1/library/notes").status_code == 200
+    # As far as the role there allows: a viewer reads and does not write.
+    capped = with_token(house, made["token"], theirs["id"]).post("/v1/captures/text", json={"text": "no", "title": "no"})
+    assert capped.status_code == 403 and "write" in capped.text
+    assert with_token(house, made["token"], first["id"]).post("/v1/captures/text", json={"text": "yes", "title": "yes"}).status_code in (200, 201)
+
+
+def test_a_token_for_one_vault_is_not_moved_by_a_request(house):
+    owner, first, second = two_vaults(house)
+    made = connect_extension(house, owner, every_vault=False)
+    assert made["every_vault"] is False and [vault["id"] for vault in made["vaults"]] == [first["id"]]
+    assert with_token(house, made["token"], first["id"]).get("/v1/library/notes").status_code == 200
+    refused = with_token(house, made["token"], second["id"]).post("/v1/captures/text", json={"text": "not here", "title": "not here"})
+    assert refused.status_code == 403 and "one vault only" in refused.text
+    told = with_token(house, made["token"]).get("/v1/session").json()["result"]
+    assert told["every_vault"] is False and told["elsewhere"] == 1 and [vault["id"] for vault in told["vaults"]] == [first["id"]]
+    # Nor is a browser's sign-in: it works in the vault that is open in it.
+    assert owner.get("/v1/library/notes", headers={"X-Kaal-Vault": second["id"]}).status_code == 403
+    assert owner.get("/v1/library/notes", headers={"X-Kaal-Vault": first["id"]}).status_code == 200
+
+
+def test_a_token_for_every_vault_outlives_the_vault_it_was_made_in(house):
+    owner, first, second = two_vaults(house)
+    assert owner.post("/v1/session/vault", json={"vault": second["id"]}).status_code == 200
+    made = connect_extension(house, owner)
+    assert made["vault_id"] == second["id"]
+    gone = owner.request("DELETE", "/v1/vault", json={"password": GOOD})
+    assert gone.status_code == 200, gone.text
+    # Naming none, it now works in the person's first vault; the one that is gone is refused.
+    assert with_token(house, made["token"]).get("/v1/session").json()["result"]["vault"]["id"] == first["id"]
+    assert with_token(house, made["token"], second["id"]).get("/v1/library/notes").status_code == 403
+    # The list of the person's tokens says that it is for every vault.
+    listed = owner.get("/v1/account/tokens").json()["result"]["tokens"]
+    assert [token["every_vault"] for token in listed if token["name"] == "Chrome extension"] == [True]
+
+
+def test_the_extension_may_send_the_vault_it_means_from_its_own_pages(house):
+    asked = TestClient(house.app, base_url=HERE).options("/v1/captures", headers={
+        "Origin": f"chrome-extension://{EXTENSION}", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization, x-kaal-vault"})
+    assert asked.status_code in (200, 204) and "x-kaal-vault" in asked.headers["access-control-allow-headers"].lower()
 
 
 def test_an_unknown_extension_is_never_handed_a_code(house):

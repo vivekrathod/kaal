@@ -348,7 +348,7 @@ def test_connecting_by_signing_in_hands_the_extension_a_token_of_its_own(stage, 
 
     assert out["noAddress"].startswith("Enter Kaal's address first")
     # Kaal's own page, in a window of its own, asked for this extension by its id.
-    assert out["opened"] == f"{stage.kaal}/#/app-sign-in/CHALLENGE?for=extension&id={extension_id()}"
+    assert out["opened"] == f"{stage.kaal}/#/app-sign-in/CHALLENGE?for=extension&id={extension_id()}&vaults=all"
     assert out["waiting"].startswith("Waiting for you to sign in")
     assert out["question"] == "Connect the Kaal extension?" and out["cancelOffered"] is True
     # Cancelling saves nothing.
@@ -359,6 +359,43 @@ def test_connecting_by_signing_in_hands_the_extension_a_token_of_its_own(stage, 
     assert out["session"] == {"name": "Chrome extension", "scopes": ["read", "reveal", "write"]}
     made = [record for record in tokens.TokenStore(tmp_path / "tokens.json").list() if record["name"] == "Chrome extension"]
     assert len(made) == 1 and made[0].get("account") == person["id"] and not made[0].get("revoked_at")
+
+
+def test_someone_with_several_vaults_chooses_where_a_save_goes(stage, tmp_path):
+    # A made-up person with two vaults of their own, let into a third, someone else's, only to look.
+    store = server.open_store(server.Settings(home=tmp_path, vault=tmp_path / "data", tokens_file=tmp_path / "tokens.json", tmp_dir=tmp_path / "tmp"))
+    person, other = store.add_account("sam"), store.add_account("pat")
+    server.create_vault(store, "Made-up notes", person["id"])
+    server.create_vault(store, "Made-up household", person["id"])
+    looking = server.create_vault(store, "Only to look at", other["id"])
+    store.grant(person["id"], looking["id"], "viewer")
+    password = "a made-up password for the test"
+    setup = urllib.request.Request(f"{stage.kaal}/v1/setup", data=json.dumps({"code": store.new_setup_code("sam"), "password": password}).encode(),
+                                   headers={"Content-Type": "application/json", "X-Kaal-Request": "1"})
+    assert urllib.request.urlopen(setup, timeout=10).status == 200
+
+    out = drive(stage, "vaults.mjs", E2E_LOGIN="sam", E2E_PASSWORD=password)
+
+    # The extension asks for every vault, and Kaal's own page says so before the person allows it.
+    assert out["asked"] is True and "every vault you belong to" in out["told"] and "It starts in “Made-up notes”" in out["told"]
+    assert out["connected"] == "Connected as “sam”, saving into “Made-up notes”. You can choose another of your vaults from the Kaal button."
+    assert out["vaults"] == ["Made-up notes:owner", "Made-up household:owner", "Only to look at:viewer"] and out["startsInTheOpenOne"] is True
+    made = [record for record in tokens.TokenStore(tmp_path / "tokens.json").list() if record["name"] == "Chrome extension"]
+    assert len(made) == 1 and made[0].get("every_vault") is True and made[0].get("account") == person["id"]
+    # The popup says where a save goes; a vault one may only look at is not offered for saving.
+    assert out["where"] == {"label": "Saving into", "options": ["Made-up notes [chosen]", "Made-up household", "Only to look at (view only) [off]"]}
+    # A save goes into the vault chosen, and nowhere else.
+    assert out["firstSave"]["stage"] == "saved" and out["firstSave"]["text"] == "Saved to Kaal, in “Made-up notes”."
+    assert (out["firstSave"]["here"], out["firstSave"]["there"], out["firstSave"]["unnamed"]) == (200, 404, 200)
+    assert out["secondSave"]["stage"] == "saved" and out["secondSave"]["text"] == "Saved to Kaal, in “Made-up household”."
+    assert (out["secondSave"]["here"], out["secondSave"]["there"]) == (200, 404)
+    assert out["linkNamesTheVault"] is True and out["remembered"] is True
+    # Kaal's web app shows which vault is open. A link into another vault changes nothing by itself:
+    # the person is told where the note is, and opens that vault with a button.
+    assert out["picker"] == ["Made-up notes", "Made-up household", "Only to look at (view only)"]
+    assert out["arrived"] == {"open": "Made-up notes", "heading": "This is in “Made-up household”", "offer": "Open “Made-up household”"}
+    assert out["afterOpening"]["open"] == "Made-up household" and out["afterOpening"]["note"]
+    assert out["afterPicking"] == {"open": "Made-up notes", "hash": "#/notes"}
 
 
 def test_a_pdf_opened_from_this_computer_is_saved_as_the_file_it_is(stage, tmp_path):

@@ -1,7 +1,7 @@
 // The popup: one button for the likely thing to do with this page, the other
 // choice as a link beneath it, and what happened to the last save.
 
-import { MODES, chooseMode, isProtectedPage, stateKey, accessAsk, THIS_COMPUTER, LOAD_AGAIN } from "./lib.js";
+import { MODES, chooseMode, isProtectedPage, stateKey, accessAsk, THIS_COMPUTER, LOAD_AGAIN, savingInto, canSaveInto, inKaal, savedLine } from "./lib.js";
 import { updateWaiting, finishUpdate } from "./fresh.js";
 
 const primary = document.getElementById("primary");
@@ -55,13 +55,55 @@ function show(state, tab, server) {
   if (state.stage === "review") {
     const review = element("button", "button small", "Check it now");
     review.addEventListener("click", () => openPanel(tab).then(() => window.close(), () => say(element("p", "notice error", "Chrome wouldn't open the side panel."))));
-    return say(element("p", "notice", "Receipt saved. It still needs checking."), review);
+    return say(element("p", "notice", savedLine("medical", state.vaultName)), review);
   }
   const open = element("a", "button small", "Open in Kaal");
-  open.href = `${server}/#/note/${encodeURIComponent(state.noteId)}`;
+  open.href = inKaal(server, `note/${encodeURIComponent(state.noteId)}`, state.vault);
   open.target = "_blank";
   open.rel = "noopener";
-  return say(element("p", "notice", "Saved to Kaal."), open);
+  return say(element("p", "notice", savedLine("general", state.vaultName)), open);
+}
+
+// Where saves go, for someone who belongs to more than one vault: said above the button, with
+// the way to change it. Saving into a vault one may only view is not offered.
+function showWhere(server, { vault = "", vaults = [], home = "", elsewhere = 0 }) {
+  const where = document.getElementById("where");
+  const into = savingInto(vaults, vault);
+  if (!into) {
+    // A token for one vault, made before vaults could be chosen here, or pasted by hand.
+    where.hidden = !(elsewhere > 0 && home);
+    where.className = "where told";
+    where.replaceChildren(where.hidden ? "" : element("p", "hint", `Saving into “${home}”. To choose another of your vaults here, connect again in the settings.`));
+    return;
+  }
+  const pick = element("select");
+  pick.id = "vault";
+  for (const entry of vaults) {
+    const option = element("option", "", canSaveInto(entry) ? entry.name : `${entry.name} (view only)`);
+    option.value = entry.id;
+    option.disabled = !canSaveInto(entry);
+    option.selected = entry.id === into.id;
+    pick.append(option);
+  }
+  pick.addEventListener("change", async () => {
+    await chrome.storage.local.set({ vault: pick.value });
+    // The receipts waiting, and the sites receipts come from, are those of the vault chosen.
+    showWaiting(server, pick.value, 0);
+    await chrome.runtime.sendMessage({ action: "count" }).catch(() => {});
+    showWaiting(server, pick.value, (await chrome.storage.session.get("waiting")).waiting || 0);
+  });
+  const label = element("label", "", "Saving into");
+  label.htmlFor = "vault";
+  where.className = "where";
+  where.replaceChildren(label, pick);
+  where.hidden = false;
+}
+
+function showWaiting(server, vault, count) {
+  waiting.hidden = !count;
+  if (!count) return;
+  waiting.textContent = `${count} receipt${count === 1 ? "" : "s"} to check ›`;
+  waiting.href = inKaal(server, "receipts", vault);
 }
 
 // The folder holds a newer copy than the one Chrome is running: offer to switch to it.
@@ -78,7 +120,8 @@ async function offerUpdate() {
 async function start() {
   offerUpdate();
   document.getElementById("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
-  const [{ server = "", token = "", receiptSites = [] }, tab] = await Promise.all([chrome.storage.local.get(["server", "token", "receiptSites"]), currentTab()]);
+  const [{ server = "", token = "", receiptSites = [], ...chosen }, tab] = await Promise.all([
+    chrome.storage.local.get(["server", "token", "receiptSites", "vault", "vaults", "home", "elsewhere"]), currentTab()]);
 
   if (!server || !token) {
     primary.textContent = "Connect to Kaal";
@@ -89,11 +132,14 @@ async function start() {
   }
 
   const session = await chrome.storage.session.get(["waiting", tab ? stateKey(tab.id) : "none"]);
-  if (session.waiting) {
-    waiting.textContent = `${session.waiting} receipt${session.waiting === 1 ? "" : "s"} to check ›`;
-    waiting.href = `${server}/#/receipts`;
-    waiting.hidden = false;
-  }
+  const vaultNow = () => chrome.storage.local.get(["vault", "vaults", "home", "elsewhere"]).then((now) => ({ now, into: savingInto(now.vaults, now.vault) }));
+  showWhere(server, chosen);
+  showWaiting(server, (savingInto(chosen.vaults, chosen.vault) || {}).id || "", session.waiting || 0);
+  // The worker asks Kaal again while the popup is open: someone may have been let into a vault since.
+  chrome.storage.onChanged.addListener(async (changes, area) => {
+    if (area === "local" && (changes.vaults || changes.vault || changes.home || changes.elsewhere)) showWhere(server, (await vaultNow()).now);
+    if (area === "session" && changes.waiting) showWaiting(server, ((await vaultNow()).into || {}).id || "", changes.waiting.newValue || 0);
+  });
   chrome.runtime.sendMessage({ action: "count" }).catch(() => {});
 
   if (!tab || isProtectedPage(tab.url)) {

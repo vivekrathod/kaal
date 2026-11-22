@@ -26,14 +26,55 @@ export function go(path) {
   else location.hash = `#/${path}`;
 }
 
+// Move this browser to another of the person's vaults. What was on the screen belongs to the
+// vault left behind, so a single receipt or note gives way to its list.
+async function openVault(vaultId) {
+  try {
+    session = await api.chooseVault(vaultId);
+  } catch {
+    session = null;   // asked again below: the vault may be gone, or the sign-in over
+  }
+  const { name, rest } = route();
+  if (name === "receipt") go("receipts");
+  else if (name === "note" || (name === "notes" && rest[0] === "new")) go("notes");
+  else render();
+}
+
+// Which vault is open, and the way to another: shown to someone who belongs to more than one.
+function vaultPicker() {
+  const vaults = (session && session.account && session.vaults) || [];
+  if (vaults.length < 2 || !session.vault) return null;
+  const pick = h("select", { class: "vault-pick", "aria-label": "The vault that is open", title: "The vault that is open" },
+    vaults.map((vault) => h("option", { value: vault.id, selected: vault.id === session.vault.id }, vault.role === "viewer" ? `${vault.name} (view only)` : vault.name)));
+  pick.addEventListener("change", () => openVault(pick.value));
+  return pick;
+}
+
 function shell(active, content) {
   const tab = (name, label, path) => h("a", { href: `#/${path}`, class: `tab${active === name ? " active" : ""}`, "aria-current": active === name ? "page" : null }, label);
   return [
     h("header", { class: "bar" },
       h("span", { class: "brand" }, "Kaal"),
-      h("nav", { class: "tabs", "aria-label": "Sections" }, tab("receipts", "Receipts", "receipts"), tab("totals", "Totals", "totals"), tab("notes", "Notes", "notes"), tab("settings", "Settings", "settings"))),
+      h("nav", { class: "tabs", "aria-label": "Sections" }, tab("receipts", "Receipts", "receipts"), tab("totals", "Totals", "totals"), tab("notes", "Notes", "notes"), tab("settings", "Settings", "settings")),
+      vaultPicker()),
     h("main", { class: "page" }, content),
   ];
+}
+
+// A link that says which vault it means (the extension's "Open in Kaal") while another is open
+// here. The browser is not moved by a link: the person is told, and moves it themselves.
+function inAnotherVault(vault) {
+  return h("section", { class: "card section" },
+    h("h1", {}, `This is in “${vault.name}”`),
+    h("p", { class: "muted" }, `“${(session.vault || {}).name || "Another vault"}” is open in this browser. Open “${vault.name}” to see it.`),
+    h("button", { type: "button", class: "button primary", onClick: async () => {
+      try {
+        session = await api.chooseVault(vault.id);
+      } catch {
+        session = null;
+      }
+      render();
+    } }, `Open “${vault.name}”`));
 }
 
 // An app on this device asked to be signed in (#/app-sign-in/CHALLENGE). The
@@ -45,7 +86,7 @@ function appSignInWaiting() {
     const { name, rest, params } = route();
     if (name === "app-sign-in" && APP_CHALLENGE.test(rest[0] || "")) {
       const kind = params.for === "extension" && EXTENSION_ID.test(params.id || "") ? "extension" : "app";
-      sessionStorage.setItem(APP_SIGN_IN, JSON.stringify({ challenge: rest[0], kind, extension: kind === "extension" ? params.id : "" }));
+      sessionStorage.setItem(APP_SIGN_IN, JSON.stringify({ challenge: rest[0], kind, extension: kind === "extension" ? params.id : "", everyVault: kind === "extension" && params.vaults === "all" }));
     }
     const kept = sessionStorage.getItem(APP_SIGN_IN);
     if (!kept) return null;
@@ -108,6 +149,12 @@ async function render() {
     return;
   }
   const { name, rest, params } = route();
+  const elsewhere = session.account && params.vault && params.vault !== (session.vault || {}).id
+    ? (session.vaults || []).find((vault) => vault.id === params.vault) : null;
+  if (elsewhere) {
+    replace(root, shell({ receipt: "receipts", note: "notes" }[name] || name, inAnotherVault(elsewhere)));
+    return;
+  }
   const content = h("div", { class: "view" });
   const context = { go, session, signOut, expired: () => { session = null; render(); }, refresh: async () => { session = await api.session(); render(); } };
   if (name === "receipt" && rest[0]) {
