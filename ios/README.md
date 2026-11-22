@@ -91,7 +91,8 @@ ios/install-on-iphone.sh
 ## Tests
 
 The unit tests cover the API client, signing in, where the sign-in is kept,
-the offline queue, capture, the Markdown reader, and what "Save to Kaal" makes
+the offline queue, capture, the Markdown reader, who can be let into a vault
+or invited, the list of what is left to set up, and what "Save to Kaal" makes
 of what another app shares (what each thing is taken to be, titles, the note's
 text, the receipt's PDF, and the requests it sends):
 
@@ -101,9 +102,11 @@ xcodebuild test -project ios/Kaal.xcodeproj -scheme Kaal -only-testing:KaalTests
 ```
 
 `KaalUITests` drives the real app screen by screen: signing in on Kaal's own
-page, writing, editing and trashing a note, a note's Markdown and files,
-checking a receipt and marking it reimbursed, totals, every Settings page,
-adding a receipt and a note from a photo, dictation, and signing out. It needs
+page, the administrator's list of what is left to set up, writing, editing and
+trashing a note, a note's Markdown and files, checking a receipt and marking
+it reimbursed, totals, every Settings page, inviting someone new into the
+vault and letting them back in from the list of people, adding a receipt and
+a note from a photo, dictation, and signing out. It needs
 a Kaal that holds only made-up data (never a real vault), with a person who
 has a password and the notes and receipts `bin/demo-data.py` puts in (the
 tests open "Boiler and radiators" and check a receipt of $64.50):
@@ -118,7 +121,9 @@ xcodebuild test -project ios/Kaal.xcodeproj -scheme Kaal -only-testing:KaalUITes
 `bin/demo-data.py serve` starts such a Kaal, with the made-up notes and
 receipts the tests look for, and prints its address, sign-in name and
 password. Its account is an administrator, so the tests go through the People
-and Sign-in services pages too.
+and Sign-in services pages too, say that a copy of the key is kept (which puts
+the list of steps away on that Kaal), and invite a made-up person, whose
+account stays on that Kaal afterwards.
 
 They also save from other apps (`ShareScenarioTests.swift`): a web page shared
 from Safari becomes a note, two of the simulator's sample photos shared from

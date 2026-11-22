@@ -32,6 +32,13 @@ final class StoreScreenshots: SigningInTestCase {
         app.launchArguments = ["-kaal-store-screenshots"]
         app.launch()
         appears(app.tabBars.buttons["Receipts"], "the app's tabs, opened again")
+        // The made-up person is this Kaal's administrator, and is shown what is left to set up.
+        // That list is for a first day, not for a picture of the app in use: put it away.
+        let hide = app.buttons["Hide this list"]
+        if hide.waitForExistence(timeout: 10) {
+            hide.tap()
+            happens("the list of steps going away", timeout: 15) { !hide.exists }
+        }
 
         // 1. Add, just after a note was taken down.
         let write = labelled(app.buttons, containing: "Write a note")

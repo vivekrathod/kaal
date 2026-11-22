@@ -11,8 +11,8 @@ import XCTest
 /// The person needs a vault with at least one receipt waiting for review and a note
 /// called "Boiler and radiators". `KAAL_UI_SHOTS` names a folder to keep pictures of each screen in.
 ///
-/// The tests run in the order of their names, and each relies on the ones before it: the first
-/// signs in and the last ones sign out. Those that save from other apps are in ShareScenarioTests.swift.
+/// The tests run in the order of their names (capitals and small letters counting alike), and each
+/// relies on the ones before it: the first signs in and the last ones sign out. Those that save from other apps are in ShareScenarioTests.swift.
 final class ScenarioTests: XCTestCase {
     let environment = ProcessInfo.processInfo.environment
     var app: XCUIApplication!
@@ -43,6 +43,25 @@ final class ScenarioTests: XCTestCase {
             }
             XCTFail("\(what) did not appear", file: file, line: line)
         }
+    }
+
+    /// Waits for something that is not one element appearing, and keeps a picture of the screen if it never happens.
+    func happens(_ what: String, timeout: TimeInterval = 20, file: StaticString = #filePath, line: UInt = #line, _ condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            usleep(300_000)
+        }
+        shot("failed-\(what.replacingOccurrences(of: " ", with: "-"))")
+        XCTFail("\(what) did not happen", file: file, line: line)
+    }
+
+    /// Bring something further down (or up) the page into reach.
+    func reach(_ element: XCUIElement, _ what: String, up: Bool = false, file: StaticString = #filePath, line: UInt = #line) {
+        for _ in 0..<6 where !(element.exists && element.isHittable) {
+            if up { app.swipeDown() } else { app.swipeUp() }
+        }
+        appears(element, what, file: file, line: line)
     }
 
     func labelled(_ kind: XCUIElementQuery, containing text: String) -> XCUIElement {
@@ -150,6 +169,28 @@ final class ScenarioTests: XCTestCase {
 
         appears(tabs, "the app's tabs", timeout: 30)
         shot("04-add")
+    }
+
+    func test01ThenTheAdministratorSeesWhatIsLeftToSetUp() throws {
+        launch()
+        appears(labelled(app.buttons, containing: "Write a note"), "the Add screen")
+        let heading = app.staticTexts["Finish setting up"]
+        try XCTSkipIf(!heading.waitForExistence(timeout: 15), "No list of steps: the person signed in is not an administrator, or this Kaal's steps are done or were put away.")
+        shot("04a-setup-list")
+        // Keeping a copy of the key is the first step, and its instructions are open until it is done.
+        let kept = app.buttons["I have a copy somewhere else"]
+        if kept.exists {
+            XCTAssertTrue(labelled(app.staticTexts, containing: "key-backup").exists)
+            kept.tap()
+            happens("the key step being done") { !kept.exists }
+        }
+        // A Kaal that already holds notes has no step left that is not optional, and the list goes.
+        // Where one is left, the list is put away, so the screens after this are as they always were.
+        let hide = app.buttons["Hide this list"]
+        if heading.exists, hide.exists { hide.tap() }
+        happens("the list going away") { !heading.exists }
+        appears(labelled(app.buttons, containing: "Write a note"), "the Add screen without the list")
+        shot("04b-add-after-setup")
     }
 
     func test02ANoteWrittenInOneGoReachesKaal() {
@@ -268,6 +309,70 @@ final class ScenarioTests: XCTestCase {
         appears(undo, "the reimbursement", timeout: 30)
         XCTAssertTrue(undo.isHittable, "the screen should stay where it was")
         shot("17-reimbursed")
+    }
+
+    func test04aSomeoneNewIsInvitedTakenOutAndLetBackIn() throws {
+        launch()
+        tab("Settings")
+        appears(app.staticTexts["Family"], "Settings", timeout: 30)
+        let vaults = app.staticTexts["Vaults and sharing"]
+        reach(vaults, "Vaults and sharing")
+        vaults.tap()
+        appears(app.staticTexts["Open now"], "the open vault", timeout: 30)
+
+        // Inviting is for an owner who is an administrator; anyone else is told who to ask.
+        let name = app.textFields["Their name"]
+        for _ in 0..<4 where !name.exists { app.swipeUp() }
+        try XCTSkipIf(!name.exists, "The person signed in cannot invite anyone here: they are not an administrator, or this Kaal is older than invitations.")
+        // A made-up name of this run's own, so that a Kaal the tests have used before does as well.
+        let invitee = "Sam " + String((0..<5).map { _ in "abcdefghijklmnopqrstuvwxyz".randomElement()! }).capitalized
+        name.tap()
+        name.typeText(invitee)
+        let invite = app.buttons["Invite and make a link"]
+        reach(invite, "the invite button")
+        shot("17a-invite")
+        invite.tap()
+
+        // The link is shown once, below the button that made it, with what to tell the person.
+        appears(labelled(app.staticTexts, containing: "Send \(invitee) this link"), "what to do with the link", timeout: 30)
+        appears(labelled(app.staticTexts, containing: "/#/setup/"), "the link itself")
+        appears(labelled(app.staticTexts, containing: "Their sign-in name is"), "their sign-in name")
+        shot("17b-invited")
+
+        // They share the vault at once. Taken out, they are someone with an account to pick.
+        let remove = app.buttons["Remove \(invitee)"]
+        reach(remove, "the person invited, among those who share the vault", up: true)
+        remove.tap()
+        confirm("Remove")
+        let pick = labelled(app.buttons, containing: "Choose a person")
+        happens("the person leaving the vault") { !remove.exists }
+        reach(pick, "the list of people to let in")
+        shot("17c-let-someone-in")
+        // Sharing with nobody chosen says so at the top of the page, which is brought back into view.
+        let share = app.buttons["share-vault"]
+        share.tap()
+        let nobody = app.staticTexts["Choose who to let in."].firstMatch
+        appears(nobody, "being told to choose someone")
+        happens("the message coming into view") { app.windows.firstMatch.frame.contains(nobody.frame) }
+        reach(pick, "the list of people to let in, again")
+        pick.tap()
+        let choice = labelled(app.buttons, containing: invitee)
+        appears(choice, "the person to pick")
+        choice.tap()
+        reach(share, "the Share button")
+        share.tap()
+        reach(remove, "the person let back in", up: true)
+        // On a Kaal with nobody else, there is now nobody left to pick, and the page says so.
+        let everyone = app.staticTexts["Everyone with an account on this Kaal already shares this vault."]
+        for _ in 0..<3 where !everyone.exists && !pick.exists { app.swipeUp() }
+        XCTAssertTrue(everyone.exists || pick.exists, "Neither a list of people nor word that everyone shares the vault")
+        shot("17d-everyone-shares")
+
+        // Leave the vault as it was found: the tests after this look at what is only this person's.
+        reach(remove, "the person let back in", up: true)
+        remove.tap()
+        confirm("Remove")
+        happens("the person leaving the vault again") { !remove.exists }
     }
 
     func test05TotalsAndSettings() throws {

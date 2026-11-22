@@ -10,11 +10,21 @@ struct QuickAddView: View {
     @State private var forReceipt = false
     @State private var pages: PickedFiles?
     @State private var checking: SentReceipt?
+    /// What is left to do on a new Kaal, for its administrator.
+    @State private var setup: JSON = .null
+
+    /// What the list of steps depends on: who is signed in, to which vault, and what has been sent since.
+    private struct SetupAsked: Equatable {
+        var admin: Bool
+        var vault: String
+        var sent: Int
+    }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    if SetupSteps.isShown(setup) { SetupListCard(list: $setup) }
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
                         tile("Write a note", "square.and.pencil") { writing = .typing }
                         tile("Speak a note", "mic.fill") { writing = .speaking }
@@ -43,6 +53,7 @@ struct QuickAddView: View {
                 .padding()
             }
             .navigationTitle("Add")
+            .task(id: SetupAsked(admin: model.isAdmin, vault: model.vault.id.text, sent: model.outbox.sentCount)) { await loadSetup() }
             .captures($source) { files in
                 if !forReceipt {
                     pages = PickedFiles(files: files)
@@ -59,6 +70,16 @@ struct QuickAddView: View {
                 }
             }
         }
+    }
+
+    /// Asked again whenever this screen comes back, since most steps are taken somewhere else.
+    /// The list is a help, not a duty: a Kaal that has none, or cannot be reached, shows none.
+    private func loadSetup() async {
+        guard model.isAdmin, let api = model.api else {
+            setup = .null
+            return
+        }
+        if let told = try? await api.setupList() { setup = told }
     }
 
     private func choose(_ wanted: CaptureSource, receipt: Bool) {

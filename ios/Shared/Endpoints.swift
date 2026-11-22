@@ -52,15 +52,35 @@ extension KaalAPI {
 
     func createVault(name: String) async throws -> JSON { try await result("POST", "/v1/account/vaults", json: ["name": name]).vault }
     func renameVault(name: String) async throws -> JSON { try await result("POST", "/v1/vault/name", json: ["name": name]).vault }
+    /// Who shares the open vault (`members`) and, from a Kaal that says, who else could: `others`
+    /// (people with an account who are not in it, named only while accounts are by invitation,
+    /// which is `listed`) and `can_invite`. This one also has the `vault` itself.
     func members() async throws -> JSON { try await result("GET", "/v1/vault/members") }
-    func setMember(login: String, role: String) async throws -> [JSON] {
-        try await result("POST", "/v1/vault/members", json: ["login": login, "role": role]).members.list
+    /// Each of these answers who shares the vault now, and who else could, as `members()` does.
+    func setMember(login: String, role: String) async throws -> JSON {
+        try await result("POST", "/v1/vault/members", json: ["login": login, "role": role])
     }
-    func removeMember(account: String) async throws -> [JSON] {
-        try await result("DELETE", "/v1/vault/members/\(pathPart(account))").members.list
+    func removeMember(account: String) async throws -> JSON {
+        try await result("DELETE", "/v1/vault/members/\(pathPart(account))")
+    }
+    /// Someone with no account yet: Kaal makes one, with a sign-in name made from `name`, and puts
+    /// them in the open vault. Answers as `members()` does, with the `account` and the `setup_path`
+    /// of the link to send them. Only an owner who is an administrator may.
+    func invite(name: String, role: String) async throws -> JSON {
+        try await result("POST", "/v1/vault/invitations", json: ["name": name, "role": role])
     }
 
     // MARK: For administrators
+
+    /// What is left to do on a new Kaal: `show`, `items` (each an `id`, `done` and perhaps `optional`) and its `address`.
+    func setupList() async throws -> JSON { try await result("GET", "/v1/admin/setup") }
+    /// Say that a copy of the key is kept somewhere else, or put the list away. Answers the list as it is now.
+    func changeSetupList(keySaved: Bool? = nil, hidden: Bool? = nil) async throws -> JSON {
+        var change: [String: Any] = [:]
+        if let keySaved { change["key_saved"] = keySaved }
+        if let hidden { change["hidden"] = hidden }
+        return try await result("POST", "/v1/admin/setup", json: change)
+    }
 
     func everyone() async throws -> JSON { try await result("GET", "/v1/admin/people") }
     func addPerson(login: String, name: String) async throws -> JSON {

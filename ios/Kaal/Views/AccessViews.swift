@@ -9,111 +9,132 @@ private let roles: [(value: String, label: String)] = [
 
 struct VaultsView: View {
     @Environment(AppModel.self) private var model
-    @State private var shared: JSON = .null
-    @State private var members: [JSON] = []
+    @State private var sharing = VaultSharing()
     @State private var status = Status()
     @State private var newVault = ""
     @State private var rename = ""
+    /// Who to let in: the sign-in name picked from the list, or typed where nobody is listed.
     @State private var login = ""
     @State private var role = "viewer"
+    @State private var inviteName = ""
+    @State private var inviteRole = "editor"
+    /// The link for someone just invited. Kaal shows it once, so it stays until this screen is left.
+    @State private var invited: Invited?
+    @FocusState private var typingName: Bool
+
+    private struct Invited: Equatable {
+        let name: String
+        let login: String
+        let vault: String
+        let link: String
+    }
 
     private var isOwner: Bool { model.vault.role.text == "owner" }
 
     var body: some View {
-        Form {
-            Section { StatusLine(status: status) }
-            Section {
-                ForEach(model.vaults, id: \.id.text) { vault in
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text(vault.name.text)
-                            Text("You are \(vault.role.text == "owner" ? "an owner" : vault.role.text == "editor" ? "an editor" : "a viewer")").font(.footnote).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        if vault.id.text == model.vault.id.text {
-                            Text("Open now").font(.footnote).foregroundStyle(.secondary)
-                        } else {
-                            AsyncButton("Open") { await change { _ = try await $0.chooseVault(vault.id.text) } }.buttonStyle(.bordered).font(.footnote)
-                        }
-                    }
-                }
-                HStack {
-                    TextField("For example: Household", text: $newVault)
-                    AsyncButton("Create") {
-                        let name = newVault.trimmingCharacters(in: .whitespaces)
-                        guard !name.isEmpty else {
-                            status.say("Give the vault a name.", .error)
-                            return
-                        }
-                        await change {
-                            let made = try await $0.createVault(name: name)
-                            _ = try await $0.chooseVault(made.id.text)
-                            newVault = ""
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                }
-            } header: {
-                Text("Your vaults")
-            } footer: {
-                Text("A vault is a separate set of notes and receipts. Open one to work in it; share one to let others in.")
-            }
-
-            if !model.vault.isNull {
-                if isOwner, !shared.isNull {
-                    Section("Name of this vault") {
+        ScrollViewReader { page in
+            Form {
+                Section { StatusLine(status: status).id("status") }
+                Section {
+                    ForEach(model.vaults, id: \.id.text) { vault in
                         HStack {
-                            TextField("Name", text: $rename)
-                            AsyncButton("Rename") {
-                                let name = rename.trimmingCharacters(in: .whitespaces)
-                                guard !name.isEmpty else {
-                                    status.say("A vault needs a name.", .error)
-                                    return
-                                }
-                                await change { _ = try await $0.renameVault(name: name) }
+                            VStack(alignment: .leading) {
+                                Text(vault.name.text)
+                                Text("You are \(vault.role.text == "owner" ? "an owner" : vault.role.text == "editor" ? "an editor" : "a viewer")").font(.footnote).foregroundStyle(.secondary)
                             }
-                            .buttonStyle(.bordered)
-                        }
-                    }
-                    Section("Who shares “\(model.vault.name.text)”") {
-                        ForEach(members, id: \.account.text) { member in
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(member.name.text)
-                                    if member.name.text != member.login.text { Text(member.login.text).font(.footnote).foregroundStyle(.secondary) }
-                                }
-                                Spacer()
-                                Menu(member.role.text.capitalized) {
-                                    ForEach(roles, id: \.value) { choice in
-                                        Button(choice.label) { Task { await run { members = try await $0.setMember(login: member.login.text, role: choice.value) } } }
-                                    }
-                                }
-                                ConfirmButton(title: "Remove", question: "Take \(member.name.text) out of this vault?") {
-                                    await run { members = try await $0.removeMember(account: member.account.text) }
-                                }
-                                .buttonStyle(.bordered).font(.footnote)
+                            Spacer()
+                            if vault.id.text == model.vault.id.text {
+                                Text("Open now").font(.footnote).foregroundStyle(.secondary)
+                            } else {
+                                AsyncButton("Open") { await change { _ = try await $0.chooseVault(vault.id.text) } }.buttonStyle(.bordered).font(.footnote)
                             }
                         }
                     }
-                    Section("Let someone in") {
-                        TextField("Their sign-in name", text: $login).typedExactly()
-                        Picker("Role", selection: $role) { ForEach(roles, id: \.value) { Text($0.label).tag($0.value) } }
-                        AsyncButton("Share") {
-                            let name = login.trimmingCharacters(in: .whitespaces)
+                    HStack {
+                        TextField("For example: Household", text: $newVault)
+                        AsyncButton("Create") {
+                            let name = newVault.trimmingCharacters(in: .whitespaces)
                             guard !name.isEmpty else {
-                                status.say("Enter the sign-in name of someone who has an account here.", .error)
+                                status.say("Give the vault a name.", .error)
                                 return
                             }
-                            await run {
-                                members = try await $0.setMember(login: name, role: role)
-                                login = ""
+                            await change {
+                                let made = try await $0.createVault(name: name)
+                                _ = try await $0.chooseVault(made.id.text)
+                                newVault = ""
                             }
                         }
+                        .buttonStyle(.bordered)
                     }
-                } else if !isOwner {
-                    Section("Who shares “\(model.vault.name.text)”") {
-                        Text("Only an owner of this vault can see or change who shares it.").foregroundStyle(.secondary)
+                } header: {
+                    Text("Your vaults")
+                } footer: {
+                    Text("A vault is a separate set of notes and receipts. Open one to work in it; share one to let others in.")
+                }
+
+                if !model.vault.isNull {
+                    if isOwner, sharing.isKnown {
+                        Section("Name of this vault") {
+                            HStack {
+                                TextField("Name", text: $rename)
+                                AsyncButton("Rename") {
+                                    let name = rename.trimmingCharacters(in: .whitespaces)
+                                    guard !name.isEmpty else {
+                                        status.say("A vault needs a name.", .error)
+                                        return
+                                    }
+                                    await change { _ = try await $0.renameVault(name: name) }
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                        Section("Who shares “\(model.vault.name.text)”") {
+                            ForEach(sharing.members, id: \.account.text) { member in
+                                HStack {
+                                    VStack(alignment: .leading) {
+                                        Text(member.name.text)
+                                        if member.name.text != member.login.text { Text(member.login.text).font(.footnote).foregroundStyle(.secondary) }
+                                    }
+                                    Spacer()
+                                    Menu(member.role.text.capitalized) {
+                                        ForEach(roles, id: \.value) { choice in
+                                            Button(choice.label) { Task { await run(page) { sharing.take(try await $0.setMember(login: member.login.text, role: choice.value)) } } }
+                                        }
+                                    }
+                                    ConfirmButton(title: "Remove", question: "Take \(member.name.text) out of this vault?") {
+                                        await run(page) { sharing.take(try await $0.removeMember(account: member.account.text)) }
+                                    }
+                                    .buttonStyle(.bordered).font(.footnote)
+                                    // Read aloud with the person's name, as each row has a button of its own.
+                                    .accessibilityLabel("Remove \(member.name.text)")
+                                }
+                            }
+                        }
+                        letSomeoneIn(page)
+                        inviteSomeoneNew(page)
+                    } else if !isOwner {
+                        Section("Who shares “\(model.vault.name.text)”") {
+                            Text("Only an owner of this vault can see or change who shares it.").foregroundStyle(.secondary)
+                        }
                     }
+                }
+                if let invited {
+                    Section {
+                        Notice(text: "Send \(invited.name) this link. It works once, for 24 hours, and is not shown again. They choose a password, or continue with a sign-in service if this Kaal offers one, and “\(invited.vault)” opens for them.", tone: .warn)
+                        CopyBox(label: "Their link", text: invited.link).id("invited")
+                    } header: {
+                        Text("A link for \(invited.name)")
+                    } footer: {
+                        Text("Their sign-in name is “\(invited.login)”; they can change it when they open the link. If the link runs out, make a new one under Settings, People.")
+                    }
+                }
+            }
+            // The link appears below the button that made it, once the keyboard has gone: bring it into view.
+            .onChange(of: invited) { _, made in
+                guard made != nil else { return }
+                Task {
+                    try? await Task.sleep(for: .milliseconds(350))
+                    withAnimation { page.scrollTo("invited", anchor: .center) }
                 }
             }
         }
@@ -122,20 +143,117 @@ struct VaultsView: View {
         .task(id: model.vault.id.text) { await load() }
     }
 
-    private func load() async {
-        guard let api = model.api else { return }
-        shared = .null
-        guard isOwner else { return }
-        await status.run(model) {
-            shared = try await api.members()
-            members = shared.members.list
-            rename = shared.vault.name.text
+    /// Letting in someone who already has an account here. While accounts are by invitation they are
+    /// picked from a list; with sign-up open nobody is listed, and their sign-in name is typed.
+    @ViewBuilder private func letSomeoneIn(_ page: ScrollViewProxy) -> some View {
+        switch sharing.letIn {
+        case .nobodyElse:
+            EmptyView()
+        case .everyoneShares:
+            Section("Let someone in") {
+                Text("Everyone with an account on this Kaal already shares this vault.").foregroundStyle(.secondary)
+            }
+        case .pick, .type:
+            let picking = sharing.letIn == .pick
+            Section("Let someone in") {
+                if picking {
+                    Picker("Person", selection: $login) {
+                        Text("Choose a person…").tag("")
+                        ForEach(sharing.others, id: \.login.text) { Text(VaultSharing.label($0)).tag($0.login.text) }
+                    }
+                } else {
+                    TextField("Their sign-in name", text: $login).typedExactly()
+                }
+                rolePicker($role)
+                AsyncButton("Share") {
+                    let name = login.trimmingCharacters(in: .whitespaces)
+                    guard !name.isEmpty else {
+                        say(picking ? "Choose who to let in." : "Enter the sign-in name of someone who has an account here.", page)
+                        return
+                    }
+                    await run(page) {
+                        let now = try await $0.setMember(login: name, role: role)
+                        // Before the list changes: the person let in is no longer one to pick.
+                        login = ""
+                        sharing.take(now)
+                    }
+                }
+                // Named for the tests: a link that was just made has a Share button too.
+                .accessibilityIdentifier("share-vault")
+            }
         }
     }
 
-    private func run(_ work: @escaping (KaalAPI) async throws -> Void) async {
+    /// Each role says what it allows, which leaves no room on the line for the word "Role"; it is still read aloud.
+    private func rolePicker(_ chosen: Binding<String>) -> some View {
+        Picker("Role", selection: chosen) { ForEach(roles, id: \.value) { Text($0.label).tag($0.value) } }
+            .labelsHidden()
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Someone with no account here yet: one link gives them an account and a place in this vault.
+    @ViewBuilder private func inviteSomeoneNew(_ page: ScrollViewProxy) -> some View {
+        switch sharing.inviting {
+        case .unknown:
+            EmptyView()
+        case .askWhoeverRunsIt:
+            Section {
+                Text("Someone who has no account on this Kaal yet? Ask whoever runs it to add them, then let them in here.").font(.footnote).foregroundStyle(.secondary)
+            }
+        case .offered:
+            Section {
+                TextField("Their name", text: $inviteName).textContentType(.name).autocorrectionDisabled().focused($typingName)
+                    .onChange(of: inviteName) { _, typed in if typed.count > 100 { inviteName = String(typed.prefix(100)) } }
+                rolePicker($inviteRole)
+                AsyncButton("Invite and make a link") {
+                    let name = inviteName.trimmingCharacters(in: .whitespaces)
+                    guard !name.isEmpty else {
+                        say("Enter their name.", page)
+                        return
+                    }
+                    let vault = model.vault.name.text
+                    let server = model.serverAddress
+                    await run(page) {
+                        let made = try await $0.invite(name: name, role: inviteRole)
+                        sharing.take(made)
+                        inviteName = ""
+                        typingName = false
+                        invited = Invited(name: made.account.name.text, login: made.account.login.text, vault: vault,
+                                          link: VaultSharing.link(server: server, path: made.setup_path.text))
+                    }
+                }
+            } header: {
+                Text("Invite someone new")
+            } footer: {
+                Text("For someone who has no account on this Kaal yet. You get a link to send them.")
+            }
+        }
+    }
+
+    private func load() async {
         guard let api = model.api else { return }
-        await status.run(model) { try await work(api) }
+        sharing = VaultSharing()
+        login = ""
+        guard isOwner else { return }
+        await status.run(model) {
+            sharing.take(try await api.members())
+            rename = sharing.vault.name.text
+        }
+    }
+
+    /// What went wrong is said at the top of the page, which the forms further down are out of sight of.
+    private func say(_ problem: String, _ page: ScrollViewProxy) {
+        status.say(problem, .error)
+        showStatus(page)
+    }
+
+    private func showStatus(_ page: ScrollViewProxy) {
+        Task { withAnimation { page.scrollTo("status", anchor: .top) } }
+    }
+
+    private func run(_ page: ScrollViewProxy, _ work: @escaping (KaalAPI) async throws -> Void) async {
+        guard let api = model.api else { return }
+        if await !status.run(model, { try await work(api) }) { showStatus(page) }
     }
 
     /// Something that changes which vault is open or what it is called: ask the server who we are again.
