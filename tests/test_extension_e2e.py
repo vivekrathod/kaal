@@ -404,3 +404,15 @@ def test_a_pdf_the_site_will_not_hand_out_twice_is_never_replaced_by_a_web_page(
     assert "Download it with the arrow" in out["state"]["hint"] and out["state"]["site"] is None
     assert out["notesAfter"] == out["notesBefore"], "nothing is saved in place of the PDF"
 
+
+def test_a_one_time_pdf_is_kept_as_the_tab_loads_it_again_when_the_person_asks(stage):
+    out = drive(stage, "shown.mjs", E2E_PAGE="portal.php", E2E_SUBMIT="1", E2E_AGAIN="1")
+    assert out["state"]["stage"] == "error" and out["state"]["again"] is True and out["notesAfter"] == out["notesBefore"]
+    assert "as if you pressed Reload" in out["warning"] and "payment" in out["warning"], "the person is told the site is asked again"
+    # Loading the tab again sends the form again; the statement it is answered with is kept, byte for byte.
+    assert stage.asked.count("POST /portal.php") == 2
+    assert out["second"] == {"stage": "saved", "message": None}, out
+    assert out["file"] == {"name": out["file"]["name"], "size": stage.pdf_bytes, "startsAsPdf": True} and out["file"]["name"].endswith(".pdf")
+    assert out["notesAtTheEnd"] == out["notesBefore"] + 1
+    assert out["tabShowsAfter"] == "application/pdf", "the tab is given the same statement, unaltered"
+

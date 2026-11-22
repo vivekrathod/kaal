@@ -1,7 +1,7 @@
 // The popup: one button for the likely thing to do with this page, the other
 // choice as a link beneath it, and what happened to the last save.
 
-import { MODES, chooseMode, isProtectedPage, stateKey, accessAsk, THIS_COMPUTER } from "./lib.js";
+import { MODES, chooseMode, isProtectedPage, stateKey, accessAsk, THIS_COMPUTER, LOAD_AGAIN } from "./lib.js";
 import { updateWaiting, finishUpdate } from "./fresh.js";
 
 const primary = document.getElementById("primary");
@@ -46,8 +46,11 @@ function show(state, tab, server) {
         if (granted) chrome.runtime.sendMessage({ action: "save", mode: state.mode, tabId: tab.id, url: state.url, title: state.title, linkUrl: state.linkUrl }).catch(() => {});
       });
     }
+    // A PDF its site will not send twice: offer to load the tab again and keep it as it arrives.
+    const loadAgain = state.again ? element("button", "button small", LOAD_AGAIN.label) : null;
+    if (loadAgain) loadAgain.addEventListener("click", () => chrome.runtime.sendMessage({ action: "save", mode: state.mode, tabId: tab.id, url: state.url, title: state.title, again: true }).catch(() => {}));
     return say(element("p", "notice error", state.message), state.hint ? element("p", "hint", state.hint) : null,
-      allow ? element("p", "hint", ask.hint) : null, fix, allow);
+      allow ? element("p", "hint", ask.hint) : null, fix, allow, loadAgain, loadAgain ? element("p", "hint", LOAD_AGAIN.hint) : null);
   }
   if (state.stage === "review") {
     const review = element("button", "button small", "Check it now");

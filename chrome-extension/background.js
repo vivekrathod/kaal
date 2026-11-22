@@ -236,6 +236,56 @@ async function fileFrom(command, address, title) {
   }
 }
 
+// What the debugger reports about a tab, handed to the save that is waiting for it there.
+const watching = new Map();
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  const watch = watching.get(source.tabId);
+  if (watch) watch(method, params);
+});
+
+// A PDF its site makes for one viewing cannot be asked for again, but it can be kept as it
+// arrives. Only when the person asks for exactly this, by its own button: the tab is loaded again
+// (so the site is asked again, as when Reload is pressed), and the document the site answers
+// with is copied on its way to the tab, which is given it unaltered.
+const LOAD_AGAIN_SECONDS = 45;
+async function loadAgainAndKeep(command, page) {
+  let settle;
+  const arrived = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+  arrived.catch(() => {});   // looked at below; a late failure after that is nobody's concern
+  const timer = setTimeout(() => settle.reject(new Problem("The page took too long to load again.", "Try once more, or download the PDF and save the downloaded file.")), LOAD_AGAIN_SECONDS * 1000);
+  try {
+    const { frameTree } = await command("Page.getFrameTree");
+    watching.set(page.id, async (method, paused) => {
+      if (method !== "Fetch.requestPaused") return;
+      const letThrough = () => command("Fetch.continueRequest", { requestId: paused.requestId }).catch(() => {});
+      const status = paused.responseStatusCode || 0;
+      // A frame inside the page, or a step on the way to the document, passes untouched.
+      if (paused.frameId !== frameTree.frame.id || (status >= 300 && status < 400)) return letThrough();
+      try {
+        const answer = await command("Fetch.getResponseBody", { requestId: paused.requestId });
+        settle.resolve(answer.base64Encoded ? Uint8Array.from(atob(answer.body), (character) => character.charCodeAt(0)) : new TextEncoder().encode(answer.body));
+      } catch {
+        settle.reject(new Problem("Chrome couldn't keep the PDF as it loaded.", "Download it with the arrow at the top right of the PDF and save the downloaded file."));
+      } finally {
+        await letThrough();
+      }
+    });
+    await command("Fetch.enable", { patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Response" }] });
+    await command("Page.reload");
+    const file = new File([await arrived], fileNameFor(page.title, page.url, "application/pdf"), { type: "application/pdf" });
+    if (!(await isPdf(file))) {
+      throw new Problem("The site didn't send the PDF this time.", "Open it again on the site, download it with the arrow at the top right of the PDF, and save the downloaded file.");
+    }
+    return file;
+  } catch (error) {
+    throw error instanceof Problem ? error : new Problem("Chrome couldn't load the page again.", "Download the PDF and save the downloaded file.");
+  } finally {
+    clearTimeout(timer);
+    watching.delete(page.id);
+    await command("Fetch.disable").catch(() => {});
+  }
+}
+
 // Whether what was read is a PDF, whatever it is called: a PDF says so in its first bytes.
 async function isPdf(file) {
   return new TextDecoder("latin1").decode(await file.slice(0, 1024).arrayBuffer()).includes("%PDF-");
@@ -261,12 +311,15 @@ async function pdfInside(command) {
 // What the tab shows, as a file. Reading a file means asking its site for it a second time, and
 // some sites answer that with something else: a statement made for one viewing, after a form was
 // sent, comes back as the site's own web page. What comes back is checked, never taken on trust.
-async function tabAsFile(command, page) {
+async function tabAsFile(command, page, again) {
+  if (again) return loadAgainAndKeep(command, page);
   if (await showsPdf(command)) {
     const file = await fileFrom(command, page.url, page.title);
     if (await isPdf(file)) return file;
-    throw new Problem("This PDF can't be fetched a second time.",
-      "The site made it for one viewing, and answers Kaal's request with a web page. Download it with the arrow at the top right of the PDF, open the downloaded file in Chrome and save that. Or add it in Kaal's web app.");
+    const problem = new Problem("This PDF can't be fetched a second time.",
+      "The site made it for one viewing, and answers Kaal's request with a web page. Download it with the arrow at the top right of the PDF, open the downloaded file in Chrome and save that. Or:");
+    problem.again = true;   // the popup and the panel offer to load the tab again and keep the PDF as it arrives
+    throw problem;
   }
   // An address that ends in .pdf but shows a web page. A site that refuses the file is still
   // said to have refused it, with the offer to ask for access to that site; a web page that
@@ -284,11 +337,11 @@ async function tabAsFile(command, page) {
   return printPage(command, page);
 }
 
-function pageAsFile(page) {
+function pageAsFile(page, again = false) {
   if (isProtectedPage(page.url)) throw new Problem("Chrome doesn't let extensions save this kind of page.", "Open the page you want to keep and try again.");
   // A file on this computer is kept as it is, and read without the debugger, which cannot read one.
   if (page.url.startsWith("file:")) return fileFromComputer(page.url, page.title);
-  return withDebugger(page, (command) => tabAsFile(command, page));
+  return withDebugger(page, (command) => tabAsFile(command, page, again));
 }
 
 const linkAsFile = (page, address) => withDebugger(page, (command) => fileFrom(command, address, page.title));
@@ -296,7 +349,7 @@ const linkAsFile = (page, address) => withDebugger(page, (command) => fileFrom(c
 // --- saving
 
 // `page` is { id, url, title }: the tab a save was asked for on.
-async function save(page, mode, { linkUrl = "", selectionText = "" } = {}) {
+async function save(page, mode, { linkUrl = "", selectionText = "", again = false } = {}) {
   if (!page || !Number.isInteger(page.id)) return;
   const about = { mode, url: page.url || "", title: page.title || "", linkUrl };   // kept so "Try again" can repeat it
   await setState(page.id, { stage: "saving", ...about });
@@ -308,7 +361,7 @@ async function save(page, mode, { linkUrl = "", selectionText = "" } = {}) {
     if (selectionText.trim() && mode === "general") {
       saved = await call("POST", "/v1/captures/text", { json: { text: selectionText.slice(0, 100000), title: page.title || "", ...source } });
     } else {
-      const file = linkUrl ? await linkAsFile(page, linkUrl) : await pageAsFile(page);
+      const file = linkUrl ? await linkAsFile(page, linkUrl) : await pageAsFile(page, again);
       const form = new FormData();
       form.append("file", file, file.name);
       for (const [name, value] of Object.entries(source)) form.append(name, value);
@@ -323,7 +376,7 @@ async function save(page, mode, { linkUrl = "", selectionText = "" } = {}) {
     refreshCount();
   } catch (error) {
     const known = error instanceof Problem;
-    await setState(page.id, { stage: "error", ...about, message: known ? error.message : "Something went wrong while saving.", hint: known ? error.hint : "", settings: known && error.settings, site: (known && error.site) || "" });
+    await setState(page.id, { stage: "error", ...about, message: known ? error.message : "Something went wrong while saving.", hint: known ? error.hint : "", settings: known && error.settings, site: (known && error.site) || "", again: Boolean(known && error.again) });
     badge(page.id, "!", false);
   }
 }
@@ -389,7 +442,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (!message || typeof message !== "object" || sender.id !== chrome.runtime.id) return undefined;
   if (message.action === "save" && MODES[message.mode] && Number.isInteger(message.tabId)) {
     const page = { id: message.tabId, url: typeof message.url === "string" ? message.url : "", title: typeof message.title === "string" ? message.title : "" };
-    save(page, message.mode, { linkUrl: typeof message.linkUrl === "string" ? message.linkUrl : "" }).then(() => respond({ ok: true }), () => respond({ ok: false }));
+    save(page, message.mode, { linkUrl: typeof message.linkUrl === "string" ? message.linkUrl : "", again: message.again === true }).then(() => respond({ ok: true }), () => respond({ ok: false }));
     return true;
   }
   if (message.action === "count") {

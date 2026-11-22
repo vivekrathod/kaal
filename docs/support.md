@@ -130,8 +130,11 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.25.0 or newer.
 - **"This PDF can't be fetched a second time"**: to keep a file, Kaal asks
   its site for it again, and this site answered with a web page instead. That
   happens when a PDF is made for one viewing, such as a statement shown after
-  you press a button. Download it with the arrow at the top right of the PDF,
-  open the downloaded file in Chrome and save that, or add it in the web app.
+  you press a button. Press **Load it again and save**: Kaal loads the tab
+  again and keeps the PDF as it arrives. The site is asked again, exactly as
+  if you pressed Reload, so do not use it on a page that followed a payment
+  or an order. Or download the PDF with the arrow at its top right, open the
+  downloaded file in Chrome and save that.
 - **A file on this computer** (a PDF opened from a folder, at a `file://`
   address) is saved as the file it is. A copy of the extension from the Chrome
   Web Store may not read files until you allow it: right-click the Kaal icon,

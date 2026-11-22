@@ -229,7 +229,11 @@ extension removes everything it kept.
   from, only while saving, and Chrome shows a bar while it does. Through it,
   the extension asks the page what kind of document it is (one fixed
   expression, `document.contentType`, evaluated in that page), has Chrome
-  print the page, or loads the file and reads it. Chrome describes this
+  print the page, or loads the file and reads it. For a PDF that its site
+  will not send a second time, and only if you press "Load it again and
+  save", it has Chrome load the tab again and copies the PDF as it arrives;
+  the site is asked again, as when you press Reload, and the tab is given
+  what the site sent, unaltered. Chrome describes this
   permission in broad terms ("Read and change all your data on all
   websites") because a debugger could do more; this extension does nothing
   else with it.

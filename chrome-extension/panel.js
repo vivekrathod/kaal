@@ -4,7 +4,7 @@
 import { connect } from "/web/api.js";
 import { h, replace, notice } from "/web/ui.js";
 import { reviewView } from "/web/views/review.js";
-import { MODES, stateKey, accessAsk } from "/lib.js";
+import { MODES, stateKey, accessAsk, LOAD_AGAIN } from "/lib.js";
 
 const tabId = Number(new URLSearchParams(location.search).get("tab"));
 const key = stateKey(tabId);
@@ -62,8 +62,13 @@ async function render() {
     const allow = ask ? h("button", { type: "button", class: "button", onClick: async () => {
       if (await chrome.permissions.request({ origins: [`${state.site}/*`] }).catch(() => false)) again();
     } }, ask.label) : null;
+    // A PDF its site will not send twice: offer to load the tab again and keep it as it arrives.
+    const loadAgain = state.again ? h("button", { type: "button", class: "button", onClick: () => {
+      chrome.runtime.sendMessage({ action: "save", mode: state.mode, tabId, url: state.url, title: state.title, again: true }).catch(() => {});
+    } }, LOAD_AGAIN.label) : null;
     replace(root, notice(state.message, "error"), state.hint ? h("p", { class: "hint" }, state.hint) : null,
       allow ? h("p", { class: "hint" }, ask.hint) : null,
+      loadAgain, loadAgain ? h("p", { class: "hint" }, LOAD_AGAIN.hint) : null,
       h("div", { class: "actions" },
         state.settings
           ? h("button", { type: "button", class: "button primary", onClick: () => chrome.runtime.openOptionsPage() }, "Open settings")

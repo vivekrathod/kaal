@@ -75,6 +75,12 @@ export function accessAsk(site) {
   return { label: `Let Kaal fetch from ${new URL(site).host}`, hint: "Kaal has no access to websites. You can give it access to this one site, then save again." };
 }
 
+// Offered when a tab's PDF cannot be asked for a second time: keep it as the tab loads it again.
+export const LOAD_AGAIN = {
+  label: "Load it again and save",
+  hint: "Kaal loads this tab again and keeps the PDF as it arrives. The site is asked again, exactly as if you pressed Reload: don't use this on a page that followed a payment or an order.",
+};
+
 // Access that covers every site, in whatever way Chrome writes it down.
 export function isBlanketAccess(pattern) {
   if (pattern === "<all_urls>") return true;

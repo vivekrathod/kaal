@@ -123,7 +123,10 @@ def test_an_update_waiting_in_the_folder_is_offered_and_never_applied_by_itself(
         assert "Finish updating" in page and "finishUpdate" in page and "runtime.reload" not in page, name
         assert not re.search(r"^\s*finishUpdate\(\)", page, flags=re.M), name
     for name in ("background.js", "panel.js"):
-        assert "reload" not in (EXT / name).read_text(), name
+        text = (EXT / name).read_text()
+        assert "runtime.reload" not in text and "finishUpdate" not in text, name
+    # The one thing loaded again is a tab, by the debugger, when the person presses the button for it.
+    assert (EXT / "background.js").read_text().count("reload") == 1 and 'await command("Page.reload");' in (EXT / "background.js").read_text()
 
 
 def test_right_click_has_two_entries_and_the_panel_opens_with_the_click():
@@ -243,12 +246,21 @@ def test_what_was_read_for_a_tab_is_checked_before_it_is_kept():
     whole = worker[worker.index("async function tabAsFile("):worker.index("function pageAsFile(")]
     shown = whole[:whole.index("// An address that ends in .pdf")]
     # A tab that shows a PDF is kept only if what its site answers with is a PDF; otherwise nothing is.
-    assert shown.index("await showsPdf(command)") < shown.index("fileFrom(command, page.url, page.title)") < shown.index("if (await isPdf(file)) return file;") < shown.index("throw new Problem(")
+    assert shown.index("await showsPdf(command)") < shown.index("fileFrom(command, page.url, page.title)") < shown.index("if (await isPdf(file)) return file;") < shown.index("throw problem;")
+    # Loading the tab again happens only when asked for by name, and what arrives is checked like anything else.
+    assert whole.index("if (again) return loadAgainAndKeep(command, page);") < whole.index("await showsPdf(command)")
+    assert "again: message.again === true" in worker and "problem.again = true;" in shown
+    keep = worker[worker.index("async function loadAgainAndKeep("):worker.index("// Whether what was read is a PDF")]
+    assert keep.index('"Fetch.enable"') < keep.index('"Page.reload"') < keep.index("if (!(await isPdf(file)))") < keep.index('"Fetch.disable"')
+    assert 'resourceType: "Document", requestStage: "Response"' in keep and keep.count('"Fetch.continueRequest"') == 1
+    for name in ("popup.js", "panel.js"):
+        page = (EXT / name).read_text()
+        assert "state.again ?" in page and "again: true" in page and "LOAD_AGAIN.hint" in page, name
     # A PDF inside a web page is tried before the page is printed, and a wrong answer falls back to the print.
     rest = whole[len(shown):]
     assert "return await isPdf(file) ? file : printPage(command, page);" in rest, "an address ending in .pdf that answers with a web page"
     inside = rest[rest.index("await pdfInside(command)"):]
     assert inside.index("if (file && await isPdf(file)) return file;") < inside.index("return printPage(command, page);")
     assert 'child.frame.mimeType === "application/pdf"' in worker and "inside.length === 1 ? inside[0]" in worker
-    assert "return withDebugger(page, (command) => tabAsFile(command, page));" in worker
+    assert "return withDebugger(page, (command) => tabAsFile(command, page, again));" in worker
 
