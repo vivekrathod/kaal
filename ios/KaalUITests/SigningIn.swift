@@ -1,5 +1,38 @@
 import XCTest
 
+extension XCTestCase {
+    /// Safari may offer to keep a password typed into Kaal's sign-in page. The offer lies over the
+    /// page and comes in its own time, sometimes well after the page has moved on, so one look for
+    /// it is not enough: call this for as long as something is being waited for.
+    /// Says no to an offer that is showing, and returns whether there was one.
+    @discardableResult
+    func declinePasswordOffer(in app: XCUIApplication) -> Bool {
+        let no = app.buttons["Not Now"].firstMatch
+        guard no.exists else { return false }
+        no.tap()
+        return true
+    }
+
+    /// Waits until `ready` has held for two seconds with no offer to keep the password over the
+    /// page, saying no to any that comes. The offer often slides in a moment after the page it
+    /// follows has appeared, so the page being there once does not mean it can be pressed.
+    func staysClearOfPasswordOffers(in app: XCUIApplication, timeout: TimeInterval, _ ready: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        var since: Date?
+        while Date() < deadline {
+            if declinePasswordOffer(in: app) || !ready() {
+                since = nil
+            } else if let since {
+                if Date().timeIntervalSince(since) >= 2 { return true }
+            } else {
+                since = Date()
+            }
+            usleep(300_000)
+        }
+        return false
+    }
+}
+
 /// What the tests that sign in for themselves share: signing in as a person does, on Kaal's
 /// own page, and waiting for things with a picture of the screen kept when they never come.
 /// `ScenarioTests` has its own, older copies of some of these; it signs in once, in its first test.
@@ -71,17 +104,24 @@ class SigningInTestCase: XCTestCase {
                 secret.tap()
                 secret.typeText(password)
                 page.buttons["Sign in"].tap()
-                if !allow.waitForExistence(timeout: 8) {
-                    for label in ["Not Now", "Never for This Website"] where app.buttons[label].exists { app.buttons[label].tap() }
-                }
-                if allow.waitForExistence(timeout: 3) || attempt == 3 { break }
+                // Signed in, or told the password was wrong, with any offer to keep it turned down.
+                let deadline = Date().addingTimeInterval(11)
+                while Date() < deadline, declinePasswordOffer(in: app) || !allow.exists { usleep(300_000) }
+                if allow.exists || attempt == 3 { break }
                 // A simulator that has only just started can drop keys: clear the password and type it again.
                 secret.tap()
                 secret.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: password.count + 8))
             }
         }
-        appears(allow, "the Allow button")
+        let clear = staysClearOfPasswordOffers(in: app, timeout: 40) { allow.exists }
+        happens("the Allow button appearing, with no offer to keep the password over it", timeout: 1) { clear }
         allow.tap()
-        appears(app.tabBars.buttons["Receipts"], "the app's tabs")
+        // An offer that comes only now can take the press meant for the button.
+        let tabs = app.tabBars.buttons["Receipts"]
+        happens("the app's tabs appearing", timeout: 40) {
+            if tabs.exists { return true }
+            if declinePasswordOffer(in: app), allow.waitForExistence(timeout: 3) { allow.tap() }
+            return false
+        }
     }
 }

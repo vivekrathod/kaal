@@ -133,18 +133,22 @@ final class ScenarioTests: XCTestCase {
             let secret = page.secureTextFields["Password"]
             secret.tap()
             secret.typeText(password)
+            // The password can lose letters the same way. It shows only as dots, which can still be counted.
+            for _ in 0..<3 {
+                guard let typed = secret.value as? String, typed.count != password.count else { break }
+                secret.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: max(typed.count, password.count) + 8) + password)
+            }
             shot("02-kaal-sign-in-page")
             // Return sends the form, as the keyboard's Go key does. The bar above the
             // keyboard can cover the page's Sign in button, so a tap there can miss.
             secret.typeText("\n")
         }
 
-        // The browser may offer to remember the password first.
-        if !allow.waitForExistence(timeout: 8) {
-            for label in ["Not Now", "Never for This Website"] where app.buttons[label].exists { app.buttons[label].tap() }
-        }
-        appears(allow, "the Allow button", timeout: 20)
-        XCTAssertTrue(labelled(page.staticTexts, containing: "will be signed in as").exists)
+        // The browser may offer to remember the password, in its own time: often just after the
+        // page that asks about the app has appeared, and over it.
+        let said = labelled(page.staticTexts, containing: "will be signed in as")
+        let clear = staysClearOfPasswordOffers(in: app, timeout: 40) { allow.exists && said.exists }
+        happens("the page asking whether to let the app in, with no offer to keep the password over it", timeout: 1) { clear }
         shot("03-allow-the-app")
         allow.tap()
 
@@ -152,8 +156,12 @@ final class ScenarioTests: XCTestCase {
         // before it may let an app in, since what the app is given outlasts the browser's sign-in.
         let tabs = app.tabBars.buttons["Receipts"]
         let again = page.secureTextFields["Your password"]
-        let answered = expectation(for: NSPredicate { _, _ in tabs.exists || again.exists }, evaluatedWith: nil)
-        _ = XCTWaiter().wait(for: [answered], timeout: 30)
+        // An offer to remember the password that comes only now can take the press meant for the button.
+        let answered = Date().addingTimeInterval(30)
+        while Date() < answered, !tabs.exists, !again.exists {
+            if declinePasswordOffer(in: app), !tabs.exists, !again.exists, allow.waitForExistence(timeout: 3) { allow.tap() }
+            usleep(300_000)
+        }
         if !tabs.exists, again.exists {
             again.tap()
             again.typeText(password)
@@ -161,10 +169,8 @@ final class ScenarioTests: XCTestCase {
             putKeyboardAway()
             allow.tap()
             // The browser may offer to remember that password before it lets the page go on.
-            let notNow = app.buttons["Not Now"]
-            let moved = expectation(for: NSPredicate { _, _ in tabs.exists || notNow.exists }, evaluatedWith: nil)
-            _ = XCTWaiter().wait(for: [moved], timeout: 15)
-            if !tabs.exists, notNow.exists { notNow.tap() }
+            let moved = Date().addingTimeInterval(15)
+            while Date() < moved, !tabs.exists { if !declinePasswordOffer(in: app) { usleep(300_000) } }
         }
 
         appears(tabs, "the app's tabs", timeout: 30)
@@ -327,7 +333,7 @@ final class ScenarioTests: XCTestCase {
         // A made-up name of this run's own, so that a Kaal the tests have used before does as well.
         let invitee = "Sam " + String((0..<5).map { _ in "abcdefghijklmnopqrstuvwxyz".randomElement()! }).capitalized
         name.tap()
-        name.typeText(invitee)
+        name.typeText(invitee + "\n")
         let invite = app.buttons["Invite and make a link"]
         reach(invite, "the invite button")
         shot("17a-invite")
@@ -555,7 +561,9 @@ final class ScenarioTests: XCTestCase {
         let name = app.textFields.firstMatch
         appears(name, "the token's name", timeout: 30)
         name.tap()
-        name.typeText(label)
+        // Return puts the keyboard away. On a small phone it covers the middle of the screen,
+        // which is where a swipe starts, and the page would not move.
+        name.typeText(label + "\n")
         let make = app.buttons["Make token"]
         let secret = app.secureTextFields["Your password"]
         for _ in 0..<6 where !(make.exists && make.isHittable) { app.swipeUp() }
@@ -566,9 +574,9 @@ final class ScenarioTests: XCTestCase {
         for _ in 0..<6 where !labelled(app.staticTexts, containing: "Enter your password").exists { app.swipeDown() }
         appears(labelled(app.staticTexts, containing: "Enter your password to make a token."), "being asked for the password")
 
-        for _ in 0..<6 where !(secret.exists && secret.isHittable) { app.swipeUp() }
+        reach(secret, "the password field, again")
         secret.tap()
-        secret.typeText(password)
+        secret.typeText(password + "\n")
         for _ in 0..<6 where !(make.exists && make.isHittable) { app.swipeUp() }
         make.tap()
         let made = labelled(app.staticTexts, containing: "Copy it now")
