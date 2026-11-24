@@ -556,7 +556,8 @@ final class ScenarioTests: XCTestCase {
         wait(for: [settled], timeout: 20)
         shot("29-speak")
         XCTAssertEqual(app.state, .runningForeground)
-        if listening.exists { listening.tap() }
+        // A simulator hears nothing, and may stop listening by itself between a look at the Stop
+        // button and a press on it. Cancel ends the listening too, so that is what is pressed.
         app.buttons["Cancel"].tap()
         appears(speak, "the Add screen again")
     }
