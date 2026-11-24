@@ -17,8 +17,9 @@ const { KAAL, KAAL_TOKEN, KAAL_LOGIN, KAAL_PASSWORD, DEBUG_PORT, EXTENSION_ID, O
 const EXT = `chrome-extension://${EXTENSION_ID}`;
 const step = (what) => console.error("--", what);
 
-// A small site of its own: the made-up portal, the promo tile, and a blank page to lay pictures out on.
+// A small site of its own: a made-up article, the made-up portal, the promo tile, and a blank page to lay pictures out on.
 const pages = {
+  "/article": [path.join(here, "sample-page.html"), "text/html"],
   "/portal": [path.join(here, "sample-portal.html"), "text/html"],
   "/promo": [path.join(here, "promo-tile.html"), "text/html"],
   "/icon.svg": [path.join(root, "kaal", "web", "icon.svg"), "image/svg+xml"],
@@ -77,26 +78,36 @@ await until(() => sw.run("chrome.storage.session.get('waiting').then((s) => s.wa
 await until(() => sw.run("chrome.storage.local.get('receiptSites').then((s) => (s.receiptSites || []).length > 0)"), "the receipt sites");
 await browser.closeTab(target.id);
 
+const newestTab = () => sw.run("chrome.tabs.query({}).then((tabs) => Math.max(...tabs.map((tab) => tab.id)))");
+// Each page is served from this machine; the popup is told the address it would have on its real site.
+const popupOn = async (tab, address, title) => {
+  ({ target, page } = await open(`${EXT}/popup.html?tab=${tab}&url=${encodeURIComponent(address)}&title=${encodeURIComponent(title)}`));
+  await sized(page, 348, 400);
+  await until(() => page.run("!document.getElementById('primary').hidden && !document.getElementById('waiting').hidden"), "the popup's button");
+};
+
+step("an ordinary page, and the popup on it");
+const article = await open(`${SITE}/article`);
+await sized(article.page, 1280, 800);
+const articleWide = await shoot(article.page);
+await article.page.send("Emulation.clearDeviceMetricsOverride");
+await popupOn(await newestTab(), "https://guides.example.org/heating/how-to-bleed-a-radiator", "How to bleed a radiator - Hearthside Guides");
+const popupSays = await page.run("document.getElementById('primary').textContent");
+if (popupSays !== "Save to Kaal") throw new Error(`on an ordinary page the popup's button says “${popupSays}”`);
+const popupHeight = await page.run("Math.ceil(document.body.getBoundingClientRect().height)");
+const popup = await shoot(page, { x: 0, y: 0, width: 348, height: popupHeight });
+await browser.closeTab(target.id);
+
 step("the made-up portal");
 const portal = await open(`${SITE}/portal`);
-await sized(portal.page, 1280, 800);
-const portalWide = await shoot(portal.page);
 await sized(portal.page, 880, 800);
 const portalBeside = await shoot(portal.page);
 await portal.page.send("Emulation.clearDeviceMetricsOverride");
-const tabId = await sw.run("chrome.tabs.query({}).then((tabs) => Math.max(...tabs.map((tab) => tab.id)))");
-
-step("the popup");
-// The portal is served from this machine; the popup is told it is the portal's own address,
-// one of the sites receipts were saved from before, as it would be on the real site.
-const address = "https://portal.example.org/billing/receipts/G-20931";
-({ target, page } = await open(`${EXT}/popup.html?tab=${tabId}&url=${encodeURIComponent(address)}&title=${encodeURIComponent("Greenway Family Clinic - Payment receipt")}`));
-await sized(page, 348, 400);
-await until(() => page.run("!document.getElementById('primary').hidden && !document.getElementById('waiting').hidden"), "the popup's button");
-const popupHeight = await page.run("Math.ceil(document.body.getBoundingClientRect().height)");
-const popup = await shoot(page, { x: 0, y: 0, width: 348, height: popupHeight });
+const tabId = await newestTab();
 
 step("saving the receipt");
+// The portal's own address is one of the sites receipts were saved from before, so the button saves a receipt.
+await popupOn(tabId, "https://portal.example.org/billing/receipts/G-20931", "Greenway Family Clinic - Payment receipt");
 await page.click("#primary");
 await until(() => sw.run(`chrome.storage.session.get("tab:${tabId}").then((s) => { const v = s["tab:${tabId}"]; return v && v.stage === "review"; })`), "the receipt to be saved", 90000);
 await browser.closeTab(target.id);
@@ -109,15 +120,15 @@ await wait(500);
 const panel = await shoot(page);
 await browser.closeTab(target.id);
 
-await compose("1-check-a-receipt.png",
+await compose("1-save-in-one-click.png",
+  `<div style="position:relative;width:1280px;height:800px;overflow:hidden">
+     <img src="${png(articleWide)}" width="1280" height="800">
+     <img src="${png(popup)}" width="348" height="${popupHeight}" style="position:absolute;top:10px;right:18px;border-radius:10px;box-shadow:0 10px 32px rgba(0,0,0,.28),0 0 0 1px rgba(0,0,0,.08)">
+   </div>`);
+await compose("4-check-a-receipt.png",
   `<div style="display:flex;width:1280px;height:800px;overflow:hidden">
      <img src="${png(portalBeside)}" width="880" height="800">
      <img src="${png(panel)}" width="400" height="800" style="box-shadow:-1px 0 0 #c9ccd1;position:relative">
-   </div>`);
-await compose("2-save-in-one-click.png",
-  `<div style="position:relative;width:1280px;height:800px;overflow:hidden">
-     <img src="${png(portalWide)}" width="1280" height="800">
-     <img src="${png(popup)}" width="348" height="${popupHeight}" style="position:absolute;top:10px;right:18px;border-radius:10px;box-shadow:0 10px 32px rgba(0,0,0,.28),0 0 0 1px rgba(0,0,0,.08)">
    </div>`);
 
 step("the web app");
@@ -134,10 +145,12 @@ const visit = async (hash, ready, name) => {
 };
 await page.run("location.reload(); 1");
 await until(() => page.run("Boolean(document.querySelector('.bar'))"), "the web app");
-await visit("#/receipts", "document.querySelectorAll('.view a[href^=\"#/receipt/\"]').length > 2", "3-web-receipts.png");
+// The list of things left to set up is for a new Kaal's administrator, not for these pictures.
+await page.run(`fetch("/v1/admin/setup", { method: "POST", headers: { "Content-Type": "application/json", "X-Kaal-Request": "1" }, body: JSON.stringify({ hidden: true }) }).then((r) => r.status, () => 0)`);
+await visit("#/notes", "document.querySelectorAll('.view a[href^=\"#/note/\"]').length > 2 && (!document.querySelector('.setup-list') || document.querySelector('.setup-list').hidden)", "2-web-notes.png");
 // A note with headings, a table and a PDF, shown as formatted Markdown.
 const boiler = await page.run(`fetch("/v1/library/notes?q=" + encodeURIComponent("Boiler and radiators")).then((r) => r.json()).then((d) => d.result.find((n) => n.title === "Boiler and radiators").id)`);
-await visit(`#/note/${boiler}`, "document.querySelectorAll('.view table').length > 0 && document.querySelectorAll('.view img').length > 0", "4-web-note.png");
+await visit(`#/note/${boiler}`, "document.querySelectorAll('.view table').length > 0 && document.querySelectorAll('.view img').length > 0", "3-web-note.png");
 await visit("#/totals", "Boolean(document.querySelector('.stats'))", "5-web-totals.png");
 await browser.closeTab(target.id);
 

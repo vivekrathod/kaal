@@ -3096,6 +3096,12 @@ def create_app(settings: Settings) -> FastAPI:
     def medical_sources(request: Request):
         return _run(S(request), core.medical_sources)
 
+    @app.get("/v1/medical/summary", tags=["medical"], dependencies=[require("read", "reveal")])
+    def medical_summary(request: Request):
+        """Whether the vault holds any receipts, and how many wait to be checked: what an app needs
+        to decide whether to show its receipts section, and the number beside it."""
+        return _run(S(request), core.medical_summary)
+
     @app.get("/v1/medical/people", tags=["medical"], dependencies=[require("read", "reveal")])
     def medical_people(request: Request):
         return _run(S(request), core.medical_people, add=[], remove=[])

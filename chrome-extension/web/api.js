@@ -137,6 +137,8 @@ export const api = {
   endOtherSessions: () => result(request("POST", "/v1/account/sessions/sign-out-others")),
 
   receipts: (params) => request("GET", "/v1/medical/receipts", { params }),
+  // { any, to_review }: whether the open vault holds any receipts, and how many wait to be checked.
+  receiptSummary: () => result(request("GET", "/v1/medical/summary")),
   receipt: (noteId) => result(request("GET", `/v1/medical/receipts/${id(noteId)}`)),
   capture: (file) => {
     const form = new FormData();

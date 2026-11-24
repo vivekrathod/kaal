@@ -241,16 +241,20 @@ it. Accounts keep the people who use an installation apart from each other,
 not from its operator.
 
 **Web app.** `kaal-server` serves a small web app at `/`: open the server's
-address in a browser on a laptop or phone and sign in with a device token. It
-covers medical receipts: add one from a file or the phone's camera, see what
-still needs review, check each value against a picture of the receipt (with
-where it came from and how far to trust it), mark receipts reviewed or
-reimbursed, see totals per person and year, and restore or permanently delete
-what is in the Trash. It also covers notes (search, read, write, trash) and
-settings: the family list and the provider names Kaal has learnt. Notes are
-shown as formatted Markdown; pictures inside a note appear in place, each PDF
-shows its first page with the text read from it, and a "Show source" switch
-shows the raw note. HTML inside a note is displayed as text, never run.
+address in a browser on a laptop or phone and sign in. It opens on your notes:
+search, read, write, add files, trash. Notes are shown as formatted Markdown;
+pictures inside a note appear in place, each PDF shows its first page with the
+text read from it, and a "Show source" switch shows the raw note. HTML inside a
+note is displayed as text, never run.
+
+Medical receipts are one section of it, **Receipts**, which appears once the
+open vault holds a receipt (add the first from the arrow beside New note, from
+the Chrome extension or from the iPhone app). There you add one from a file or
+the phone's camera, see what still needs review, check each value against a
+picture of the receipt (with where it came from and how far to trust it), mark
+receipts reviewed or reimbursed, see totals per person and year, and restore
+or permanently delete what is in the Trash. Settings then also shows the
+family list and the provider names Kaal has learnt.
 
 The notes search looks in titles, tags, the text of each note and the text read
 from its files (PDFs, scans, text files). Every word typed must appear
@@ -651,7 +655,7 @@ The Chrome extension sends what you save straight to your Kaal server:
   access to that one site. The sites you have saved receipts from are also learnt from the
   server (`GET /v1/medical/sources`, host names only).
 
-Notes, totals, the Trash and settings are in the web app. Setting the extension
+Notes, receipt totals, the Trash and settings are in the web app. Setting the extension
 up is described in [`chrome-extension/README.md`](chrome-extension/README.md).
 
 The command line can save a file the same way:

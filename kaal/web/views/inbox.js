@@ -29,6 +29,25 @@ function row(note) {
       receipt.reimbursed_at ? h("span", { class: "chip good" }, "Reimbursed") : null));
 }
 
+// The three views of the receipts section: what waits to be checked, what has been, and what it adds up to.
+// The two lists are counted; the numbers are filled in by whoever shows the bar.
+export function receiptSections(active) {
+  const counts = { review: h("span", { class: "count" }), reviewed: h("span", { class: "count" }) };
+  const tab = (name, label, path, count) => h("a", { href: `#/${path}`, class: `segment${active === name ? " active" : ""}`, "aria-current": active === name ? "page" : null }, label, count ? [" ", count] : null);
+  const bar = h("div", { class: "segments", role: "navigation", "aria-label": "Receipts" },
+    tab("review", "To review", "receipts", counts.review),
+    tab("reviewed", "Reviewed", "receipts?tab=reviewed", counts.reviewed),
+    tab("totals", "Totals", "totals"));
+  return { bar, counts };
+}
+
+// How many receipts are in each list, for a view that shows neither.
+export async function countReceipts(counts) {
+  const [review, reviewed] = await Promise.all([api.receipts({ inbox: true, limit: 1 }), api.receipts({ status: "reviewed", limit: 1 })]);
+  counts.review.textContent = review.meta ? review.meta.total : "";
+  counts.reviewed.textContent = reviewed.meta ? reviewed.meta.total : "";
+}
+
 export function inboxView(container, params, { go, expired }) {
   const reviewed = params.tab === "reviewed";
   let query = params.q || "";
@@ -37,7 +56,7 @@ export function inboxView(container, params, { go, expired }) {
 
   const list = h("div", { class: "list" });
   const status = h("div", {});
-  const counts = { review: h("span", { class: "count" }), reviewed: h("span", { class: "count" }) };
+  const { bar, counts } = receiptSections(reviewed ? "reviewed" : "review");
   const search = h("input", { type: "search", placeholder: "Search provider, person or title", "aria-label": "Search receipts", value: query });
   const picker = h("input", { type: "file", accept: "image/*,application/pdf", class: "visually-hidden", id: "capture" });
   const add = h("label", { for: "capture", class: "button primary fab" }, "Add receipt");
@@ -90,13 +109,8 @@ export function inboxView(container, params, { go, expired }) {
     }
   });
 
-  const tab = (label, target, count, active) => h("a", { href: `#/receipts${target}`, class: `segment${active ? " active" : ""}`, "aria-current": active ? "page" : null }, label, " ", count);
   replace(container,
-    h("div", { class: "toolbar" },
-      h("div", { class: "segments", role: "navigation", "aria-label": "Receipt lists" },
-        tab("To review", "", counts.review, !reviewed),
-        tab("Reviewed", "?tab=reviewed", counts.reviewed, reviewed)),
-      search),
+    h("div", { class: "toolbar" }, bar, search),
     status,
     list,
     h("p", { class: "footnote" }, h("a", { href: "#/trash" }, "Trash")),

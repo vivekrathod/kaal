@@ -2570,6 +2570,19 @@ def medical_sources(args: argparse.Namespace) -> None:
     emit({"hosts": [host for host, _when in sorted(latest.items(), key=lambda item: item[1], reverse=True)][:200]}, indent=2, ensure_ascii=False)
 
 
+def medical_summary(args: argparse.Namespace) -> None:
+    """Whether this vault holds any medical receipts, and how many wait to be checked.
+
+    Only two counts, no receipt values. The apps use it to show the receipts
+    section once there is a receipt (one in the Trash still counts, so that the
+    Trash can be reached), and the number waiting beside its name.
+    """
+    init_if_needed()
+    held = [note for note in load_index().get("notes", []) if isinstance(note, dict) and is_medical_receipt(note)]
+    waiting = sum(1 for note in held if not note.get("trashed_at") and "inbox" in note.get("tags", []))
+    emit({"any": bool(held), "to_review": waiting}, indent=2, ensure_ascii=False)
+
+
 def medical_people(args: argparse.Namespace) -> None:
     """List, add or remove the family members receipts are assigned to."""
     init_if_needed()

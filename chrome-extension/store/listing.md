@@ -54,7 +54,7 @@ Kaal
 Taken from the manifest's `description`; change it there.
 
 ```text
-Save the page in front of you to your Kaal server, and check a medical receipt beside the page it came from.
+Save the page in front of you to your own Kaal server as a note, in one click. Medical receipts are checked beside the page.
 ```
 
 ### Description (16000 characters)
@@ -69,10 +69,10 @@ Click the Kaal icon. The button says "Save to Kaal", or "Save receipt" on a site
 • Right-click a page, a link or selected text for the same choices.
 • Keyboard: Alt+Shift+K opens Kaal, Alt+Shift+S saves the page.
 
-CHECK RECEIPTS ON THE SPOT
+MEDICAL RECEIPTS, CHECKED ON THE SPOT
 Saving a medical receipt opens Chrome's side panel beside the page, with the values Kaal read (amount, dates, patient, provider, insurer) and the line of the receipt each came from. "Looks right" marks it reviewed; "Save for later" leaves it to check another time. The number on the icon is how many receipts are waiting.
 
-Notes, totals per person and year, reimbursements, the Trash and settings are in Kaal's web app, and in Kaal for iPhone.
+Your notes, and for receipts the totals per person and year and reimbursements, are in Kaal's web app and in Kaal for iPhone.
 
 PRIVATE BY DESIGN
 • What you save goes only to the Kaal server you connect. Nothing goes to Kaal's authors: no analytics, no ads, no tracking.
@@ -99,14 +99,14 @@ English.
 | Field | File |
 |---|---|
 | Store icon (128 x 128) | `chrome-extension/icons/icon-128.png` |
-| Screenshot 1 (1280 x 800) | `1-check-a-receipt.png`: a receipt checked in the side panel beside the page it came from |
-| Screenshot 2 | `2-save-in-one-click.png`: the popup on a receipt site |
-| Screenshot 3 | `3-web-receipts.png`: receipts waiting to be checked, in the web app |
-| Screenshot 4 | `4-web-note.png`: a note, with a table and a PDF, in the web app |
-| Screenshot 5 | `5-web-totals.png`: totals, and what is still to claim |
+| Screenshot 1 (1280 x 800) | `1-save-in-one-click.png`: the popup on an ordinary page, about to save it as a note |
+| Screenshot 2 | `2-web-notes.png`: the notes, the web app's first screen |
+| Screenshot 3 | `3-web-note.png`: a note, with a table and a PDF, in the web app |
+| Screenshot 4 | `4-check-a-receipt.png`: a medical receipt checked in the side panel beside the page it came from |
+| Screenshot 5 | `5-web-totals.png`: receipts added up, and what is still to claim |
 | Small promo tile (440 x 280) | `promo-tile-440x280.png` |
 
-Every page in them is made up: the clinic, the people and the amounts.
+Every page in them is made up: the guide, the clinic, the people and the amounts.
 `chrome-extension/store/make-screenshots.sh` takes them again after the
 screens change, against a throwaway Kaal holding made-up data.
 

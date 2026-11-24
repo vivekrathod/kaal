@@ -121,7 +121,7 @@ def test_vault_text_is_never_written_into_the_page_as_markup():
 
 def test_the_editor_and_the_renderer_agree_on_how_a_note_refers_to_its_files():
     notes = (WEB / "views" / "notes.js").read_text()
-    assert "](attachment:${file.id})" in notes
+    assert "](attachment:${fileId})" in notes and "reference(file, file.id)" in notes
     assert "attachment:([0-9a-fA-F]{6,32}|" in (WEB / "markdown.js").read_text()
     # New notes and edited ones can take files, and a note can be previewed before it is saved.
     assert "api.attachNoteFile(" in notes and "renderMarkdown(body.value" in notes
@@ -174,3 +174,38 @@ def test_scripts_parse(script, tmp_path):
     module.write_text(script.read_text())
     done = subprocess.run(["node", "--check", str(module)], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
+
+
+def test_notes_are_the_first_screen_and_receipts_are_one_section():
+    app = (WEB / "app.js").read_text()
+    # An address that names no page is the notes, and so is the page after signing in.
+    assert '|| "notes").split("?")' in app and 'go("receipts")' not in app.replace('if (name === "receipt") go("receipts");', "")
+    tabs = app[app.index("function tabs(active)"):app.index("function shell(")]
+    # Notes first; receipts only once the vault holds one, or while on a receipts page; no tab for totals.
+    assert tabs.index('tab("notes", "Notes", "notes")') < tabs.index('tab("receipts", "Receipts", "receipts", waiting)') < tabs.index('tab("settings", "Settings", "settings")')
+    assert 'known.any || active === "receipts" ?' in tabs and '"totals", "Totals"' not in app
+    # Totals are a view inside the receipts section, beside its two lists.
+    assert 'name === "totals"' in app and app[app.index('name === "totals"'):].index('shell("receipts", content)') < 80
+    inbox = (WEB / "views" / "inbox.js").read_text()
+    assert inbox.index('tab("review", "To review", "receipts"') < inbox.index('tab("reviewed", "Reviewed"') < inbox.index('tab("totals", "Totals", "totals")')
+    assert 'receiptSections("totals")' in (WEB / "views" / "totals.js").read_text()
+    # What is left to set up is shown above the notes, and speaks of a note.
+    assert 'shell("notes", [name === "notes" && params.trash === "1" ? null : setupListCard(context), content])' in app
+    assert 'title: "Add your first note"' in (WEB / "views" / "setup.js").read_text()
+
+
+def test_the_notes_screen_adds_a_note_in_one_press_and_the_rest_from_a_menu():
+    notes = (WEB / "views" / "notes.js").read_text()
+    adding = notes[notes.index("// Adding: writing a note is the one press"):notes.index("export function noteView(")]
+    assert 'href: "#/notes/new", class: "button primary add-main" }, "New note")' in adding
+    assert adding.index('choice("Files as a note"') < adding.index('choice("Medical receipt"'), "a receipt is the last thing offered, not the first"
+    # A receipt added here is a receipt, checked on its own screen; files become a note the editor opens with.
+    assert "await api.capture(file);" in adding and "go(`receipt/${encodeURIComponent(captured.id)}`)" in adding
+    assert 'handedOver = chosen;' in adding and 'go("notes/new");' in adding
+    # The menu can be used from the keyboard and says what it is.
+    assert '"aria-haspopup": "menu"' in adding and 'role: "menuitem"' in adding and 'event.key === "Escape"' in adding
+    assert "trash || !mayWrite ? null" in adding, "nothing to add is offered to someone who may only read"
+    settings = (WEB / "views" / "settings.js").read_text()
+    drawn = settings[settings.index("const forReceipts ="):settings.index("  replace(container, h(\"p\", { class: \"empty\" }, \"Loading…\"));")]
+    assert drawn.index("accountSection(account") < drawn.rindex("forReceipts"), "one's own account comes before what only receipts need"
+    assert '"Medical receipts"' in drawn and "!hasReceipts ? []" in drawn

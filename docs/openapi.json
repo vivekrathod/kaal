@@ -3814,6 +3814,26 @@
         ]
       }
     },
+    "/v1/medical/summary": {
+      "get": {
+        "description": "Whether the vault holds any receipts, and how many wait to be checked: what an app needs\nto decide whether to show its receipts section, and the number beside it.",
+        "operationId": "medical_summary_v1_medical_summary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Medical Summary",
+        "tags": [
+          "medical"
+        ]
+      }
+    },
     "/v1/notes": {
       "get": {
         "operationId": "list_notes_v1_notes_get",

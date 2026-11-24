@@ -16,7 +16,7 @@ let leaveView = null;
 
 // Routes live after the # so the server only ever serves one page.
 function route() {
-  const [path, query = ""] = (location.hash.replace(/^#\/?/, "") || "receipts").split("?");
+  const [path, query = ""] = (location.hash.replace(/^#\/?/, "") || "notes").split("?");
   const [name, ...rest] = path.split("/");
   return { name, rest: rest.map(decodeURIComponent), params: Object.fromEntries(new URLSearchParams(query)) };
 }
@@ -50,13 +50,68 @@ function vaultPicker() {
   return pick;
 }
 
+// Kaal is a place for notes first. Medical receipts are one thing it does: their section is shown
+// once the open vault holds a receipt, with the number waiting to be checked beside its name.
+// What was last known of a vault is kept in this browser, so the tabs do not shift as a page opens.
+const RECEIPTS_SEEN = "kaal.receipts.";
+let receipts = { vault: null, any: false, waiting: 0 };
+let tabsShown = null;
+const openVaultId = () => (session && session.vault && session.vault.id) || "";
+
+function receiptsKnown() {
+  const vault = openVaultId();
+  if (receipts.vault !== vault) {
+    let any = false;
+    try {
+      any = localStorage.getItem(RECEIPTS_SEEN + vault) === "1";
+    } catch {
+      // A browser that keeps nothing: the section appears a moment after the page does.
+    }
+    receipts = { vault, any, waiting: 0 };
+  }
+  return receipts;
+}
+
+async function refreshReceipts() {
+  const vault = openVaultId();
+  const before = receiptsKnown();
+  if (!vault && session && session.account) return before;
+  try {
+    const told = await api.receiptSummary();
+    if (vault !== openVaultId()) return receiptsKnown();
+    receipts = { vault, any: Boolean(told.any), waiting: Number(told.to_review) || 0 };
+    try {
+      if (receipts.any) localStorage.setItem(RECEIPTS_SEEN + vault, "1");
+      else localStorage.removeItem(RECEIPTS_SEEN + vault);
+    } catch {
+      // Not kept; asked again with the next page.
+    }
+    if ((receipts.any !== before.any || receipts.waiting !== before.waiting) && tabsShown && tabsShown.nav.isConnected) {
+      const fresh = tabs(tabsShown.active);
+      tabsShown.nav.replaceWith(fresh);
+      tabsShown.nav = fresh;
+    }
+  } catch {
+    // Offline, or a device token that may not read receipts: what was known stays.
+  }
+  return receipts;
+}
+
+function tabs(active) {
+  const known = receiptsKnown();
+  const tab = (name, label, path, extra = null) => h("a", { href: `#/${path}`, class: `tab${active === name ? " active" : ""}`, "aria-current": active === name ? "page" : null }, label, extra);
+  const waiting = known.waiting ? h("span", { class: "tab-count", title: `${known.waiting} to check` }, String(known.waiting)) : null;
+  return h("nav", { class: "tabs", "aria-label": "Sections" },
+    tab("notes", "Notes", "notes"),
+    // Shown too while one is on a receipts page: a link may lead there before the first receipt is saved.
+    known.any || active === "receipts" ? tab("receipts", "Receipts", "receipts", waiting) : null,
+    tab("settings", "Settings", "settings"));
+}
+
 function shell(active, content) {
-  const tab = (name, label, path) => h("a", { href: `#/${path}`, class: `tab${active === name ? " active" : ""}`, "aria-current": active === name ? "page" : null }, label);
+  tabsShown = { active, nav: tabs(active) };
   return [
-    h("header", { class: "bar" },
-      h("span", { class: "brand" }, "Kaal"),
-      h("nav", { class: "tabs", "aria-label": "Sections" }, tab("receipts", "Receipts", "receipts"), tab("totals", "Totals", "totals"), tab("notes", "Notes", "notes"), tab("settings", "Settings", "settings")),
-      vaultPicker()),
+    h("header", { class: "bar" }, h("span", { class: "brand" }, "Kaal"), tabsShown.nav, vaultPicker()),
     h("main", { class: "page" }, content),
   ];
 }
@@ -126,7 +181,7 @@ async function render() {
   }
   // A setup link works whether or not this browser is signed in as someone.
   if (route().name === "setup" && route().rest[0]) {
-    replace(root, setupView(route().rest[0], { onSignedIn: (signedIn) => { session = signedIn; go("receipts"); } }));
+    replace(root, setupView(route().rest[0], { onSignedIn: (signedIn) => { session = signedIn; go("notes"); } }));
     return;
   }
   const forApp = appSignInWaiting();
@@ -140,7 +195,7 @@ async function render() {
       }
       // A sign-in service sends the browser back here when it could not sign the person in.
       const problem = route().name === "sign-in-problem" ? route().rest[0] || "failed" : "";
-      replace(root, signInView({ problem, onSignedIn: (signedIn) => { session = signedIn; if (problem) go("receipts"); else render(); } }));
+      replace(root, signInView({ problem, onSignedIn: (signedIn) => { session = signedIn; if (problem) go("notes"); else render(); } }));
       return;
     }
   }
@@ -152,17 +207,22 @@ async function render() {
   const elsewhere = session.account && params.vault && params.vault !== (session.vault || {}).id
     ? (session.vaults || []).find((vault) => vault.id === params.vault) : null;
   if (elsewhere) {
-    replace(root, shell({ receipt: "receipts", note: "notes" }[name] || name, inAnotherVault(elsewhere)));
+    replace(root, shell({ receipt: "receipts", totals: "receipts", trash: "receipts", note: "notes" }[name] || name, inAnotherVault(elsewhere)));
     return;
   }
   const content = h("div", { class: "view" });
-  const context = { go, session, signOut, expired: () => { session = null; render(); }, refresh: async () => { session = await api.session(); render(); } };
+  // Asked with every page: a receipt may have been saved or checked since, here or from the extension.
+  const receiptsAsked = refreshReceipts();
+  const context = { go, session, signOut, receipts: () => receiptsAsked, expired: () => { session = null; render(); }, refresh: async () => { session = await api.session(); render(); } };
   if (name === "receipt" && rest[0]) {
     replace(root, shell("receipts", content));
     leaveView = reviewView(content, rest[0], context);
   } else if (name === "totals") {
-    replace(root, shell("totals", content));
+    replace(root, shell("receipts", content));
     leaveView = totalsView(content, params, context);
+  } else if (name === "receipts") {
+    replace(root, shell("receipts", content));
+    leaveView = inboxView(content, params, context);
   } else if (name === "trash") {
     replace(root, shell("receipts", content));
     leaveView = trashView(content, params, context);
@@ -174,16 +234,13 @@ async function render() {
   } else if (name === "notes" && rest[0] === "new") {
     replace(root, shell("notes", content));
     leaveView = noteEditView(content, null, context);
-  } else if (name === "notes") {
-    replace(root, shell("notes", content));
-    leaveView = notesView(content, params, context);
   } else if (name === "note" && rest[0]) {
     replace(root, shell("notes", content));
     leaveView = rest[1] === "edit" ? noteEditView(content, rest[0], context) : noteView(content, rest[0], context);
   } else {
-    // The first screen: a new Kaal's administrator sees what is left to set up above it.
-    replace(root, shell("receipts", [setupListCard(context), content]));
-    leaveView = inboxView(content, params, context);
+    // The first screen is the notes. A new Kaal's administrator sees what is left to set up above them.
+    replace(root, shell("notes", [name === "notes" && params.trash === "1" ? null : setupListCard(context), content]));
+    leaveView = notesView(content, name === "notes" ? params : {}, context);
   }
   window.scrollTo(0, 0);
 }

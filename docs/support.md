@@ -68,6 +68,24 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.25.0 or newer.
   iPhone app for a year, unless the session is signed out under Settings, the
   password is changed, or a recovery code is used.
 
+### Notes and receipts
+
+- **Where are my receipts?** Kaal opens on your notes. Medical receipts are
+  under **Receipts** at the top, which appears once the open vault holds a
+  receipt. The number beside it is how many wait to be checked.
+- **There is no Receipts tab:** the vault that is open has no medical receipts
+  yet. Add the first one from the arrow beside **New note** (Medical receipt),
+  with "Save receipt" in Kaal for Chrome, or from the Add tab on the iPhone.
+  If you belong to more than one vault, the receipts may be in another one:
+  pick it at the top right.
+- **Where did Totals go?** Into Receipts: its three views are To review,
+  Reviewed and Totals.
+- **Adding files without writing anything:** the arrow beside **New note**,
+  then "Files as a note". The note opens with the files in it, named after the
+  first; save it as it is or write around them.
+- **Family and Provider names are missing from Settings:** they only matter
+  to medical receipts, and are shown once the open vault holds one.
+
 ### Sharing a vault
 
 - **Someone is not in the list**, or **"Nobody here has that sign-in name"**:

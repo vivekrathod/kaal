@@ -128,8 +128,10 @@ function accountSection(account, { status, attempt, redraw, signOut }) {
   ];
 }
 
-export function settingsView(container, params, { session, signOut, expired }) {
+export function settingsView(container, params, { session, signOut, expired, receipts }) {
   let alive = true;
+  // What only matters to medical receipts is shown once the vault holds one.
+  let hasReceipts = false;
   const status = h("div", {});
   // Back from a sign-in service after pressing Connect.
   if (params.connected) status.append(notice("Connected. You can now sign in that way."));
@@ -158,8 +160,8 @@ export function settingsView(container, params, { session, signOut, expired }) {
       attempt(async () => draw(await api.changePeople({ add: [name.value.trim()] }), providers, account));
     });
 
-    replace(container,
-      status,
+    const forReceipts = !hasReceipts ? [] : [
+      h("p", { class: "group-title" }, "Medical receipts"),
       h("section", { class: "card section" },
         h("h1", {}, "Family"),
         h("p", { class: "muted" }, "Receipts are matched to these names, so totals can be shown per person."),
@@ -178,6 +180,9 @@ export function settingsView(container, params, { session, signOut, expired }) {
               h("span", { class: "pair" }, h("span", { class: "muted-text" }, pair.printed), h("span", {}, pair.shown_as)),
               actionButton("Forget", () => attempt(async () => draw(people, await api.forgetProvider(pair.printed), account)), { kind: "small" }))))
           : h("p", { class: "empty" }, "Nothing learnt yet. Correct a provider on a receipt and Kaal will remember it.")),
+    ];
+    replace(container,
+      status,
       account
         ? accountSection(account, { status, attempt, signOut, redraw: async () => draw(people, providers, await api.account()) })
         : h("section", { class: "card section" },
@@ -185,13 +190,15 @@ export function settingsView(container, params, { session, signOut, expired }) {
             h("p", { class: "muted" }, `Signed in with the token “${session.name}”. It may: ${session.scopes.join(", ")}.`),
             h("p", { class: "muted" }, "To sign in with a password instead, ask whoever runs this Kaal for a setup link."),
             h("p", { class: "muted" }, `Kaal ${appVersion() || ""}`),
-            h("button", { type: "button", class: "button", onClick: signOut }, "Sign out")));
+            h("button", { type: "button", class: "button", onClick: signOut }, "Sign out")),
+      forReceipts);
   }
 
   replace(container, h("p", { class: "empty" }, "Loading…"));
   attempt(async () => {
     // Only a person signed in with their own password has an account page; a token does not.
-    const [people, providers, account] = await Promise.all([api.people(), api.providers(), session.account ? api.account() : null]);
+    const [people, providers, account, known] = await Promise.all([api.people(), api.providers(), session.account ? api.account() : null, receipts ? receipts() : null]);
+    hasReceipts = !known || Boolean(known.any);
     if (alive) draw(people, providers, account);
   });
   return () => { alive = false; };

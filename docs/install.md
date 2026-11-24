@@ -47,7 +47,7 @@ It builds Kaal, starts it, asks where to write a copy of the key (see the next
 section), and prints a link. Open the link once to choose your name, the name
 you sign in with, and your password; you are then the administrator. Kaal's
 first screen lists what is left to set up, until you have done it or put the
-list away: keeping the key, adding a first receipt or note, the Chrome
+list away: keeping the key, adding a first note, the Chrome
 extension, inviting someone, and signing in with Google. You invite other
 people under Settings → Vaults and sharing: you type their name, send them the
 link you are given, and they land in your vault with a vault of their own

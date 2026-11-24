@@ -6,8 +6,9 @@
 #
 # It starts a throwaway Kaal on this machine holding only made-up notes and
 # receipts (bin/demo-data.py) and a test browser with the extension loaded,
-# saves a made-up receipt (sample-portal.html) and photographs the popup, the
-# side panel and the web app (screenshots.mjs). Everything is deleted again
+# opens a made-up article (sample-page.html), saves a made-up receipt
+# (sample-portal.html) and photographs the popup, the side panel and the web
+# app (screenshots.mjs). Everything is deleted again
 # afterwards. It needs Chrome for Testing or Chromium, as
 # tests/test_extension_e2e.py does, and Node 22 or later.
 #
@@ -74,6 +75,10 @@ for _ in $(seq 1 100); do
   curl -sf "http://127.0.0.1:$DEBUG_PORT/json/version" >/dev/null && break
   sleep 0.1
 done
+
+# On a Mac whose display is asleep Chrome draws nothing, headless or not, and a screenshot never
+# comes. Keep the display awake for as long as this script runs.
+if command -v caffeinate >/dev/null; then caffeinate -u -d -w $$ & sleep 2; fi
 
 mkdir -p "$WORK/shots"
 echo "Saving a made-up receipt and taking the pictures…"

@@ -398,6 +398,34 @@ def test_someone_with_several_vaults_chooses_where_a_save_goes(stage, tmp_path):
     assert out["afterPicking"] == {"open": "Made-up notes", "hash": "#/notes"}
 
 
+def test_the_web_app_opens_on_notes_and_shows_receipts_once_there_is_one(stage, tmp_path):
+    # A made-up person with an empty vault of their own, as someone who was just invited has.
+    store = server.open_store(server.Settings(home=tmp_path, vault=tmp_path / "data", tokens_file=tmp_path / "tokens.json", tmp_dir=tmp_path / "tmp"))
+    person = store.add_account("sam")
+    server.create_vault(store, "Made-up notes", person["id"])
+    password = "a made-up password for the test"
+    setup = urllib.request.Request(f"{stage.kaal}/v1/setup", data=json.dumps({"code": store.new_setup_code("sam"), "password": password}).encode(),
+                                   headers={"Content-Type": "application/json", "X-Kaal-Request": "1"})
+    assert urllib.request.urlopen(setup, timeout=10).status == 200
+
+    out = drive(stage, "notesfirst.mjs", E2E_LOGIN="sam", E2E_PASSWORD=password)
+
+    # Notes are the first screen, and a vault without receipts shows no receipts section at all.
+    assert out["first"]["hash"] in ("", "#/notes") and out["first"]["tabs"] == ["Notes*", "Settings"]
+    assert out["first"]["empty"].startswith("No notes yet") and out["first"]["button"] == "New note"
+    assert out["menu"] == {"open": True, "choices": ["Files as a note", "Medical receipt"]} and out["menuClosed"] is True
+    # Files chosen there become one note, named after the first, each placed in its text.
+    assert out["editor"] == {"title": "Made-up lease", "lines": 2}
+    assert out["afterNote"] == {"rows": ["Made-up lease"], "files": "2 files", "tabs": ["Notes*", "Settings"]}
+    # The first receipt makes its section appear, with the number waiting to be checked.
+    assert out["afterReceipt"]["tabs"] == ["Notes", "Receipts1*", "Settings"]
+    assert out["totals"] == {"tabs": ["Notes", "Receipts1*", "Settings"], "views": ["To review 1", "Reviewed 0", "Totals*"], "paid": "$85.00"}
+    # The receipt is not a note, and the notes are still home.
+    assert out["home"] == {"tabs": ["Notes*", "Receipts1", "Settings"], "rows": ["Made-up lease"]}
+    assert out["settings"][0] == "Your account" and out["settings"][-3:] == ["# Medical receipts", "Family", "Provider names"]
+    assert out["reopened"][:2] == ["Notes", "Receipts1"] or out["reopened"][:2] == ["Notes", "Receipts"]
+
+
 def test_a_pdf_opened_from_this_computer_is_saved_as_the_file_it_is(stage, tmp_path):
     local = tmp_path / "On this computer.pdf"
     local.write_bytes(made_up_pdf())

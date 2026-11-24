@@ -311,6 +311,7 @@ def test_every_route_works_on_the_servers_vault_and_never_on_the_default(tmp_pat
     call("POST", "/v1/medical/providers/forget", json={"forget": ["Nobody Clinic"]}, expect=(200, 400, 404))
     call("POST", "/v1/medical/report", json={"year": "2026"})
     call("GET", "/v1/medical/sources")
+    call("GET", "/v1/medical/summary")
     call("POST", "/v1/medical/receipts/reextract", json={"ids": [receipt_id]}, expect=(200, 400, 409))
     assert app.state.kaal.worker.drain() >= 0
     call("POST", f"/v1/medical/receipts/{receipt_id}/trash")

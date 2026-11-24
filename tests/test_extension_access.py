@@ -108,3 +108,25 @@ def test_receipt_sites_are_host_names_only_newest_first(service):
     assert "secret" not in answer.text and "receipt?id" not in answer.text and "Payment confirmed" not in answer.text
     assert service.client.get("/v1/medical/sources", headers=service.bearer("reader")).status_code == 403
     assert service.client.get("/v1/medical/sources").status_code == 401
+
+
+def test_an_app_is_told_whether_the_vault_holds_receipts_and_how_many_wait(service):
+    summary = lambda: service.client.get("/v1/medical/summary", headers=service.bearer())
+    # A vault of notes only has no receipts section to show.
+    assert service.client.post("/v1/captures/text", headers=service.bearer(), json={"text": "a note", "title": "A note"}).status_code in (200, 201)
+    assert summary().json()["result"] == {"any": False, "to_review": 0}
+    first = service.client.post("/v1/medical/receipts", headers=service.bearer(), files={"file": ("receipt.txt", RECEIPT, "text/plain")}).json()["result"]["id"]
+    second = service.client.post("/v1/medical/receipts", headers=service.bearer(), files={"file": ("other.txt", RECEIPT + b"\nSecond", "text/plain")}).json()["result"]["id"]
+    assert summary().json()["result"] == {"any": True, "to_review": 2}
+    # One checked: it is still a receipt, and no longer waits.
+    assert service.client.post(f"/v1/medical/receipts/{first}/review", headers=service.bearer()).status_code == 200
+    assert summary().json()["result"] == {"any": True, "to_review": 1}
+    # One in the Trash does not wait either, but the section stays, so the Trash can be reached.
+    assert service.client.post(f"/v1/medical/receipts/{second}/trash", headers=service.bearer()).status_code == 200
+    assert service.client.post(f"/v1/medical/receipts/{first}/trash", headers=service.bearer()).status_code == 200
+    answer = summary()
+    assert answer.json()["result"] == {"any": True, "to_review": 0}
+    # Two counts and nothing of what a receipt says.
+    assert "Amount" not in answer.text and "receipt.txt" not in answer.text
+    assert service.client.get("/v1/medical/summary", headers=service.bearer("reader")).status_code == 403
+    assert service.client.get("/v1/medical/summary").status_code == 401

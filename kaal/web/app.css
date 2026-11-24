@@ -77,6 +77,18 @@ label { font-weight: 600; font-size: 0.92rem; }
 .button.danger { color: var(--danger); }
 .button.small { min-height: 34px; padding: 4px 10px; font-size: 0.88rem; font-weight: 500; }
 .button:disabled { opacity: 0.6; cursor: progress; }
+/* Adding on the list of notes: the one press writes a note; the arrow beside it opens the other things to add. */
+.fab.add { display: flex; box-shadow: none; }
+.add .button { box-shadow: 0 4px 14px rgb(0 0 0 / 0.22); }
+.add-main { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.add-more { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 1px solid color-mix(in srgb, var(--accent-text) 35%, transparent); padding-left: 12px; padding-right: 12px; font-size: 1.05rem; }
+.add-menu { position: absolute; right: 0; bottom: calc(100% + 8px); width: min(320px, calc(100vw - 32px)); padding: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 8px 28px rgb(0 0 0 / 0.22); }
+.add-choice { display: grid; gap: 2px; width: 100%; padding: 10px 12px; border: 0; border-radius: 8px; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.add-choice:hover, .add-choice:focus-visible { background: var(--bg); }
+.add-choice:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.add-choice .muted-text { font-size: 0.88rem; }
+.tab-count { display: inline-block; min-width: 1.4em; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: var(--warn-bg); color: var(--warn-text); font-size: 0.78rem; font-weight: 600; text-align: center; font-variant-numeric: tabular-nums; }
+.group-title { margin: 28px 0 10px; color: var(--muted); font-size: 0.82rem; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; }
 .fab { position: fixed; right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); box-shadow: 0 4px 14px rgb(0 0 0 / 0.22); }
 
 .notice { margin: 0 0 12px; padding: 10px 12px; border-radius: 8px; background: var(--info-bg); color: var(--info-text); font-size: 0.92rem; }

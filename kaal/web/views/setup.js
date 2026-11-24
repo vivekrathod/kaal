@@ -21,12 +21,12 @@ const STEPS = {
     ],
   },
   first: {
-    title: "Add your first receipt or note",
-    todo: () => [h("p", { class: "muted small" }, "Use Add receipt below for a PDF or a photo of a receipt, or ", h("a", { href: "#/notes/new" }, "write a note"), ".")],
+    title: "Add your first note",
+    todo: () => [h("p", { class: "muted small" }, h("a", { href: "#/notes/new" }, "Write a note"), ", or use the arrow beside New note below to add files or a medical receipt.")],
   },
   chrome: {
     title: "Get Kaal for Chrome",
-    todo: (list) => [h("p", { class: "muted small" }, "Saves the page in front of you, or a receipt, in one click. ",
+    todo: (list) => [h("p", { class: "muted small" }, "Saves the page in front of you in one click, as a note or as a medical receipt. ",
       h("a", { href: CHROME_STORE, target: "_blank", rel: "noopener" }, "Add it from the Chrome Web Store"),
       ", open its settings, enter this address and connect with your Kaal sign-in:"),
       command(list.address || location.origin)],

@@ -88,10 +88,16 @@ function pdfCard(noteId, file) {
 }
 
 const CANNOT_DELETE = "This device can restore from the Trash but isn't allowed to delete for good.";
+
+// Files chosen on the list of notes, on their way to the new note the editor opens with them in.
+let handedOver = [];
+const withoutEnding = (name) => String(name || "").replace(/\.[a-z0-9]{1,8}$/i, "").trim();
+const reference = (file, fileId) => `${isPicture(file) ? "!" : ""}[${(file.name || "file").replace(/[\[\]]/g, "")}](attachment:${fileId})`;
 const tagList = (text) => [...new Set(text.split(",").map((tag) => tag.trim().replace(/^#/, "")).filter(Boolean))];
 
-export function notesView(container, params, { expired }) {
+export function notesView(container, params, { expired, go, session }) {
   const trash = params.trash === "1";
+  const mayWrite = ((session || {}).scopes || ["write"]).includes("write");
   let query = params.q || "";
   let shown = [];
   let total = 0;
@@ -154,6 +160,51 @@ export function notesView(container, params, { expired }) {
     timer = setTimeout(() => load(true), 250);
   });
 
+  // Adding: writing a note is the one press; files, and a medical receipt, are under the arrow beside it.
+  const filesPicker = h("input", { type: "file", id: "add-files", multiple: true, class: "visually-hidden", tabindex: "-1" });
+  filesPicker.addEventListener("change", () => {
+    const chosen = [...filesPicker.files];
+    filesPicker.value = "";
+    if (!chosen.length) return;
+    handedOver = chosen;
+    go("notes/new");
+  });
+  const receiptPicker = h("input", { type: "file", id: "add-receipt", accept: "image/*,application/pdf", class: "visually-hidden", tabindex: "-1" });
+  receiptPicker.addEventListener("change", async () => {
+    const file = receiptPicker.files[0];
+    receiptPicker.value = "";
+    if (!file) return;
+    replace(status, notice(`Saving ${file.name || "the receipt"}…`));
+    try {
+      const captured = await api.capture(file);
+      if (alive) go(`receipt/${encodeURIComponent(captured.id)}`);
+    } catch (error) {
+      if (!alive) return;
+      if (error.status === 401) return expired();
+      replace(status, notice(error.status === 413 ? "That file is too large to save." : error.message, "error"));
+    }
+  });
+  const menu = h("div", { class: "add-menu", id: "add-menu", role: "menu", hidden: true });
+  const opener = h("button", { type: "button", class: "button primary add-more", "aria-haspopup": "menu", "aria-expanded": "false", "aria-controls": "add-menu", "aria-label": "More to add" }, "▾");
+  const open = (on) => {
+    menu.hidden = !on;
+    opener.setAttribute("aria-expanded", on ? "true" : "false");
+  };
+  const choice = (title, about, picker) => h("button", { type: "button", class: "add-choice", role: "menuitem", onClick: () => { open(false); picker.click(); } },
+    h("strong", {}, title), h("span", { class: "muted-text" }, about));
+  menu.append(
+    choice("Files as a note", "Pictures, PDFs or other files, kept together in a new note.", filesPicker),
+    choice("Medical receipt", "A PDF or a photo. Kaal reads the amount, dates and names for you to check.", receiptPicker));
+  opener.addEventListener("click", () => {
+    open(menu.hidden);
+    if (!menu.hidden) menu.querySelector("button").focus();
+  });
+  const outside = (event) => { if (!menu.hidden && !adding.contains(event.target)) open(false); };
+  const escape = (event) => { if (event.key === "Escape" && !menu.hidden) { open(false); opener.focus(); } };
+  const adding = h("div", { class: "fab add" }, menu, h("a", { href: "#/notes/new", class: "button primary add-main" }, "New note"), opener);
+  document.addEventListener("click", outside);
+  document.addEventListener("keydown", escape);
+
   replace(container,
     h("div", { class: "toolbar" },
       h("div", { class: "segments", role: "navigation", "aria-label": "Note lists" },
@@ -161,11 +212,13 @@ export function notesView(container, params, { expired }) {
         h("a", { href: "#/notes?trash=1", class: `segment${trash ? " active" : ""}` }, "Trash")),
       search),
     status, list, more,
-    trash ? null : h("a", { href: "#/notes/new", class: "button primary fab" }, "New note"));
+    trash || !mayWrite ? null : [filesPicker, receiptPicker, adding]);
   load(true);
   return () => {
     alive = false;
     clearTimeout(timer);
+    document.removeEventListener("click", outside);
+    document.removeEventListener("keydown", escape);
   };
 }
 
@@ -308,11 +361,10 @@ export function noteEditView(container, noteId, { go, expired }) {
     let placed = false;
     body.addEventListener("focus", () => { placed = true; });
     const insert = (file) => {
-      const reference = `${isPicture(file) ? "!" : ""}[${(file.name || "file").replace(/[\[\]]/g, "")}](attachment:${file.id})`;
       const at = placed ? body.selectionStart : body.value.length;
       const before = body.value.slice(0, at);
       const after = body.value.slice(placed ? body.selectionEnd : at);
-      const start = `${before}${before && !before.endsWith("\n") ? "\n" : ""}${reference}\n`;
+      const start = `${before}${before && !before.endsWith("\n") ? "\n" : ""}${reference(file, file.id)}\n`;
       body.value = start + after;
       show(false);
       body.focus();
@@ -375,6 +427,14 @@ export function noteEditView(container, noteId, { go, expired }) {
         h("div", {}, picker, h("label", { for: "note-files", class: "button small" }, "Add pictures, PDFs or other files"))),
       status,
       h("div", { class: "actions" }, save, h("a", { href: cancel, class: "button" }, "Cancel")));
+    // Files chosen on the list of notes: the new note opens with them in it, named after the
+    // first and each placed in the text, ready to be saved as it is or written around.
+    if (!noteId && handedOver.length) {
+      waiting = handedOver.map((file) => ({ id: `new${++chosenSoFar}`, name: file.name || "file", file }));
+      handedOver = [];
+      title.value = withoutEnding(waiting[0].name) || "Files";
+      body.value = `${waiting.map((entry) => reference(entry.file, entry.id)).join("\n")}\n`;
+    }
     drawFiles();
 
     form.addEventListener("submit", async (event) => {

@@ -1,9 +1,13 @@
 import { api } from "/web/api.js";
 import { h, replace, notice, formatMoney } from "/web/ui.js";
+import { receiptSections, countReceipts } from "/web/views/inbox.js";
 
 export function totalsView(container, params, { expired }) {
   let alive = true;
   const year = params.year || "";
+  // Totals are one view of the receipts, beside the two lists.
+  const { bar, counts } = receiptSections("totals");
+  const head = h("div", { class: "toolbar" }, bar);
 
   async function load() {
     let overall;
@@ -14,7 +18,7 @@ export function totalsView(container, params, { expired }) {
     } catch (error) {
       if (!alive) return;
       if (error.status === 401) return expired();
-      replace(container, notice(error.message, "error"));
+      replace(container, head, notice(error.message, "error"));
       return;
     }
     if (!alive) return;
@@ -37,6 +41,7 @@ export function totalsView(container, params, { expired }) {
       h("td", { class: "num" }, formatMoney(group.unreimbursed_amount))));
 
     replace(container,
+      head,
       h("div", { class: "segments", role: "navigation", "aria-label": "Year" }, yearLink("All years", ""), years.map((value) => yearLink(value, value))),
       h("div", { class: "stats" },
         stat("Not yet reimbursed", shown.unreimbursed_amount, null, true),
@@ -50,7 +55,8 @@ export function totalsView(container, params, { expired }) {
         : h("p", { class: "empty" }, "No receipts in this period."));
   }
 
-  replace(container, h("p", { class: "empty" }, "Loading…"));
+  replace(container, head, h("p", { class: "empty" }, "Loading…"));
+  countReceipts(counts).catch(() => {});
   load();
   return () => { alive = false; };
 }
