@@ -26,12 +26,6 @@ final class StoreScreenshots: SigningInTestCase {
         app.launch()
         signIn(server: try XCTUnwrap(environment["KAAL_UI_SERVER"]), login: try XCTUnwrap(environment["KAAL_UI_LOGIN"]),
                password: try XCTUnwrap(environment["KAAL_UI_PASSWORD"]))
-        // Coming back from the sign-in sheet leaves "◂ Safari" in the status bar. Opened
-        // again, the app is still signed in (the session is in the keychain) and shows none.
-        app.terminate()
-        app.launchArguments = ["-kaal-store-screenshots"]
-        app.launch()
-        appears(app.tabBars.buttons["Receipts"], "the app's tabs, opened again")
         // The made-up person is this Kaal's administrator, and is shown what is left to set up.
         // That list is for a first day, not for a picture of the app in use: put it away.
         let hide = app.buttons["Hide this list"]
@@ -39,8 +33,38 @@ final class StoreScreenshots: SigningInTestCase {
             hide.tap()
             happens("the list of steps going away", timeout: 15) { !hide.exists }
         }
+        // Coming back from the sign-in sheet leaves "◂ Safari" in the status bar. Opened
+        // again, the app is still signed in (the session is in the keychain) and shows none,
+        // and Notes is as it opens, with nothing above the notes.
+        app.terminate()
+        app.launchArguments = ["-kaal-store-screenshots"]
+        app.launch()
+        appears(app.tabBars.buttons["Notes"], "the app's tabs, opened again")
 
-        // 1. Add, just after a note was taken down.
+        // 1. Notes, which the app opens on.
+        let paint = app.staticTexts["Paint colours for the hall"].firstMatch
+        appears(paint, "the notes")
+        sleep(1)
+        shot("1-notes")
+
+        // 2. A note with a picture in it.
+        paint.tap()
+        appears(labelled(app.buttons, containing: "hall-swatches"), "the picture in the note")
+        sleep(3)
+        shot("2-note")
+
+        // 3. Searching notes, and the text read from their files.
+        app.navigationBars.buttons.firstMatch.tap()
+        let search = app.searchFields.firstMatch
+        appears(search, "the search field")
+        search.tap()
+        search.typeText("October\n")
+        appears(app.staticTexts["Letter from the school"].firstMatch, "the notes found")
+        sleep(2)
+        shot("3-search")
+
+        // 4. Add, just after a note was taken down.
+        tab("Add")
         let write = labelled(app.buttons, containing: "Write a note")
         appears(write, "Write a note")
         write.tap()
@@ -51,45 +75,28 @@ final class StoreScreenshots: SigningInTestCase {
         app.buttons["Save"].tap()
         appears(labelled(app.staticTexts, containing: "Saved"), "the Saved message")
         sleep(1)
-        shot("1-add")
+        shot("4-add")
 
-        // 2. Receipts waiting to be checked.
+        // 5. Medical receipts waiting to be checked.
         tab("Receipts")
         let receipt = app.staticTexts["$64.50"].firstMatch
         appears(receipt, "the receipts")
         sleep(1)
-        shot("2-receipts")
+        shot("5-receipts")
 
-        // 3. One of them, beside a picture of it.
+        // 6. One of them, beside a picture of it.
         receipt.tap()
         appears(app.staticTexts["Check these against the receipt."], "the review screen")
         sleep(3)
-        shot("3-review")
+        shot("6-review")
 
-        // 4. A note with a picture in it.
-        tab("Notes")
-        let paint = app.staticTexts["Paint colours for the hall"].firstMatch
-        appears(paint, "the notes")
-        paint.tap()
-        appears(labelled(app.buttons, containing: "hall-swatches"), "the picture in the note")
-        sleep(3)
-        shot("4-note")
-
-        // 5. Totals.
-        tab("Totals")
+        // 7. Totals, which are inside Receipts.
+        app.navigationBars.buttons.firstMatch.tap()
+        let totals = app.segmentedControls.buttons["Totals"]
+        appears(totals, "Totals, beside the two lists of receipts")
+        totals.tap()
         appears(app.staticTexts["Not yet reimbursed"], "the totals")
         sleep(1)
-        shot("5-totals")
-
-        // 6. Searching notes, and the text read from their files.
-        tab("Notes")
-        app.navigationBars.buttons.firstMatch.tap()
-        let search = app.searchFields.firstMatch
-        appears(search, "the search field")
-        search.tap()
-        search.typeText("October\n")
-        appears(app.staticTexts["Letter from the school"].firstMatch, "the notes found")
-        sleep(2)
-        shot("6-search")
+        shot("7-totals")
     }
 }

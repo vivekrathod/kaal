@@ -105,6 +105,9 @@ extension KaalAPI {
             "status": status, "inbox": inbox ? "true" : "", "trash": trash ? "true" : "", "q": q, "sort": sort, "limit": String(limit),
         ])
     }
+    /// Whether the open vault holds any medical receipt (`any`; one in the Trash counts) and how
+    /// many wait to be checked (`to_review`). A Kaal from before it could say answers 404.
+    func receiptsSummary() async throws -> JSON { try await result("GET", "/v1/medical/summary") }
     func receipt(_ id: String) async throws -> JSON { try await result("GET", "/v1/medical/receipts/\(pathPart(id))") }
     /// `title` is what to call the receipt; without one Kaal names it after its file.
     func captureReceipt(_ file: Upload, title: String = "") async throws -> JSON {

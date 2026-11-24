@@ -236,6 +236,11 @@ extension View {
         #endif
     }
 
+    /// The same field, on a screen that has a view with nothing to search in it.
+    @ViewBuilder func searching(_ text: Binding<String>, prompt: String, shown: Bool) -> some View {
+        if shown { searching(text, prompt: prompt) } else { self }
+    }
+
     func inlineTitle() -> some View {
         #if os(iOS)
         return navigationBarTitleDisplayMode(.inline)

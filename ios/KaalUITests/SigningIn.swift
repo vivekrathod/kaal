@@ -105,9 +105,14 @@ class SigningInTestCase: XCTestCase {
                 secret.typeText(password)
                 page.buttons["Sign in"].tap()
                 // Signed in, or told the password was wrong, with any offer to keep it turned down.
+                // Allow seen once is enough: an offer that slides over the page a moment later
+                // hides it again, and is dealt with below.
                 let deadline = Date().addingTimeInterval(11)
-                while Date() < deadline, declinePasswordOffer(in: app) || !allow.exists { usleep(300_000) }
-                if allow.exists || attempt == 3 { break }
+                var signedIn = false
+                while Date() < deadline, !signedIn {
+                    if !declinePasswordOffer(in: app), allow.exists { signedIn = true } else { usleep(300_000) }
+                }
+                if signedIn || attempt == 3 || !secret.waitForExistence(timeout: 3) { break }
                 // A simulator that has only just started can drop keys: clear the password and type it again.
                 secret.tap()
                 secret.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: password.count + 8))
@@ -117,7 +122,7 @@ class SigningInTestCase: XCTestCase {
         happens("the Allow button appearing, with no offer to keep the password over it", timeout: 1) { clear }
         allow.tap()
         // An offer that comes only now can take the press meant for the button.
-        let tabs = app.tabBars.buttons["Receipts"]
+        let tabs = app.tabBars.buttons["Notes"]
         happens("the app's tabs appearing", timeout: 40) {
             if tabs.exists { return true }
             if declinePasswordOffer(in: app), allow.waitForExistence(timeout: 3) { allow.tap() }

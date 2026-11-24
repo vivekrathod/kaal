@@ -29,7 +29,7 @@ struct KaalApp: App {
                 model.outbox.flush()
                 Task {
                     await model.refresh()
-                    await model.refreshToReview()
+                    await model.refreshReceipts()
                 }
             }
         }

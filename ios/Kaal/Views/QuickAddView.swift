@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The screen the app opens on: take something down in one tap. Everything
-/// added here is kept on the phone first and sent when Kaal can be reached.
+/// Take something down in one tap: a note first, and a medical receipt as one more kind of
+/// thing to add. Everything added here is kept on the phone first and sent when Kaal can be reached.
 struct QuickAddView: View {
     @Environment(AppModel.self) private var model
     @State private var writing: QuickNote.Start?
@@ -10,43 +10,46 @@ struct QuickAddView: View {
     @State private var forReceipt = false
     @State private var pages: PickedFiles?
     @State private var checking: SentReceipt?
-    /// What is left to do on a new Kaal, for its administrator.
-    @State private var setup: JSON = .null
-
-    /// What the list of steps depends on: who is signed in, to which vault, and what has been sent since.
-    private struct SetupAsked: Equatable {
-        var admin: Bool
-        var vault: String
-        var sent: Int
-    }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if SetupSteps.isShown(setup) { SetupListCard(list: $setup) }
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
                         tile("Write a note", "square.and.pencil") { writing = .typing }
                         tile("Speak a note", "mic.fill") { writing = .speaking }
                         tile(Capture.canScan ? "Scan a note" : "Photo of a note", "doc.viewfinder") { choose(.scan, receipt: false) }
-                        tile(Capture.canScan ? "Scan a receipt" : "Photo of a receipt", "doc.text.viewfinder") { choose(.scan, receipt: true) }
-                    }
-                    HStack(spacing: 12) {
                         Menu {
                             Button { choose(.photos, receipt: false) } label: { Label("Choose from Photos", systemImage: "photo.on.rectangle") }
                             Button { choose(.files, receipt: false) } label: { Label("Choose a file", systemImage: "folder") }
                         } label: {
-                            Label("Files as a note", systemImage: "paperclip").frame(maxWidth: .infinity)
+                            tileFace("Files or photos as a note", "paperclip")
                         }
-                        Menu {
-                            Button { choose(.photos, receipt: true) } label: { Label("Choose from Photos", systemImage: "photo.on.rectangle") }
-                            Button { choose(.files, receipt: true) } label: { Label("Choose a file", systemImage: "folder") }
-                        } label: {
-                            Label("Receipt from a file", systemImage: "tray.and.arrow.down").frame(maxWidth: .infinity)
-                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.accentColor)
                     }
-                    .buttonStyle(.bordered)
-                    .font(.subheadline)
+
+                    // One more kind of thing a vault can hold, after the notes.
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Medical receipt").font(.headline)
+                        Text("Kaal reads what was paid, when and to whom, and you check what it found.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            if Capture.canScan {
+                                Button { choose(.scan, receipt: true) } label: { receiptWay("Scan", "doc.text.viewfinder") }
+                                    .accessibilityLabel("Scan a receipt")
+                            }
+                            Button { choose(.photos, receipt: true) } label: { receiptWay("Photo", "photo.on.rectangle") }
+                                .accessibilityLabel("Receipt from a photo")
+                            Button { choose(.files, receipt: true) } label: { receiptWay("File", "folder") }
+                                .accessibilityLabel("Receipt from a file")
+                        }
+                        .buttonStyle(.bordered)
+                        .font(.subheadline)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 16))
 
                     outbox
                 }
@@ -54,7 +57,6 @@ struct QuickAddView: View {
             }
             .navigationTitle("Add")
             .namesTheVault()
-            .task(id: SetupAsked(admin: model.isAdmin, vault: model.vault.id.text, sent: model.outbox.sentCount)) { await loadSetup() }
             .captures($source) { files in
                 if !forReceipt {
                     pages = PickedFiles(files: files)
@@ -73,33 +75,30 @@ struct QuickAddView: View {
         }
     }
 
-    /// Asked again whenever this screen comes back, since most steps are taken somewhere else.
-    /// The list is a help, not a duty: a Kaal that has none, or cannot be reached, shows none.
-    private func loadSetup() async {
-        guard model.isAdmin, let api = model.api else {
-            setup = .null
-            return
-        }
-        if let told = try? await api.setupList() { setup = told }
-    }
-
     private func choose(_ wanted: CaptureSource, receipt: Bool) {
         forReceipt = receipt
         source = wanted
     }
 
     private func tile(_ title: String, _ symbol: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 10) {
-                Image(systemName: symbol).font(.system(size: 30))
-                Text(title).font(.headline).multilineTextAlignment(.center)
-            }
-            .frame(maxWidth: .infinity, minHeight: 110)
-            .padding(8)
-            .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
+        Button(action: action) { tileFace(title, symbol) }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.accentColor)
+    }
+
+    private func tileFace(_ title: String, _ symbol: String) -> some View {
+        VStack(spacing: 10) {
+            Image(systemName: symbol).font(.system(size: 30))
+            Text(title).font(.headline).multilineTextAlignment(.center)
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(Color.accentColor)
+        .frame(maxWidth: .infinity, minHeight: 110)
+        .padding(8)
+        .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// One of the ways to bring a receipt in: short enough for three to share a line.
+    private func receiptWay(_ title: String, _ symbol: String) -> some View {
+        Label(title, systemImage: symbol).lineLimit(1).frame(maxWidth: .infinity)
     }
 
     @ViewBuilder private var outbox: some View {

@@ -263,7 +263,7 @@ struct VaultsView: View {
         if done {
             ImageStore.shared.empty()
             await model.refresh()
-            await model.refreshToReview()
+            await model.refreshReceipts()
             await load()
         }
     }

@@ -20,6 +20,12 @@ final class AppModel {
     private(set) var who: JSON = .null
     /// Why the sign-in screen is showing again, when it is not by choice.
     var notice: String?
+    /// Whether the app has a Receipts tab just now. Kaal is for notes first: the tab is there
+    /// once the open vault holds a medical receipt (one in the Trash counts, so that the Trash
+    /// can be reached), and always on a Kaal from before it could say whether it holds any.
+    private(set) var showsReceipts = false
+    /// Whether this Kaal says how many receipts wait to be checked. One that cannot shows no number.
+    private(set) var countsReceipts = false
     /// How many receipts wait to be checked, for the tab's badge.
     var toReview = 0
     let outbox: Outbox
@@ -27,6 +33,7 @@ final class AppModel {
     private let defaults: UserDefaults
     nonisolated private static let addressKey = "kaal.server"
     nonisolated private static let whoKey = "kaal.who"
+    nonisolated private static let receiptsKey = "kaal.receipts"
     /// The oldest Kaal the app can use: the first that takes an app's session in a header.
     static let neededVersion = [0, 25, 0]
 
@@ -64,6 +71,13 @@ final class AppModel {
         }
         shareSignIn()
         if let kept = defaults.data(forKey: Self.whoKey) { know(JSON.parse(kept)) }
+        // The tabs are as they were left, so that Receipts does not arrive a moment after the others.
+        if let kept = defaults.data(forKey: Self.receiptsKey) {
+            let told = JSON.parse(kept)
+            if told.vault.text == vault.id.text, !told.vault.text.isEmpty {
+                take(told.counted.isTrue ? .told(any: told["any"].isTrue, toReview: told.to_review.int) : .cannotSay)
+            }
+        }
         use(KaalAPI(server: url, session: session))
         await refresh()
     }
@@ -102,6 +116,12 @@ final class AppModel {
 
     /// What is taken down from now on is for the vault that is open, so the outbox is told which that is.
     private func know(_ told: JSON) {
+        if told.vault.id.text != who.vault.id.text {
+            // Nothing is known yet about the receipts of a vault that has only just been opened.
+            showsReceipts = false
+            countsReceipts = false
+            toReview = 0
+        }
         who = told
         outbox.opened(told.vault.id.text.isEmpty ? nil : (told.vault.id.text, told.vault.name.text))
     }
@@ -116,13 +136,61 @@ final class AppModel {
         let told = try await api.chooseVault(id)
         // The pictures kept in memory are the other vault's.
         ImageStore.shared.empty()
+        // Asked before the screens are told of the vault, so that they are made once, with the tabs it has.
+        let receipts = await askAboutReceipts(api)
         if told.vault.id.text == id { remember(told) } else { await refresh() }
-        await refreshToReview()
+        if let receipts, vault.id.text == id { take(receipts) } else { await refreshReceipts() }
     }
 
-    func refreshToReview() async {
-        guard let api, let page = try? await api.receipts(inbox: true, limit: 1) else { return }
-        toReview = page.meta.total.isNull ? page.result.list.count : page.meta.total.int
+    // MARK: Whether there are medical receipts
+
+    /// What Kaal answers when asked about the open vault's receipts.
+    enum ReceiptsAnswer: Equatable {
+        case told(any: Bool, toReview: Int)
+        /// A Kaal from before it could say.
+        case cannotSay
+    }
+
+    /// Ask whether the open vault holds receipts and how many wait. Called after signing in, on
+    /// coming back to the app, and after anything that adds, checks, trashes or restores one.
+    func refreshReceipts() async {
+        guard let api else { return }
+        let asked = vault.id.text
+        // Another vault opened while Kaal was asked: the answer is about the one that was left.
+        guard let answer = await askAboutReceipts(api), asked == vault.id.text else { return }
+        take(answer)
+    }
+
+    /// Nil when Kaal could not be asked just now: what was known stays.
+    private func askAboutReceipts(_ api: KaalAPI) async -> ReceiptsAnswer? {
+        do {
+            let told = try await api.receiptsSummary()
+            return .told(any: told["any"].isTrue, toReview: told.to_review.int)
+        } catch let error as APIError where error.status == 404 {
+            return .cannotSay
+        } catch let error as APIError where error.isSignedOut {
+            expired()
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
+    private func take(_ answer: ReceiptsAnswer) {
+        var kept: [String: Any] = ["vault": vault.id.text]
+        switch answer {
+        case .told(let any, let waiting):
+            showsReceipts = any
+            countsReceipts = true
+            toReview = waiting
+            kept.merge(["counted": true, "any": any, "to_review": waiting] as [String: Any]) { _, new in new }
+        case .cannotSay:
+            showsReceipts = true
+            countsReceipts = false
+            toReview = 0
+            kept["counted"] = false
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: kept) { defaults.set(data, forKey: Self.receiptsKey) }
     }
 
     /// Sign in to the Kaal at `typed`: the person signs in on its own page, in a browser sheet, and allows the app.
@@ -183,10 +251,13 @@ final class AppModel {
         Keychain.remove(Keychain.session)
         Keychain.remove(Keychain.server)
         defaults.removeObject(forKey: Self.whoKey)
+        defaults.removeObject(forKey: Self.receiptsKey)
         api = nil
         outbox.api = nil
         who = .null
         outbox.opened(nil)
+        showsReceipts = false
+        countsReceipts = false
         toReview = 0
         ImageStore.shared.empty()
         phase = .signedOut
@@ -206,6 +277,7 @@ final class AppModel {
         Keychain.remove(Keychain.server)
         UserDefaults.standard.removeObject(forKey: addressKey)
         UserDefaults.standard.removeObject(forKey: whoKey)
+        UserDefaults.standard.removeObject(forKey: receiptsKey)
         let outbox = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Outbox", isDirectory: true)
         try? FileManager.default.removeItem(at: outbox)
     }

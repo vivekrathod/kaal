@@ -84,7 +84,7 @@ analytics.
 2. iOS asks whether "Kaal" may use the address to sign in. Tap Continue. The
    server's own sign-in page opens in Apple's sign-in sheet.
 3. Type the sign-in name and password above, tap Sign in, then tap Allow to
-   let the app in. The sheet closes and the app opens on the Add screen.
+   let the app in. The sheet closes and the app opens on its Notes screen.
 
 The sign-in sheet shares Safari's cookies, as Apple's sheet does by default.
 If you sign in a second time (after "Sign out of this app", say), the sheet
@@ -124,16 +124,19 @@ next reviewer signs in with. (If it is deleted, we make it again.)
 - **Dictation:** Add → Speak a note. iOS asks for the microphone and for
   speech recognition; allow both and speak. The words appear as you talk.
   Where the iPhone recognises speech by itself, the audio never leaves it.
-- **Camera:** Add → Scan a receipt (or Scan a note). iOS asks for the camera.
-  Point it at any printed page; the scanner finds the edges, and the page is
-  sent to the server as a receipt (or a note). Photos and files can be added
-  the same way with "Receipt from a file" and "Files as a note"; those use
-  Apple's pickers and need no permission.
-- **Receipts:** the Receipts tab lists receipts waiting to be checked. Open
-  one to see each value beside a picture of the receipt, then tap "Looks
-  right". Reviewed receipts can be marked reimbursed.
-- **Totals:** what was paid per person and per year, and what is still to
-  claim.
+- **Camera:** Add → Scan a note (or Scan, under "Medical receipt"). iOS asks
+  for the camera. Point it at any printed page; the scanner finds the edges,
+  and the page is sent to the server as a note (or a receipt). Photos and
+  files can be added the same way with "Files or photos as a note" and with
+  Photo and File under "Medical receipt"; those use Apple's pickers and need
+  no permission.
+- **Receipts:** the Receipts tab lists medical receipts waiting to be
+  checked. (The tab is there because the demo vault holds receipts; a vault
+  with none shows only Add, Notes and Settings until one is added.) Open one
+  to see each value beside a picture of the receipt, then tap "Looks right".
+  Reviewed receipts can be marked reimbursed.
+- **Totals:** in Receipts, choose Totals: what was paid per person and per
+  year, and what is still to claim.
 - **Notes:** search for `boiler` or `radiators`; the search also finds words
   in the PDFs attached to notes. Open "Made-up garden plan" to see a note with
   a picture in it, and "Made-up house notes" for one with a PDF.

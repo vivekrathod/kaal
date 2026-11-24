@@ -154,7 +154,7 @@ final class ScenarioTests: XCTestCase {
 
         // A browser that signed in more than ten minutes ago is asked for the password again
         // before it may let an app in, since what the app is given outlasts the browser's sign-in.
-        let tabs = app.tabBars.buttons["Receipts"]
+        let tabs = app.tabBars.buttons["Notes"]
         let again = page.secureTextFields["Your password"]
         // An offer to remember the password that comes only now can take the press meant for the button.
         let answered = Date().addingTimeInterval(30)
@@ -174,12 +174,17 @@ final class ScenarioTests: XCTestCase {
         }
 
         appears(tabs, "the app's tabs", timeout: 30)
-        shot("04-add")
+        // Kaal is for notes first: that is where the app opens.
+        appears(app.navigationBars["Notes"], "the Notes screen, which the app opens on")
+        XCTAssertTrue(tabs.isSelected)
+        XCTAssertEqual(app.tabBars.buttons.allElementsBoundByIndex.prefix(2).map(\.label), ["Add", "Notes"])
+        shot("04-notes")
     }
 
     func test01ThenTheAdministratorSeesWhatIsLeftToSetUp() throws {
         launch()
-        appears(labelled(app.buttons, containing: "Write a note"), "the Add screen")
+        // The list is at the top of Notes, the screen the app opens on.
+        appears(app.navigationBars["Notes"], "the Notes screen")
         let heading = app.staticTexts["Finish setting up"]
         try XCTSkipIf(!heading.waitForExistence(timeout: 15), "No list of steps: the person signed in is not an administrator, or this Kaal's steps are done or were put away.")
         shot("04a-setup-list")
@@ -193,14 +198,16 @@ final class ScenarioTests: XCTestCase {
         // A Kaal that already holds notes has no step left that is not optional, and the list goes.
         // Where one is left, the list is put away, so the screens after this are as they always were.
         let hide = app.buttons["Hide this list"]
-        if heading.exists, hide.exists { hide.tap() }
+        // Given a moment first: a list that is on its way out cannot be pressed.
+        if !heading.waitForNonExistence(timeout: 5), hide.exists { hide.tap() }
         happens("the list going away") { !heading.exists }
-        appears(labelled(app.buttons, containing: "Write a note"), "the Add screen without the list")
-        shot("04b-add-after-setup")
+        appears(app.staticTexts["Boiler and radiators"].firstMatch, "the notes, without the list above them", timeout: 30)
+        shot("04b-notes-after-setup")
     }
 
     func test02ANoteWrittenInOneGoReachesKaal() {
         launch()
+        tab("Add")
         let write = labelled(app.buttons, containing: "Write a note")
         appears(write, "Write a note")
         write.tap()
@@ -383,7 +390,11 @@ final class ScenarioTests: XCTestCase {
 
     func test05TotalsAndSettings() throws {
         launch()
-        tab("Totals")
+        // Totals are one of the three views of a vault's receipts.
+        tab("Receipts")
+        let totals = app.segmentedControls.buttons["Totals"]
+        appears(totals, "Totals, beside the two lists of receipts", timeout: 30)
+        totals.tap()
         appears(app.staticTexts["Not yet reimbursed"], "the totals", timeout: 30)
         appears(app.staticTexts["Total paid"], "Total paid")
         shot("18-totals")
@@ -463,6 +474,7 @@ final class ScenarioTests: XCTestCase {
 
     func test07APictureBecomesANoteAndItsFilesOpen() {
         launch()
+        tab("Add")
         // The simulator has no camera, so the scan button offers the photo library.
         let scan = labelled(app.buttons, containing: "of a note")
         appears(scan, "the scan-a-note button")
@@ -527,6 +539,7 @@ final class ScenarioTests: XCTestCase {
 
     func test08SpeakingANoteStartsListeningOrSaysWhyNot() {
         launch()
+        tab("Add")
         let speak = labelled(app.buttons, containing: "Speak a note")
         appears(speak, "Speak a note")
         speak.tap()
@@ -606,36 +619,47 @@ final class ScenarioTests: XCTestCase {
     }
 
     /// Someone with two vaults sees which is open on the main screens, and opens the other from there.
-    /// The second vault is made here, and stays on the server afterwards with one made-up note in it.
-    func test09bAnotherVaultIsOpenedFromTheMainScreens() {
+    /// A vault with no medical receipts has no Receipts tab until one is saved in it.
+    /// The second vault is made here, and stays on the server afterwards with a made-up note and
+    /// one of the simulator's sample photos, saved as a receipt, in it.
+    func test09bAnotherVaultStartsWithoutReceiptsAndIsOpenedFromTheMainScreens() {
         launch()
         let menu = app.buttons["vault-menu"]
+        let notes = app.tabBars.buttons["Notes"]
+        let receipts = app.tabBars.buttons["Receipts"]
         /// A vault in the open menu, which says under each what the person is there.
         func choice(_ vault: String) -> XCUIElement {
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS 'You are'", vault)).firstMatch
         }
+        /// Another vault opens on its notes, as the app does.
         func open(_ vault: String) {
             appears(menu, "the open vault's name in the bar")
             menu.tap()
             appears(choice(vault), "\(vault) in the menu")
             choice(vault).tap()
             happens("the bar naming \(vault)", timeout: 30) { menu.exists && menu.label == "Vault: \(vault)" }
+            XCTAssertTrue(notes.isSelected, "opening another vault should land on its notes")
         }
 
-        tab("Notes")
+        appears(notes, "the app's tabs", timeout: 30)
+        XCTAssertTrue(notes.isSelected, "the app should open on Notes")
         let boiler = app.staticTexts["Boiler and radiators"].firstMatch
         appears(boiler, "the first vault's notes", timeout: 30)
+        appears(receipts, "the Receipts tab of a vault that holds receipts", timeout: 30)
 
         // What the vault that is open now is called, from Settings.
         tab("Settings")
-        let line = labelled(app.staticTexts, containing: ". Your role there: ")
-        reach(line, "the open vault, in Settings")
-        let first = String(line.label.dropFirst("Vault: ".count)).components(separatedBy: ". Your role there: ")[0]
-
-        // Make a second vault, with a name of its own. Making one opens it.
-        let second = "Made-up vault \(Int(Date().timeIntervalSince1970) % 100_000)"
+        // Settings fills in once Kaal has answered; swiping before that would overshoot.
+        appears(app.staticTexts["Family"], "Settings", timeout: 30)
         let sharing = app.staticTexts["Vaults and sharing"]
         reach(sharing, "Vaults and sharing")
+        let line = labelled(app.staticTexts, containing: ". Your role there: ")
+        appears(line, "the open vault, in Settings")
+        let first = String(line.label.dropFirst("Vault: ".count)).components(separatedBy: ". Your role there: ")[0]
+
+        // Make a second vault, with a name of its own. Making one opens it, and someone who
+        // does that in Settings is left there, to share it.
+        let second = "Made-up vault \(Int(Date().timeIntervalSince1970) % 100_000)"
         sharing.tap()
         let name = app.textFields["For example: Household"]
         appears(name, "the new vault's name", timeout: 30)
@@ -644,11 +668,18 @@ final class ScenarioTests: XCTestCase {
         app.buttons["Create"].tap()
         appears(labelled(app.staticTexts, containing: "Who shares “\(second)”"), "the new vault, open", timeout: 30)
 
-        // The lists are the new vault's, and the bar says which vault that is.
-        tab("Notes")
+        // A vault with no medical receipts: Add, Notes and Settings, and nothing about receipts.
+        happens("the Receipts tab going, in a vault with no receipts") { !receipts.exists }
+        XCTAssertEqual(app.tabBars.buttons.allElementsBoundByIndex.map(\.label), ["Add", "Notes", "Settings"])
+        // Opened again, the app is on that vault's notes, and still has no Receipts tab.
+        launch()
+        appears(notes, "the app's tabs, opened again", timeout: 30)
+        XCTAssertTrue(notes.isSelected, "the app should open on Notes")
         happens("the bar naming the new vault", timeout: 30) { menu.exists && menu.label == "Vault: \(second)" }
-        appears(app.staticTexts["No notes yet."], "the new vault's empty list", timeout: 30)
+        appears(labelled(app.staticTexts, containing: "No notes yet."), "the new vault's empty list", timeout: 30)
         XCTAssertFalse(boiler.exists, "the first vault's notes should not show in the second")
+        XCTAssertEqual(app.tabBars.buttons.allElementsBoundByIndex.map(\.label), ["Add", "Notes", "Settings"])
+        shot("31-a-vault-with-no-receipts")
 
         // A note written here says where it is saved, and is saved there.
         app.buttons["New note"].tap()
@@ -661,37 +692,52 @@ final class ScenarioTests: XCTestCase {
         appears(words, "the note's text")
         words.tap()
         words.typeText("Kept apart from the first vault.")
-        shot("31-note-for-the-second-vault")
         app.buttons["Save"].tap()
         let mine = app.staticTexts["Made-up note in the second vault"].firstMatch
         appears(mine, "the note in the second vault's list", timeout: 30)
 
+        // The first medical receipt, added from Add, brings the Receipts tab, with one to check on it.
+        tab("Add")
+        let photo = app.buttons["Receipt from a photo"]
+        appears(photo, "adding a medical receipt, after the notes")
+        shot("32-add-in-a-vault-with-no-receipts")
+        photo.tap()
+        pickAPhoto()
+        appears(receipts, "the Receipts tab, once the vault holds a receipt", timeout: 90)
+        happens("the Receipts tab saying one waits to be checked", timeout: 30) { "\(receipts.value ?? "")".contains("1") }
+        XCTAssertEqual(app.tabBars.buttons.allElementsBoundByIndex.map(\.label), ["Add", "Notes", "Receipts", "Settings"])
+        shot("33-the-first-receipt")
+
+        // Totals are inside Receipts, beside its two lists.
+        receipts.tap()
+        happens("Receipts naming the open vault") { menu.exists && menu.label == "Vault: \(second)" }
+        let totals = app.segmentedControls.buttons["Totals"]
+        appears(totals, "Totals, beside the two lists of receipts", timeout: 30)
+        totals.tap()
+        appears(app.staticTexts["Total paid"], "the second vault's totals", timeout: 30)
+        shot("34-totals-inside-receipts")
+
         // Open the first vault from the bar: its notes, and not the other's.
         menu.tap()
         appears(choice(first), "\(first) in the menu")
-        shot("32-vault-menu")
+        shot("35-vault-menu")
         choice(first).tap()
         appears(boiler, "the first vault's notes again", timeout: 30)
         XCTAssertEqual(menu.label, "Vault: \(first)")
+        XCTAssertTrue(notes.isSelected, "opening another vault should land on its notes")
         XCTAssertFalse(mine.exists, "the second vault's note should not show in the first")
-        shot("33-first-vault-again")
+        shot("36-first-vault-again")
 
         // The other main screens name the vault too, and each can open the other.
-        for screen in ["Add", "Receipts", "Totals"] {
+        for screen in ["Receipts", "Add"] {
             tab(screen)
             happens("\(screen) naming the open vault") { menu.exists && menu.label == "Vault: \(first)" }
         }
-        appears(app.staticTexts["Total paid"], "the first vault's totals", timeout: 30)
         open(second)
-        appears(app.staticTexts["No receipts in this period."], "the second vault's totals, which has no receipts", timeout: 30)
-        shot("34-second-vault-totals")
-        tab("Notes")
         appears(mine, "the second vault's note", timeout: 30)
 
         // Back to the first, which is what the tests after this one expect to find open.
-        tab("Receipts")
         open(first)
-        tab("Notes")
         appears(boiler, "the first vault's notes, at the end", timeout: 30)
     }
 

@@ -74,7 +74,7 @@ struct VaultSharing: Equatable {
 enum SetupSteps {
     static let titles: [String: String] = [
         "key": "Keep a copy of the key",
-        "first": "Add your first receipt or note",
+        "first": "Add your first note or receipt",
         "chrome": "Get Kaal for Chrome",
         "invite": "Invite someone",
         "google": "Let people sign in with Google",

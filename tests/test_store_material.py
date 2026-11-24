@@ -87,7 +87,7 @@ def test_the_web_store_text_fits_and_matches_the_manifest():
 
 def test_the_screenshots_are_the_sizes_each_store_takes_without_transparency():
     iphone = sorted((APP_STORE / "screenshots").glob("*.png"))
-    assert [path.name for path in iphone] == ["1-add.png", "2-receipts.png", "3-review.png", "4-note.png", "5-totals.png", "6-search.png"]
+    assert [path.name for path in iphone] == ["1-notes.png", "2-note.png", "3-search.png", "4-add.png", "5-receipts.png", "6-review.png", "7-totals.png"]
     chrome = sorted(WEB_STORE.glob("*.png"))
     assert len(chrome) == 6
     for path in iphone + chrome:

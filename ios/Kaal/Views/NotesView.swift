@@ -10,6 +10,15 @@ struct NotesView: View {
     @State private var searching = false
     @State private var status = Status()
     @State private var writing = false
+    /// What is left to do on a new Kaal, for its administrator.
+    @State private var setup: JSON = .null
+    @State private var setupPlace: SetupPlace?
+
+    /// What the list of steps depends on: who is signed in and what has been sent since.
+    private struct SetupAsked: Equatable {
+        var admin: Bool
+        var sent: Int
+    }
 
     private struct Asked: Equatable {
         var trash: Bool
@@ -21,6 +30,9 @@ struct NotesView: View {
 
     var body: some View {
         List {
+            if SetupSteps.isShown(setup) {
+                Section { SetupListCard(list: $setup) { setupPlace = $0 }.listRowBackground(Color.clear).listRowInsets(EdgeInsets()) }
+            }
             Section {
                 Picker("List", selection: $trash) {
                     Text("Notes").tag(false)
@@ -34,7 +46,10 @@ struct NotesView: View {
             }
             Section {
                 if loaded, rows.isEmpty {
-                    Text(!query.isEmpty ? "Nothing matches that search." : trash ? "The Trash is empty." : "No notes yet.").foregroundStyle(.secondary)
+                    Text(!query.isEmpty ? "Nothing matches that search." : trash ? "The Trash is empty."
+                         : model.mayWrite ? "No notes yet. Write one with the pencil above, or use Add to speak one, scan a page or bring in files and photos."
+                         : "No notes yet.")
+                        .foregroundStyle(.secondary)
                 }
                 ForEach(rows, id: \.id.text) { note in
                     NavigationLink(value: note.id.text) { row(note) }
@@ -50,6 +65,7 @@ struct NotesView: View {
         .navigationTitle("Notes")
         .namesTheVault()
         .navigationDestination(for: String.self) { NoteView(id: $0) }
+        .navigationDestination(item: $setupPlace) { SetupListCard.screen($0) }
         .searching($query, prompt: "Notes and their files")
         .toolbar {
             if !trash, model.mayWrite {
@@ -60,11 +76,22 @@ struct NotesView: View {
         }
         .sheet(isPresented: $writing) { NavigationStack { NoteEditor(id: nil) { _ in Task { await load(reset: true) } } } }
         .refreshable { await load(reset: true) }
+        // Asked again whenever this screen comes back, since most steps are taken somewhere else.
+        .task(id: SetupAsked(admin: model.isAdmin, sent: model.outbox.sentCount)) { await loadSetup() }
         .task(id: Asked(trash: trash, query: query, sent: model.outbox.sentCount)) {
             if !query.isEmpty { try? await Task.sleep(for: .milliseconds(250)) }
             guard !Task.isCancelled else { return }
             await load(reset: true)
         }
+    }
+
+    /// The list is a help, not a duty: a Kaal that has none, or cannot be reached, shows none.
+    private func loadSetup() async {
+        guard model.isAdmin, let api = model.api else {
+            setup = .null
+            return
+        }
+        if let told = try? await api.setupList() { setup = told }
     }
 
     private func row(_ note: JSON) -> some View {

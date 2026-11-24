@@ -42,7 +42,7 @@ final class VaultTests: XCTestCase {
         XCTAssertEqual(model.outbox.open?.id, "v1")
 
         StubServer.reset { asked in
-            asked.path == "/v1/session/vault" ? (200, ["result": self.who(open: 1)]) : (200, ["result": [], "meta": ["total": 3]])
+            asked.path == "/v1/session/vault" ? (200, ["result": self.who(open: 1)]) : (200, ["result": ["any": true, "to_review": 3]])
         }
         try await model.open(vault: "v2")
 
@@ -54,7 +54,9 @@ final class VaultTests: XCTestCase {
         XCTAssertFalse(model.mayWrite)
         XCTAssertFalse(model.mayDelete)
         XCTAssertEqual(model.savesTo, "It is saved to “Trip notes”.")
-        // The badge counts the receipts to check in the vault that is open now.
+        // The Receipts tab and its badge are the open vault's: Kaal was asked about its receipts.
+        XCTAssertEqual(asked.last?.path, "/v1/medical/summary")
+        XCTAssertTrue(model.showsReceipts)
         XCTAssertEqual(model.toReview, 3)
         // What is taken down from now on is for this vault.
         XCTAssertEqual(model.outbox.open?.name, "Trip notes")
@@ -79,6 +81,69 @@ final class VaultTests: XCTestCase {
         model.outbox.addNote(title: "Milk", body: "Milk and eggs")
         for _ in 0..<400 where !model.outbox.items.isEmpty { try? await Task.sleep(for: .milliseconds(10)) }
         XCTAssertTrue(model.outbox.items.isEmpty)
+    }
+
+    // MARK: Whether there is a Receipts tab
+
+    func testReceiptsHaveATabOnlyOnceTheVaultHoldsOne() async throws {
+        let model = try signedIn()
+        XCTAssertFalse(model.showsReceipts, "nothing is shown before Kaal has said")
+
+        var held: [String: Any] = ["any": false, "to_review": 0]
+        StubServer.reset { _ in (200, ["result": held]) }
+        await model.refreshReceipts()
+        XCTAssertEqual(StubServer.asked.map { "\($0.method) \($0.path)" }, ["GET /v1/medical/summary"])
+        XCTAssertFalse(model.showsReceipts)
+        XCTAssertEqual(model.toReview, 0)
+
+        // The first receipt is saved: the tab is there, with how many wait on it.
+        held = ["any": true, "to_review": 1]
+        await model.refreshReceipts()
+        XCTAssertTrue(model.showsReceipts)
+        XCTAssertTrue(model.countsReceipts)
+        XCTAssertEqual(model.toReview, 1)
+
+        // It is checked. One in the Trash still counts, so that the Trash can be reached.
+        held = ["any": true, "to_review": 0]
+        await model.refreshReceipts()
+        XCTAssertTrue(model.showsReceipts)
+        XCTAssertEqual(model.toReview, 0)
+
+        // With no connection, what was known stays.
+        StubServer.reset { _ in nil }
+        await model.refreshReceipts()
+        XCTAssertTrue(model.showsReceipts)
+    }
+
+    func testAKaalFromBeforeItCouldSayAlwaysHasTheTabAndNoNumberOnIt() async throws {
+        let model = try signedIn()
+        StubServer.reset { _ in (404, ["error": "Not Found", "kind": "not_found"]) }
+        await model.refreshReceipts()
+        XCTAssertTrue(model.showsReceipts)
+        XCTAssertFalse(model.countsReceipts)
+        XCTAssertEqual(model.toReview, 0)
+    }
+
+    func testAnotherVaultIsNotShownTheReceiptsOfTheOneThatWasLeft() async throws {
+        let model = try signedIn()
+        StubServer.reset { _ in (200, ["result": ["any": true, "to_review": 4]]) }
+        await model.refreshReceipts()
+        XCTAssertEqual(model.toReview, 4)
+
+        // The other vault holds none. Kaal says so before the screens are told of the vault.
+        StubServer.reset { asked in
+            asked.path == "/v1/session/vault" ? (200, ["result": self.who(open: 1)]) : (200, ["result": ["any": false, "to_review": 0]])
+        }
+        try await model.open(vault: "v2")
+        XCTAssertFalse(model.showsReceipts)
+        XCTAssertEqual(model.toReview, 0)
+
+        // And where Kaal cannot be asked about the vault just opened, nothing of the old one is left showing.
+        StubServer.reset { asked in asked.path == "/v1/session/vault" ? (200, ["result": self.who(open: 0)]) : nil }
+        try await model.open(vault: "v1")
+        XCTAssertEqual(model.vault.id.text, "v1")
+        XCTAssertFalse(model.showsReceipts)
+        XCTAssertEqual(model.toReview, 0)
     }
 
     func testSomeoneWithOneVaultIsToldNothingAboutWhereThingsAreSaved() throws {

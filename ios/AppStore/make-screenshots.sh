@@ -82,8 +82,12 @@ from PIL import Image
 
 taken, out = Path(sys.argv[1]), Path(sys.argv[2])
 names = sorted(path for path in taken.glob("*.png") if not path.name.startswith("failed-"))
-if len(names) < 6:
+if len(names) < 7:
     sys.exit(f"Only {len(names)} pictures were taken.")
+# Pictures from before the screens changed, under names that are no longer taken.
+for old in out.glob("*.png"):
+    if old.name not in {path.name for path in names}:
+        old.unlink()
 for path in names:
     image = Image.open(path).convert("RGB")
     if image.size != (1320, 2868):

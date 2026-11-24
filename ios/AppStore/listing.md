@@ -73,17 +73,17 @@ TAKE THINGS DOWN QUICKLY
 • Add photos or files as a note, or as a receipt.
 • No connection? What you add waits on the phone and is sent as soon as your Kaal can be reached.
 
-MEDICAL RECEIPTS
-• See at a glance which receipts still need checking.
-• Check each value Kaal read (amount, dates, patient, provider, insurer) beside a picture of the receipt, with the line it was read from.
-• Mark receipts reviewed, and reimbursed when you have claimed them, for example from an HSA or FSA.
-• Totals per person and per year, and how much is still to claim.
-
 NOTES
 • Search titles, tags, the text of every note and the text read from its PDFs and scans.
 • Notes are Markdown, shown formatted, with pictures in place and files you can open and zoom.
 • Edit, add files, move to the Trash and restore.
 • Save to Kaal from the share menu of Photos, Safari, Files and other apps.
+
+MEDICAL RECEIPTS
+• See at a glance which receipts still need checking.
+• Check each value Kaal read (amount, dates, patient, provider, insurer) beside a picture of the receipt, with the line it was read from.
+• Mark receipts reviewed, and reimbursed when you have claimed them, for example from an HSA or FSA.
+• Totals per person and per year, and how much is still to claim.
 
 YOURS, AND PRIVATE
 • Everything is stored on your Kaal server, encrypted. Nothing goes to Kaal's authors: no analytics, no ads, no tracking.
@@ -164,12 +164,13 @@ The 6.9-inch iPhone display size, 1320 x 2868, portrait, in
 [`screenshots/`](screenshots/); App Store Connect scales them down for smaller
 iPhones. They show only made-up data. Upload them in this order:
 
-1. `1-add.png`: the Add screen just after writing a note.
-2. `2-receipts.png`: receipts waiting to be checked.
-3. `3-review.png`: checking a receipt beside a picture of it.
-4. `4-note.png`: a note with a picture in it.
-5. `5-totals.png`: totals, and what is still to claim.
-6. `6-search.png`: searching notes and the text read from their files.
+1. `1-notes.png`: notes, which the app opens on.
+2. `2-note.png`: a note with a picture in it.
+3. `3-search.png`: searching notes and the text read from their files.
+4. `4-add.png`: the Add screen just after writing a note.
+5. `5-receipts.png`: medical receipts waiting to be checked.
+6. `6-review.png`: checking a receipt beside a picture of it.
+7. `7-totals.png`: totals, and what is still to claim.
 
 To take them again after the screens change, run
 `ios/AppStore/make-screenshots.sh` on a Mac with Xcode. It makes a simulator of

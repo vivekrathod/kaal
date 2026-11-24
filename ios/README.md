@@ -2,20 +2,24 @@
 
 A native app for a Kaal server you or someone you know runs. It does what the
 web app does (notes, medical receipts with review and reimbursement, totals,
-Trash and settings) and adds what a phone is good at:
+Trash and settings) and adds what a phone is good at. Kaal is a notes app
+first: the app opens on Notes, and its tabs are Add, Notes and Settings. A
+Receipts tab, with the totals inside it, joins them once the open vault holds
+a medical receipt (an older Kaal cannot say whether it does, so with one the
+tab is always shown).
 
 - **Write a note** in one tap; the first line becomes its title.
 - **Speak a note.** Speech becomes text as you talk. Where the iPhone can
   recognise speech by itself, the audio never leaves it.
-- **Scan a note or a receipt** with the camera's page scanner, which finds the
-  edges of the paper and takes several pages in one go. A receipt of several
-  pages is sent as one PDF.
+- **Scan a note** with the camera's page scanner, which finds the edges of
+  the paper and takes several pages in one go. A medical receipt is added the
+  same way, from the same screen; one of several pages is sent as one PDF.
 - **Works without a connection.** What you add from the Add screen is kept on
   the phone and sent when Kaal can be reached. It is left out of backups of
   the phone, and removed once Kaal has it.
 - **More than one vault.** If you have several, the bar at the top of Add,
-  Receipts, Notes and Totals names the one that is open; press it to open
-  another. What you add goes to the vault that was open when you added it:
+  Notes and Receipts names the one that is open; press it to open another,
+  which opens on its notes. What you add goes to the vault that was open when you added it:
   something still waiting on the phone when you open another vault waits
   until its own vault is open again, or can be saved in the open one instead.
   "Save to Kaal" in other apps says which vault it saves to, which is the one
@@ -100,7 +104,8 @@ ios/install-on-iphone.sh
 The unit tests cover the API client, signing in, where the sign-in is kept,
 the offline queue, capture, the Markdown reader, who can be let into a vault
 or invited, opening another vault and where what waits on the phone is sent
-then, the list of what is left to set up, and what "Save to Kaal" makes
+then, when there is a Receipts tab, the list of what is left to set up, and
+what "Save to Kaal" makes
 of what another app shares (what each thing is taken to be, titles, the note's
 text, the receipt's PDF, and the requests it sends):
 
@@ -114,8 +119,9 @@ page, the administrator's list of what is left to set up, writing, editing and
 trashing a note, a note's Markdown and files, checking a receipt and marking
 it reimbursed, totals, every Settings page, inviting someone new into the
 vault and letting them back in from the list of people, adding a receipt and
-a note from a photo, dictation, making a second vault and opening each from
-the main screens, and signing out. It needs
+a note from a photo, dictation, making a second vault (which has no Receipts
+tab until a receipt is added to it) and opening each from the main screens,
+and signing out. It needs
 a Kaal that holds only made-up data (never a real vault), with a person who
 has a password and the notes and receipts `bin/demo-data.py` puts in (the
 tests open "Boiler and radiators" and check a receipt of $64.50):
@@ -133,7 +139,8 @@ password. Its account is an administrator, so the tests go through the People
 and Sign-in services pages too, say that a copy of the key is kept (which puts
 the list of steps away on that Kaal), and invite a made-up person, whose
 account stays on that Kaal afterwards, as does the second vault they make,
-with one made-up note in it.
+with a made-up note and one of the simulator's sample photos, saved as a
+receipt, in it.
 
 They also save from other apps (`ShareScenarioTests.swift`): a web page shared
 from Safari becomes a note, two of the simulator's sample photos shared from

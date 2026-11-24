@@ -257,7 +257,7 @@ struct ReceiptView: View {
             if !reviewed { try await api.reviewReceipt(id) }
         }
         if done {
-            await model.refreshToReview()
+            await model.refreshReceipts()
             dismiss()
         }
     }
@@ -272,7 +272,7 @@ struct ReceiptView: View {
         guard let api = model.api else { return }
         let done = await status.run(model) { try await work(api) }
         if done {
-            await model.refreshToReview()
+            await model.refreshReceipts()
             await watch()
         }
     }

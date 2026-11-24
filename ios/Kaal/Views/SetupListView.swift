@@ -1,13 +1,16 @@
 import SwiftUI
 
-/// What is left to do on a new Kaal, shown to its administrator at the top of the first screen
-/// until the steps that matter are done or the list is put away. Kaal decides both.
+/// What is left to do on a new Kaal, shown to its administrator at the top of Notes, the screen
+/// the app opens on, until the steps that matter are done or the list is put away. Kaal decides both.
 ///
-/// One step's instructions are open at a time, so the list stays short above the buttons the
+/// One step's instructions are open at a time, so the list stays short above the notes the
 /// screen is for.
 struct SetupListCard: View {
     @Environment(AppModel.self) private var model
     @Binding var list: JSON
+    /// Go to the screen a step is taken on. The card is a row of a list, where a link would
+    /// make the whole row one, so the screen it is on does the going.
+    var go: (SetupPlace) -> Void
     /// The step whose instructions are showing.
     @State private var open: String?
 
@@ -17,7 +20,7 @@ struct SetupListCard: View {
             ForEach(SetupSteps.steps(list), id: \.id.text) { step in
                 row(step)
             }
-            AsyncButton("Hide this list") { await change { try await $0.changeSetupList(hidden: true) } }.font(.footnote)
+            AsyncButton("Hide this list") { await change { try await $0.changeSetupList(hidden: true) } }.font(.footnote).buttonStyle(.borderless)
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -60,21 +63,29 @@ struct SetupListCard: View {
             Text("Then move that file somewhere off the server: a password manager, an encrypted drive, or paper in a safe. Never keep it beside a backup.").foregroundStyle(.secondary)
             AsyncButton("I have a copy somewhere else") { await change { try await $0.changeSetupList(keySaved: true) } }.buttonStyle(.bordered)
         case "first":
-            Text("Use the buttons below for a photo or a PDF of a receipt, or to write a note.").foregroundStyle(.secondary)
+            Text("Write a note with the pencil above. Add has the rest: speak a note, scan a page, bring in files or photos, or add a medical receipt.").foregroundStyle(.secondary)
         case "chrome":
             Text("Saves the page in front of you, or a receipt, in one click. In Chrome on a computer, add it from the Chrome Web Store, open its settings, enter this address and connect with your Kaal sign-in:").foregroundStyle(.secondary)
             command(list.address.text.isEmpty ? model.serverAddress : list.address.text)
             if let store = URL(string: SetupSteps.chromeStore) {
-                ShareLink(item: store) { Label("Send its Chrome Web Store page to a computer", systemImage: "square.and.arrow.up") }
+                ShareLink(item: store) { Label("Send its Chrome Web Store page to a computer", systemImage: "square.and.arrow.up") }.buttonStyle(.borderless)
             }
         case "invite":
             Text("Family can share this vault, each with a private vault of their own beside it. Invite someone and send them the link.").foregroundStyle(.secondary)
-            NavigationLink("Invite someone") { VaultsView() }.buttonStyle(.bordered)
+            Button("Invite someone") { go(.sharing) }.buttonStyle(.bordered)
         case "google":
             Text("Needs a client ID from Google's cloud console. Sign-in services says how.").foregroundStyle(.secondary)
-            NavigationLink("Sign-in services") { SignInServicesView() }.buttonStyle(.bordered)
+            Button("Sign-in services") { go(.signInServices) }.buttonStyle(.bordered)
         default:
             EmptyView()
+        }
+    }
+
+    /// The screen a step is taken on.
+    @ViewBuilder static func screen(_ place: SetupPlace) -> some View {
+        switch place {
+        case .sharing: VaultsView()
+        case .signInServices: SignInServicesView()
         }
     }
 
@@ -94,3 +105,6 @@ struct SetupListCard: View {
         }
     }
 }
+
+/// Where a step of the list is taken.
+enum SetupPlace: Hashable { case sharing, signInServices }

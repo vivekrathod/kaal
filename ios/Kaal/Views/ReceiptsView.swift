@@ -41,7 +41,11 @@ struct ReceiptRow: View {
 
 struct ReceiptsView: View {
     @Environment(AppModel.self) private var model
-    @State private var reviewed = false
+    /// Which of the three views of a vault's receipts is showing.
+    enum Showing: Hashable { case toReview, reviewed, totals }
+
+    @State private var showing = Showing.toReview
+    @State private var totals = Totals()
     @State private var query = ""
     @State private var rows: [JSON] = []
     @State private var counts: (review: Int?, reviewed: Int?) = (nil, nil)
@@ -51,18 +55,22 @@ struct ReceiptsView: View {
     @State private var opened: String?
     @State private var saving = false
 
+    private var reviewed: Bool { showing == .reviewed }
+
     private struct Asked: Equatable {
-        var reviewed: Bool
+        var showing: Showing
         var query: String
+        var year: String
         var sent: Int
     }
 
     var body: some View {
         List {
             Section {
-                Picker("List", selection: $reviewed) {
-                    Text("To review\(counts.review.map { " \($0)" } ?? "")").tag(false)
-                    Text("Reviewed\(counts.reviewed.map { " \($0)" } ?? "")").tag(true)
+                Picker("Show", selection: $showing) {
+                    Text("To review\(counts.review.map { " \($0)" } ?? "")").tag(Showing.toReview)
+                    Text("Reviewed\(counts.reviewed.map { " \($0)" } ?? "")").tag(Showing.reviewed)
+                    Text("Totals").tag(Showing.totals)
                 }
                 .pickerStyle(.segmented)
                 .listRowBackground(Color.clear)
@@ -70,14 +78,19 @@ struct ReceiptsView: View {
                 StatusLine(status: status).listRowBackground(Color.clear).listRowInsets(EdgeInsets())
                 if saving { Notice(text: "Saving the receipt…").listRowBackground(Color.clear).listRowInsets(EdgeInsets()) }
             }
-            Section {
-                if loaded, rows.isEmpty {
-                    Text(!query.isEmpty ? "Nothing matches that search." : reviewed ? "Reviewed receipts appear here."
-                         : "Add your first receipt: a PDF from a provider's site, or a photo of a paper one.")
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(rows, id: \.id.text) { note in
-                    NavigationLink(value: note.id.text) { ReceiptRow(note: note) }
+            if showing == .totals {
+                TotalsSections(totals: totals)
+            } else {
+                Section {
+                    if loaded, rows.isEmpty {
+                        Text(!query.isEmpty ? "Nothing matches that search." : reviewed ? "Reviewed receipts appear here."
+                             : model.countsReceipts ? "Nothing is waiting to be checked."
+                             : "No medical receipts yet. Add one with the plus above: a PDF from a provider's site, or a photo of a paper one.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(rows, id: \.id.text) { note in
+                        NavigationLink(value: note.id.text) { ReceiptRow(note: note) }
+                    }
                 }
             }
         }
@@ -85,7 +98,8 @@ struct ReceiptsView: View {
         .namesTheVault()
         .navigationDestination(for: String.self) { ReceiptView(id: $0) }
         .navigationDestination(item: $opened) { ReceiptView(id: $0) }
-        .searching($query, prompt: "Provider, person or title")
+        // Totals are of every receipt: there is nothing there to search.
+        .searching($query, prompt: "Provider, person or title", shown: showing != .totals)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
@@ -99,8 +113,12 @@ struct ReceiptsView: View {
             }
         }
         .captures($source) { files in Task { await add(files) } }
-        .refreshable { await load() }
-        .task(id: Asked(reviewed: reviewed, query: query, sent: model.outbox.sentCount)) {
+        .refreshable { if showing == .totals { await totals.load(model) } else { await load() } }
+        .task(id: Asked(showing: showing, query: query, year: totals.year, sent: model.outbox.sentCount)) {
+            if showing == .totals {
+                await totals.load(model)
+                return
+            }
             if !query.isEmpty { try? await Task.sleep(for: .milliseconds(250)) }
             // Keep watching while anything is still being read in the background.
             while !Task.isCancelled {
@@ -124,7 +142,7 @@ struct ReceiptsView: View {
             let total = page.meta.total.isNull ? rows.count : page.meta.total.int
             let otherTotal: Int? = rest.meta.total.isNull ? nil : rest.meta.total.int
             counts = reviewed ? (otherTotal, total) : (total, otherTotal)
-            if !reviewed, query.isEmpty { model.toReview = total }
+            if !reviewed, query.isEmpty, model.countsReceipts { model.toReview = total }
             loaded = true
         }
     }
@@ -137,7 +155,7 @@ struct ReceiptsView: View {
         status.clear()
         do {
             opened = try await api.captureReceipt(receipt).id.text
-            await model.refreshToReview()
+            await model.refreshReceipts()
         } catch let error as APIError where error.isOffline {
             model.outbox.addReceipt(receipt)
             status.say("Kaal can't be reached, so the receipt is kept on this phone and will be sent later.", .warn)
@@ -198,6 +216,10 @@ struct ReceiptTrashView: View {
     private func act(_ work: @escaping (KaalAPI) async throws -> Void) async {
         guard let api = model.api else { return }
         let done = await status.run(model, forbidden: "You aren't allowed to delete permanently in this vault.") { try await work(api) }
-        if done { await load() }
+        if done {
+            await load()
+            // The last receipt deleted for good takes the Receipts tab with it.
+            await model.refreshReceipts()
+        }
     }
 }
