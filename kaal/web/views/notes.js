@@ -199,6 +199,14 @@ export function notesView(container, params, { expired, go, session }) {
     open(menu.hidden);
     if (!menu.hidden) menu.querySelector("button").focus();
   });
+  // Up and down move between the choices, as in any menu.
+  menu.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    const choices = [...menu.querySelectorAll("button")];
+    const at = choices.indexOf(document.activeElement);
+    choices[(at + (event.key === "ArrowDown" ? 1 : choices.length - 1)) % choices.length].focus();
+  });
   const outside = (event) => { if (!menu.hidden && !adding.contains(event.target)) open(false); };
   const escape = (event) => { if (event.key === "Escape" && !menu.hidden) { open(false); opener.focus(); } };
   const adding = h("div", { class: "fab add" }, menu, h("a", { href: "#/notes/new", class: "button primary add-main" }, "New note"), opener);

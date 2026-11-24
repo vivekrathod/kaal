@@ -37,6 +37,14 @@ out.first = { hash: await page.run("location.hash"), tabs: await tabs(), empty: 
 // The arrow beside New note: files first, a medical receipt last.
 await page.click(".add-more");
 out.menu = await page.run("({ open: !document.getElementById('add-menu').hidden, choices: [...document.querySelectorAll('#add-menu [role=menuitem] strong')].map((c) => c.textContent) })");
+// Down moves from the first choice to the second, and round again; Escape closes it.
+out.arrows = await page.run(`(() => {
+  const menu = document.getElementById("add-menu");
+  const at = () => document.activeElement.querySelector("strong").textContent;
+  const seen = [at()];
+  for (const key of ["ArrowDown", "ArrowDown", "ArrowUp"]) { menu.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true })); seen.push(at()); }
+  return seen;
+})()`);
 await page.run("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); 1");
 out.menuClosed = await page.run("document.getElementById('add-menu').hidden");
 

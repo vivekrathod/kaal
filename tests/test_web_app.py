@@ -203,7 +203,7 @@ def test_the_notes_screen_adds_a_note_in_one_press_and_the_rest_from_a_menu():
     assert "await api.capture(file);" in adding and "go(`receipt/${encodeURIComponent(captured.id)}`)" in adding
     assert 'handedOver = chosen;' in adding and 'go("notes/new");' in adding
     # The menu can be used from the keyboard and says what it is.
-    assert '"aria-haspopup": "menu"' in adding and 'role: "menuitem"' in adding and 'event.key === "Escape"' in adding
+    assert '"aria-haspopup": "menu"' in adding and 'role: "menuitem"' in adding and 'event.key === "Escape"' in adding and '"ArrowDown"' in adding
     assert "trash || !mayWrite ? null" in adding, "nothing to add is offered to someone who may only read"
     settings = (WEB / "views" / "settings.js").read_text()
     drawn = settings[settings.index("const forReceipts ="):settings.index("  replace(container, h(\"p\", { class: \"empty\" }, \"Loading…\"));")]

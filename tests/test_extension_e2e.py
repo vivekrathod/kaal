@@ -414,6 +414,7 @@ def test_the_web_app_opens_on_notes_and_shows_receipts_once_there_is_one(stage, 
     assert out["first"]["hash"] in ("", "#/notes") and out["first"]["tabs"] == ["Notes*", "Settings"]
     assert out["first"]["empty"].startswith("No notes yet") and out["first"]["button"] == "New note"
     assert out["menu"] == {"open": True, "choices": ["Files as a note", "Medical receipt"]} and out["menuClosed"] is True
+    assert out["arrows"] == ["Files as a note", "Medical receipt", "Files as a note", "Medical receipt"]
     # Files chosen there become one note, named after the first, each placed in its text.
     assert out["editor"] == {"title": "Made-up lease", "lines": 2}
     assert out["afterNote"] == {"rows": ["Made-up lease"], "files": "2 files", "tabs": ["Notes*", "Settings"]}
