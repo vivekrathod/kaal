@@ -100,7 +100,7 @@ async function refreshReceipts() {
 function tabs(active) {
   const known = receiptsKnown();
   const tab = (name, label, path, extra = null) => h("a", { href: `#/${path}`, class: `tab${active === name ? " active" : ""}`, "aria-current": active === name ? "page" : null }, label, extra);
-  const waiting = known.waiting ? h("span", { class: "tab-count", title: `${known.waiting} to check` }, String(known.waiting)) : null;
+  const waiting = known.waiting ? h("span", { class: "tab-count", title: `${known.waiting} to check`, "aria-label": `, ${known.waiting} to check` }, String(known.waiting)) : null;
   return h("nav", { class: "tabs", "aria-label": "Sections" },
     tab("notes", "Notes", "notes"),
     // Shown too while one is on a receipts page: a link may lead there before the first receipt is saved.

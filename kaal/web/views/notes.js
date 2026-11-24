@@ -145,9 +145,10 @@ export function notesView(container, params, { expired, go, session, receipts })
         replace(list, query || trash
           ? h("p", { class: "empty" }, query ? "Nothing matches that search." : "The Trash is empty.")
           : h("div", { class: "empty" }, h("p", {}, "No notes yet. A note holds text, and pictures, PDFs or other files beside it."),
-            h("div", { class: "actions centred" },
+            // Someone who may only read is not offered what they cannot do.
+            mayWrite ? h("div", { class: "actions centred" },
               h("a", { href: "#/notes/new", class: "button primary" }, "Write your first note"),
-              mayWrite ? h("label", { for: "add-files", class: "button" }, "Add files") : null)));
+              h("label", { for: "add-files", class: "button" }, "Add files")) : null));
       } else {
         replace(list, shown.map((note) => h("a", { class: "row", href: `#/note/${encodeURIComponent(note.id)}` },
           h("span", { class: "row-main" },

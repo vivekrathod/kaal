@@ -82,8 +82,11 @@ export function inboxView(container, params, { go, expired }) {
       counts[reviewed ? "review" : "reviewed"].textContent = other.meta ? other.meta.total : "";
       status.replaceChildren();
       if (!shown.result.length) {
+        // With every receipt checked there is nothing to do here, which is not the same as having none.
+        const checked = other.meta ? other.meta.total : 0;
         replace(list, query || reviewed
           ? h("p", { class: "empty" }, query ? "Nothing matches that search." : "Reviewed receipts appear here.")
+          : checked ? h("p", { class: "empty" }, "Nothing is waiting to be checked.")
           : h("div", { class: "empty" }, h("p", {}, "No receipts to check. Add one: a PDF from a provider's site, or a photo of a paper receipt. Kaal reads the amount, dates and names for you to check."),
             h("label", { for: "capture", class: "button primary" }, "Add your first receipt")));
       } else {

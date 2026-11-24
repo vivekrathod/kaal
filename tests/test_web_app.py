@@ -227,3 +227,14 @@ def test_someone_looking_among_the_notes_is_shown_the_way_to_the_receipts():
     # An empty vault offers writing first and files second; a receipt is not pushed at a new person.
     empty = notes[notes.index('"No notes yet.'):notes.index("} else {", notes.index('"No notes yet.'))]
     assert empty.index('"Write your first note"') < empty.index('"Add files"') and "receipt" not in empty.lower()
+
+
+def test_small_things_a_person_would_trip_on():
+    inbox = (WEB / "views" / "inbox.js").read_text()
+    # Every receipt checked is said as that, not as an empty vault with a first receipt to add.
+    assert inbox.index('"Nothing is waiting to be checked."') < inbox.index('"Add your first receipt"')
+    assert 'checked ? h("p", { class: "empty" }' in inbox
+    notes = (WEB / "views" / "notes.js").read_text()
+    assert 'mayWrite ? h("div", { class: "actions centred" }' in notes, "someone who may only read is not told to write a first note"
+    # The number beside Receipts is read out as what it counts.
+    assert '"aria-label": `, ${known.waiting} to check`' in (WEB / "app.js").read_text()
