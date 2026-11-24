@@ -42,7 +42,7 @@ export function totalsView(container, params, { expired }) {
 
     replace(container,
       head,
-      h("div", { class: "segments", role: "navigation", "aria-label": "Year" }, yearLink("All years", ""), years.map((value) => yearLink(value, value))),
+      h("div", { class: "segments compact years", role: "navigation", "aria-label": "Year" }, yearLink("All years", ""), years.map((value) => yearLink(value, value))),
       h("div", { class: "stats" },
         stat("Not yet reimbursed", shown.unreimbursed_amount, null, true),
         stat("Reimbursed", shown.reimbursed_amount),

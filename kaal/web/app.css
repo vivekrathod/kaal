@@ -87,6 +87,10 @@ label { font-weight: 600; font-size: 0.92rem; }
 .add-choice:hover, .add-choice:focus-visible { background: var(--bg); }
 .add-choice:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .add-choice .muted-text { font-size: 0.88rem; }
+.also { display: block; width: fit-content; margin: 0 0 10px; font-size: 0.92rem; }
+.actions.centred { justify-content: center; margin-top: 0; }
+.actions.centred .button { flex: 0 0 auto; }
+.segments.years { margin: 0 0 12px; }
 .tab-count { display: inline-block; min-width: 1.4em; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: var(--warn-bg); color: var(--warn-text); font-size: 0.78rem; font-weight: 600; text-align: center; font-variant-numeric: tabular-nums; }
 .group-title { margin: 28px 0 10px; color: var(--muted); font-size: 0.82rem; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; }
 .fab { position: fixed; right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); box-shadow: 0 4px 14px rgb(0 0 0 / 0.22); }

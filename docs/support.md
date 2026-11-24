@@ -83,6 +83,12 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.25.0 or newer.
 - **Adding files without writing anything:** the arrow beside **New note**,
   then "Files as a note". The note opens with the files in it, named after the
   first; save it as it is or write around them.
+- **A search on Notes does not find a receipt:** receipts are searched on
+  their own screen, by provider, person or title. While you search the notes,
+  a link under the search box takes what you typed to Receipts; there, both
+  lists (To review and Reviewed) show how many receipts match.
+- **A trashed receipt is not in the notes' Trash:** receipts have a Trash of
+  their own, linked from the notes' Trash and from the bottom of Receipts.
 - **Family and Provider names are missing from Settings:** they only matter
   to medical receipts, and are shown once the open vault holds one.
 

@@ -48,9 +48,18 @@ export async function countReceipts(counts) {
   counts.reviewed.textContent = reviewed.meta ? reviewed.meta.total : "";
 }
 
+// What to search the receipts for when their screen opens next: handed over by the notes' search,
+// and by this screen to itself, so that moving between its two lists keeps what was typed.
+// Kept here and not in the address, where it would stay in the browser's history.
+let handedSearch = "";
+export function searchReceiptsFor(text) {
+  handedSearch = String(text || "").trim();
+}
+
 export function inboxView(container, params, { go, expired }) {
   const reviewed = params.tab === "reviewed";
-  let query = params.q || "";
+  let query = params.q || handedSearch;
+  handedSearch = "";
   let timer = null;
   let alive = true;
 
@@ -65,7 +74,8 @@ export function inboxView(container, params, { go, expired }) {
     try {
       const [shown, other] = await Promise.all([
         api.receipts({ status: reviewed ? "reviewed" : "", inbox: !reviewed, q: query, sort: reviewed ? "date" : "updated", limit: 200 }),
-        api.receipts({ status: reviewed ? "" : "reviewed", inbox: reviewed, limit: 1 }),
+        // The other list is counted for the same search, so its number says where the matches are.
+        api.receipts({ status: reviewed ? "" : "reviewed", inbox: reviewed, q: query, limit: 1 }),
       ]);
       if (!alive) return;
       counts[reviewed ? "reviewed" : "review"].textContent = shown.meta ? shown.meta.total : shown.result.length;
@@ -109,6 +119,11 @@ export function inboxView(container, params, { go, expired }) {
     }
   });
 
+  // Moving to the other list takes the search along.
+  bar.addEventListener("click", (event) => {
+    const link = event.target.closest("a");
+    if (link && link.getAttribute("href").startsWith("#/receipts")) searchReceiptsFor(query);
+  });
   replace(container,
     h("div", { class: "toolbar" }, bar, search),
     status,

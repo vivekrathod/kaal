@@ -33,6 +33,8 @@ await page.run(`document.getElementById('login').value = ${JSON.stringify(login)
 await until(() => page.run("Boolean(document.querySelector('.fab.add'))"), "the first screen");
 await wait(600);   // long enough for Kaal to have answered whether this vault holds receipts
 out.first = { hash: await page.run("location.hash"), tabs: await tabs(), empty: await page.run("document.querySelector('.empty p').textContent"), button: await page.run("document.querySelector('.add-main').textContent") };
+out.firstSteps = await page.run("[...document.querySelectorAll('.empty .button')].map((b) => b.textContent)");
+out.noWayYet = await page.run("!document.querySelector('.also')");
 
 // The arrow beside New note: files first, a medical receipt last.
 await page.click(".add-more");
@@ -76,6 +78,26 @@ out.totals = { tabs: await tabs(), views: await page.run("[...document.querySele
 await page.run("location.hash = ''; 1");
 await until(() => page.run("document.querySelectorAll('.list .row').length === 1"), "the notes again");
 out.home = { tabs: await tabs(), rows: await page.run("[...document.querySelectorAll('.list .row .row-title')].map((r) => r.textContent)") };
+
+// Searching the notes finds no receipt, but shows the way to them, and takes the words along.
+const type = (text) => page.run(`(() => { const box = document.querySelector("input[type=search]"); box.value = ${JSON.stringify(text)}; box.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
+await type("up receipt");
+await until(() => page.run("Boolean(document.querySelector('.also'))"), "the way to the receipts");
+await until(() => page.run("Boolean(document.querySelector('.list .empty'))"), "the search among the notes to finish");
+out.search = { offer: await page.run("document.querySelector('.also').textContent"), notesFound: await page.run("document.querySelectorAll('.list .row').length") };
+await page.click(".also");
+await at("#/receipts");
+await until(() => page.run("document.querySelectorAll('.list .row').length === 1"), "the receipt that matches");
+out.search.arrived = { hash: await page.run("location.hash"), box: await page.run("document.querySelector('input[type=search]').value") };
+// The other list keeps the search, and its count is for the search too.
+await page.run("document.querySelector('.segments a[href=\"#/receipts?tab=reviewed\"]').click(); 1");
+await at("#/receipts?tab=reviewed");
+await until(() => page.run("document.querySelector('.segments .count').textContent !== ''"), "the counts");
+out.search.otherList = { box: await page.run("document.querySelector('input[type=search]').value"), views: await page.run("[...document.querySelector('.segments').children].map((s) => s.textContent.trim())") };
+// The notes' Trash says where a trashed receipt would be.
+await page.run("location.hash = '#/notes?trash=1'; 1");
+await until(() => page.run("Boolean(document.querySelector('.also'))"), "the way to the receipts' Trash");
+out.trash = await page.run("document.querySelector('.also').textContent + ' ' + document.querySelector('.also').getAttribute('href')");
 
 // Settings: one's own account first, then what only receipts need.
 await page.run("location.hash = '#/settings'; 1");

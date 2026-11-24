@@ -8,7 +8,7 @@ longer does), and Node 22 or later. Run it with
 
 and point KAAL_E2E_BROWSER at the browser if it is not found by itself.
 Everything it touches is throwaway: a vault in a temp folder, a token made for
-the run, a made-up receipt page, and a fresh browser profile.
+the run, a up receipteipt page, and a fresh browser profile.
 """
 import base64
 import functools
@@ -45,7 +45,7 @@ RECEIPT_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Lakesi
 <table><tr><td>Patient:</td><td>Jane Example</td></tr><tr><td>Date of Service:</td><td>10/02/2026</td></tr>
 <tr><td>Payment Date:</td><td>10/05/2026</td></tr><tr><td>Insurance:</td><td>Acme Dental Plan</td></tr>
 <tr><td>Amount paid:</td><td>$64.50</td></tr><tr><td>Paid by:</td><td>Visa ending 1234</td></tr></table>
-<p>Thank you for your payment. This is a made-up receipt for testing.</p></body></html>"""
+<p>Thank you for your payment. This is a up receipteipt for testing.</p></body></html>"""
 
 # A made-up statement that is wider than paper and has a print stylesheet of the usual kind: it
 # hides part of the page, shows something else instead, and spells out every link's address.
@@ -423,6 +423,12 @@ def test_the_web_app_opens_on_notes_and_shows_receipts_once_there_is_one(stage, 
     assert out["totals"] == {"tabs": ["Notes", "Receipts1*", "Settings"], "views": ["To review 1", "Reviewed 0", "Totals*"], "paid": "$85.00"}
     # The receipt is not a note, and the notes are still home.
     assert out["home"] == {"tabs": ["Notes*", "Receipts1", "Settings"], "rows": ["Made-up lease"]}
+    assert out["firstSteps"] == ["Write your first note", "Add files"] and out["noWayYet"] is True
+    # A search among the notes does not find a receipt, but leads to it, with what was typed.
+    assert out["search"]["offer"] == "Search your medical receipts for “up receipt” ›" and out["search"]["notesFound"] == 0
+    assert out["search"]["arrived"] == {"hash": "#/receipts", "box": "up receipt"}, "the words are handed over, not put in the address"
+    assert out["search"]["otherList"] == {"box": "up receipt", "views": ["To review 1", "Reviewed 0", "Totals"]}
+    assert out["trash"] == "Medical receipts have a Trash of their own › #/trash"
     assert out["settings"][0] == "Your account" and out["settings"][-3:] == ["# Medical receipts", "Family", "Provider names"]
     assert out["reopened"][:2] == ["Notes", "Receipts1"] or out["reopened"][:2] == ["Notes", "Receipts"]
 

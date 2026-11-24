@@ -1,6 +1,7 @@
 import { api, noteFileUrl, noteViewUrl, notePreviewUrl } from "/web/api.js";
 import { h, replace, notice, actionButton, twoStepButton, fromTree } from "/web/ui.js";
 import { renderMarkdown } from "/web/markdown.js";
+import { searchReceiptsFor } from "/web/views/inbox.js";
 
 const PAGE = 50;
 
@@ -95,9 +96,20 @@ const withoutEnding = (name) => String(name || "").replace(/\.[a-z0-9]{1,8}$/i, 
 const reference = (file, fileId) => `${isPicture(file) ? "!" : ""}[${(file.name || "file").replace(/[\[\]]/g, "")}](attachment:${fileId})`;
 const tagList = (text) => [...new Set(text.split(",").map((tag) => tag.trim().replace(/^#/, "")).filter(Boolean))];
 
-export function notesView(container, params, { expired, go, session }) {
+export function notesView(container, params, { expired, go, session, receipts }) {
   const trash = params.trash === "1";
   const mayWrite = ((session || {}).scopes || ["write"]).includes("write");
+  // Receipts are not notes, and are neither searched nor trashed with them. Where the vault holds
+  // receipts, someone searching here, or looking through the Trash, is shown the way to theirs.
+  let hasReceipts = false;
+  const also = h("div", {});
+  const drawAlso = () => {
+    if (!hasReceipts || (!trash && !query)) return also.replaceChildren();
+    replace(also, trash
+      ? h("a", { class: "also", href: "#/trash" }, "Medical receipts have a Trash of their own ›")
+      : h("a", { class: "also", href: "#/receipts", onClick: () => searchReceiptsFor(query) }, `Search your medical receipts for “${query}” ›`));
+  };
+  if (receipts) receipts().then((known) => { hasReceipts = Boolean(known && known.any); if (alive) drawAlso(); }, () => {});
   let query = params.q || "";
   let shown = [];
   let total = 0;
@@ -133,7 +145,9 @@ export function notesView(container, params, { expired, go, session }) {
         replace(list, query || trash
           ? h("p", { class: "empty" }, query ? "Nothing matches that search." : "The Trash is empty.")
           : h("div", { class: "empty" }, h("p", {}, "No notes yet. A note holds text, and pictures, PDFs or other files beside it."),
-            h("a", { href: "#/notes/new", class: "button primary" }, "Write your first note")));
+            h("div", { class: "actions centred" },
+              h("a", { href: "#/notes/new", class: "button primary" }, "Write your first note"),
+              mayWrite ? h("label", { for: "add-files", class: "button" }, "Add files") : null)));
       } else {
         replace(list, shown.map((note) => h("a", { class: "row", href: `#/note/${encodeURIComponent(note.id)}` },
           h("span", { class: "row-main" },
@@ -156,6 +170,7 @@ export function notesView(container, params, { expired, go, session }) {
 
   search.addEventListener("input", () => {
     query = search.value.trim();
+    drawAlso();
     clearTimeout(timer);
     timer = setTimeout(() => load(true), 250);
   });
@@ -219,7 +234,7 @@ export function notesView(container, params, { expired, go, session }) {
         h("a", { href: "#/notes", class: `segment${trash ? "" : " active"}` }, "Notes"),
         h("a", { href: "#/notes?trash=1", class: `segment${trash ? " active" : ""}` }, "Trash")),
       search),
-    status, list, more,
+    status, also, list, more,
     trash || !mayWrite ? null : [filesPicker, receiptPicker, adding]);
   load(true);
   return () => {

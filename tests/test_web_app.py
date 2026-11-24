@@ -209,3 +209,21 @@ def test_the_notes_screen_adds_a_note_in_one_press_and_the_rest_from_a_menu():
     drawn = settings[settings.index("const forReceipts ="):settings.index("  replace(container, h(\"p\", { class: \"empty\" }, \"Loading…\"));")]
     assert drawn.index("accountSection(account") < drawn.rindex("forReceipts"), "one's own account comes before what only receipts need"
     assert '"Medical receipts"' in drawn and "!hasReceipts ? []" in drawn
+
+
+def test_someone_looking_among_the_notes_is_shown_the_way_to_the_receipts():
+    notes = (WEB / "views" / "notes.js").read_text()
+    way = notes[notes.index("const drawAlso = () => {"):notes.index("  if (receipts) receipts().then(")]
+    # Only where the vault holds receipts, and only while searching or in the Trash.
+    assert "if (!hasReceipts || (!trash && !query)) return also.replaceChildren();" in way
+    assert 'href: "#/trash" }, "Medical receipts have a Trash of their own ›"' in way
+    # What was typed is handed over in the page, never put in the address.
+    assert 'href: "#/receipts", onClick: () => searchReceiptsFor(query) }' in way and "receipts?q=" not in notes
+    inbox = (WEB / "views" / "inbox.js").read_text()
+    assert "let query = params.q || handedSearch;" in inbox and 'handedSearch = "";' in inbox
+    # Moving between the two lists keeps the search, and the other list is counted for it too.
+    assert 'link.getAttribute("href").startsWith("#/receipts")) searchReceiptsFor(query);' in inbox
+    assert 'inbox: reviewed, q: query, limit: 1 })' in inbox
+    # An empty vault offers writing first and files second; a receipt is not pushed at a new person.
+    empty = notes[notes.index('"No notes yet.'):notes.index("} else {", notes.index('"No notes yet.'))]
+    assert empty.index('"Write your first note"') < empty.index('"Add files"') and "receipt" not in empty.lower()
