@@ -390,6 +390,7 @@ def test_someone_with_several_vaults_chooses_where_a_save_goes(stage, tmp_path):
     assert (out["firstSave"]["here"], out["firstSave"]["there"], out["firstSave"]["unnamed"]) == (200, 404, 200)
     assert out["secondSave"]["stage"] == "saved" and out["secondSave"]["text"] == "Saved to Kaal, in “Made-up household”."
     assert (out["secondSave"]["here"], out["secondSave"]["there"]) == (200, 404)
+    assert out["notesLink"], "the popup opens the notes of the vault it saves into"
     assert out["linkNamesTheVault"] is True and out["remembered"] is True
     # Kaal's web app shows which vault is open. A link into another vault changes nothing by itself:
     # the person is told where the note is, and opens that vault with a button.
@@ -417,8 +418,8 @@ def test_the_web_app_opens_on_notes_and_shows_receipts_once_there_is_one(stage, 
     # Notes are the first screen, and a vault without receipts shows no receipts section at all.
     assert out["first"]["hash"] in ("", "#/notes") and out["first"]["tabs"] == ["Notes*", "Settings"]
     assert out["first"]["empty"].startswith("No notes yet") and out["first"]["button"] == "New note"
-    assert out["menu"] == {"open": True, "choices": ["Files as a note", "Notes from Google Keep", "Medical receipt"]} and out["menuClosed"] is True
-    assert out["arrows"] == ["Files as a note", "Notes from Google Keep", "Medical receipt", "Notes from Google Keep"]
+    assert out["menu"] == {"open": True, "choices": ["Files as a note", "Medical receipt"]} and out["menuClosed"] is True
+    assert out["arrows"] == ["Files as a note", "Medical receipt", "Files as a note", "Medical receipt"]
     # Files chosen there become one note, named after the first, each placed in its text.
     assert out["editor"] == {"title": "Made-up lease", "lines": 2}
     assert out["afterNote"] == {"rows": ["Made-up lease"], "files": "2 files", "tabs": ["Notes*", "Settings"]}
@@ -427,15 +428,15 @@ def test_the_web_app_opens_on_notes_and_shows_receipts_once_there_is_one(stage, 
     assert out["afterReceipt"]["tabs"] == ["Notes", "Receipts1*", "Settings"]
     assert out["totals"] == {"tabs": ["Notes", "Receipts1*", "Settings"], "views": ["To review 1", "Reviewed 0", "Totals*"], "paid": "$85.00"}
     # The receipt is not a note, and the notes are still home.
-    assert out["home"] == {"tabs": ["Notes*", "Receipts1", "Settings"], "rows": ["Made-up lease", "Made-up Keep note"]}
+    assert out["home"] == {"tabs": ["Notes*", "Receipts1", "Settings"], "rows": ["Made-up lease"]}
     assert out["firstSteps"] == ["Write your first note", "Add files"] and out["noWayYet"] is True
     # A search among the notes does not find a receipt, but leads to it, with what was typed.
     assert out["search"]["offer"] == "Search your medical receipts for “up receipt” ›" and out["search"]["notesFound"] == 0
     assert out["search"]["arrived"] == {"hash": "#/receipts", "box": "up receipt"}, "the words are handed over, not put in the address"
     assert out["search"]["otherList"] == {"box": "up receipt", "views": ["To review 1", "Reviewed 0", "Totals"]}
     assert out["trash"] == "Medical receipts have a Trash of their own › #/trash"
-    assert out["settings"][0] == "Your account" and out["settings"][-3:] == ["# Medical receipts", "Family", "Provider names"]
-    assert out["reopened"][:2] == ["Notes", "Receipts1"] or out["reopened"][:2] == ["Notes", "Receipts"]
+    assert out["settings"][0] == "Your account" and out["settings"][-4:] == ["Import notes", "# Medical receipts", "Family", "Provider names"]
+    assert out["reopened"][:2] in (["Notes*", "Receipts1"], ["Notes*", "Receipts"])
 
 
 def test_a_pdf_opened_from_this_computer_is_saved_as_the_file_it_is(stage, tmp_path):

@@ -52,6 +52,7 @@ const tabId = await sw.run("chrome.tabs.query({}).then(tabs => Math.max(...tabs.
 const popup = await browser.newTab(`${EXT}/popup.html?tab=${tabId}&url=${encodeURIComponent(`${SITE}/wide.html`)}&title=${encodeURIComponent("Made-up statement")}`);
 await until(() => popup.page.run("!document.getElementById('primary').hidden && !document.getElementById('where').hidden"), "the popup and its vault choice");
 out.where = await popup.page.run("({ label: document.querySelector('#where label').textContent, options: [...document.querySelectorAll('#vault option')].map((o) => o.textContent + (o.disabled ? ' [off]' : '') + (o.selected ? ' [chosen]' : '')) })");
+out.notesLink = (await popup.page.run("(() => { const a = document.getElementById('open-notes'); return a.hidden ? '' : a.href; })()")) === `${KAAL}/#/notes?vault=${first.id}`;
 const saved = (vault) => until(() => sw.run(`chrome.storage.session.get("tab:${tabId}").then(s => { const v = s["tab:${tabId}"]; return v && v.stage !== "saving" && v.vault === ${JSON.stringify(vault)} ? v : null; })`), "the save", 60000);
 const said = () => until(() => popup.page.run("(() => { const n = document.querySelector('#status .notice'); return n && n.textContent.startsWith('Saved') ? { text: n.textContent, link: document.querySelector('#status a').href } : null; })()"), "the popup's answer");
 

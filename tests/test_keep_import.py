@@ -1,6 +1,7 @@
 """Importing Google Keep notes from a Google Takeout .zip, by the API and the command line."""
 import io
 import json
+import os
 import zipfile
 from types import SimpleNamespace
 
@@ -44,7 +45,7 @@ def service(tmp_path):
     saved = kaal.VAULT
     kaal.configure_vault(tmp_path / "vault")
     kaal.call_captured(kaal.init_vault, SimpleNamespace())
-    settings = server.Settings(home=tmp_path, vault=kaal.VAULT, tokens_file=tmp_path / "tokens.json", tmp_dir=tmp_path / "tmp", max_upload_bytes=8 * 1024 * 1024, rate_per_minute=1000)
+    settings = server.Settings(home=tmp_path, vault=kaal.VAULT, tokens_file=tmp_path / "tokens.json", tmp_dir=tmp_path / "tmp", max_upload_bytes=16 * 1024 * 1024, rate_per_minute=1000)
     store = tokens.TokenStore(settings.tokens_file)
     secrets = {name: store.create(name, scopes)[1] for name, scopes in {"full": ["read", "reveal", "write", "delete"], "reader": ["read"]}.items()}
     client = TestClient(server.create_app(settings))
@@ -122,3 +123,15 @@ def test_the_command_line_reads_an_unpacked_folder(service, tmp_path):
     result, _ = kaal.call_captured(kaal.import_keep, SimpleNamespace(path=str(tmp_path / "unpacked"), dry_run=False, tags="from-keep"))
     assert result["notes"] == 1
     assert "from-keep" in service.notes()["Folder note"]["tags"]
+
+
+def test_an_export_larger_than_an_ordinary_request_is_accepted(service):
+    # Real exports run to tens of MiB, more than the 8 MiB any route but an upload accepts.
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr("Takeout/Keep/Big.json", json.dumps({"title": "Big", "textContent": "x", "createdTimestampUsec": MADE,
+                                                               "attachments": [{"filePath": "big.png", "mimetype": "image/png"}]}))
+        archive.writestr("Takeout/Keep/big.png", PICTURE + os.urandom(9 * 1024 * 1024))
+    response = service.post(out.getvalue())
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["files"] == 1

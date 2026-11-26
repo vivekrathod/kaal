@@ -319,8 +319,8 @@ Files you attach are uploaded, and exports are written on your machine.
 `KAAL_LOCAL=1` forces local mode. The Chrome extension talks to the server
 itself, with a token of its own entered on its settings page.
 
-**Notes from Google Keep.** `kaal import-keep takeout.zip` (or "Notes from
-Google Keep" under the arrow beside New note) reads the .zip Google Takeout
+**Notes from Google Keep.** `kaal import-keep takeout.zip` (or Settings →
+Import notes in the web app) reads the .zip Google Takeout
 gives for Keep: text, checklists, labels as tags, pictures and the original
 dates. Notes already imported are skipped, so a later export can be imported
 on top; `--dry-run` only counts.

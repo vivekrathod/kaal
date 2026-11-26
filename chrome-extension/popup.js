@@ -100,6 +100,9 @@ function showWhere(server, { vault = "", vaults = [], home = "", elsewhere = 0 }
 }
 
 function showWaiting(server, vault, count) {
+  const notes = document.getElementById("open-notes");
+  notes.href = inKaal(server, "notes", vault);
+  notes.hidden = false;
   waiting.hidden = !count;
   if (!count) return;
   waiting.textContent = `${count} receipt${count === 1 ? "" : "s"} to check ›`;

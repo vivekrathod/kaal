@@ -553,7 +553,7 @@ class ExtensionCorsMiddleware:
         await self.app(scope, receive, named_send)
 
 
-UPLOAD_ROUTE = re.compile(r"/v1/(?:captures|medical/receipts|notes/[^/]+/attachments|library/notes/[^/]+/attachments)")
+UPLOAD_ROUTE = re.compile(r"/v1/(?:captures|medical/receipts|notes/[^/]+/attachments|library/notes/[^/]+/attachments|library/import/keep)")
 ONCE_ONLY = (b"content-type", b"content-length", b"authorization", b"transfer-encoding", b"x-kaal-session", b"x-kaal-vault")
 BODY_IDLE_SECONDS = 60.0
 

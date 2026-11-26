@@ -1,6 +1,7 @@
 /* On top of web/app.css, which is the web app's own stylesheet. */
 body.popup { width: 320px; padding: 14px; }
 body.popup h1 { font-size: 1.05rem; margin: 0; }
+.popup-links { display: flex; gap: 6px; }
 .popup-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
 .popup .button.primary { width: 100%; }
 .popup .link { padding: 8px 0 0; text-decoration: underline; color: var(--accent); }

@@ -62,19 +62,6 @@ await page.run("location.hash = '#/notes'; 1");
 await until(() => page.run("document.querySelectorAll('.list .row').length === 1"), "the note in the list");
 out.afterNote = { rows: await page.run("[...document.querySelectorAll('.list .row .row-title')].map((r) => r.textContent)"), files: await page.run("document.querySelector('.list .row .chip').textContent"), tabs: await tabs() };
 
-// Notes from Google Keep: the Takeout .zip, from the same menu, lands in the list with a word on what came in.
-await page.run(`(() => {
-  const input = document.getElementById("add-keep");
-  const bytes = Uint8Array.from(atob(${JSON.stringify(process.env.E2E_KEEP_ZIP)}), (c) => c.charCodeAt(0));
-  const data = new DataTransfer();
-  data.items.add(new File([bytes], "takeout.zip", { type: "application/zip" }));
-  input.files = data.files;
-  input.dispatchEvent(new Event("change", { bubbles: true }));
-  return 1;
-})()`);
-await until(() => page.run("(document.querySelector('.notice') || {}).textContent?.startsWith('Imported') || false"), "the Keep import");
-out.keep = { said: await page.run("document.querySelector('.notice').textContent"), rows: await page.run("[...document.querySelectorAll('.list .row .row-title')].map((r) => r.textContent).sort()") };
-
 // A medical receipt, added from the same menu, is a receipt: it opens to be checked, and its section appears.
 await give("add-receipt", [["Made-up receipt.txt", "text/plain", "LAKESIDE DENTAL GROUP\nPAYMENT RECEIPT\nPatient: Jane Example\nDate of Service: 10/02/2026\nAmount paid: $85.00\n"]]);
 await at("#/receipt/");
@@ -89,7 +76,7 @@ out.totals = { tabs: await tabs(), views: await page.run("[...document.querySele
 
 // The notes are still where one lands, and the receipts do not show among them.
 await page.run("location.hash = ''; 1");
-await until(() => page.run("document.querySelectorAll('.list .row').length === 2"), "the notes again");
+await until(() => page.run("document.querySelectorAll('.list .row').length === 1"), "the notes again");
 out.home = { tabs: await tabs(), rows: await page.run("[...document.querySelectorAll('.list .row .row-title')].map((r) => r.textContent)") };
 
 // Searching the notes finds no receipt, but shows the way to them, and takes the words along.
@@ -116,6 +103,25 @@ out.trash = await page.run("document.querySelector('.also').textContent + ' ' + 
 await page.run("location.hash = '#/settings'; 1");
 await until(() => page.run("Boolean(document.querySelector('.group-title'))"), "the settings");
 out.settings = await page.run("[...document.querySelectorAll('main h1, main .group-title')].map((n) => (n.className === 'group-title' ? '# ' : '') + n.textContent)");
+
+// Notes from Google Keep: the Takeout .zip, from Settings, lands in the notes with a word on what came in.
+await page.run("location.hash = '#/settings'; 1");
+await until(() => page.run("Boolean(document.getElementById('import-keep'))"), "the import in Settings");
+await page.run(`(() => {
+  const input = document.getElementById("import-keep");
+  const bytes = Uint8Array.from(atob(${JSON.stringify(process.env.E2E_KEEP_ZIP)}), (c) => c.charCodeAt(0));
+  const data = new DataTransfer();
+  data.items.add(new File([bytes], "takeout.zip", { type: "application/zip" }));
+  input.files = data.files;
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  return 1;
+})()`);
+await until(() => page.run("(document.querySelector('.notice') || {}).textContent?.startsWith('Imported') || false"), "the Keep import");
+out.keep = { said: await page.run("document.querySelector('.notice').textContent") };
+await page.click("main section p a[href='#/notes']");
+await until(() => page.run("document.querySelectorAll('.list .row').length === 2"), "the imported note");
+out.keep.rows = await page.run("[...document.querySelectorAll('.list .row .row-title')].map((r) => r.textContent).sort()");
+
 
 // Opened afresh, the section is there from the first paint: this browser remembers the vault has receipts.
 await page.send("Page.reload");

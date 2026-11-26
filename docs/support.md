@@ -85,8 +85,8 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.25.0 or newer.
   first; save it as it is or write around them.
 - **Bringing notes over from Google Keep:** at takeout.google.com, press
   "Deselect all", tick only Keep and create the export. Download the .zip
-  Google emails you, then in Kaal press the arrow beside **New note** and pick
-  "Notes from Google Keep". Text, checklists, labels (as tags), pictures and
+  Google emails you, then in Kaal open **Settings**, find **Import notes** and
+  press "Choose the .zip" beside Google Keep. Text, checklists, labels (as tags), pictures and
   Keep's dates come across; notes in Keep's Trash do not, and archived notes
   get the tag `archived`. Importing the same or a newer export again adds only
   notes that are new. A very large export may be over the server's upload

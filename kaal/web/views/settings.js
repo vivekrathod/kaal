@@ -128,10 +128,46 @@ function accountSection(account, { status, attempt, redraw, signOut }) {
   ];
 }
 
+// Notes brought over from other apps. Each import skips what it brought before, so running it again is safe.
+function importSection(expired) {
+  const status = h("div", { role: "status" });   // said beside the button, which may be far down the page
+  const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+  const picker = h("input", { type: "file", id: "import-keep", accept: ".zip,application/zip", class: "visually-hidden", tabindex: "-1" });
+  picker.addEventListener("change", async () => {
+    const file = picker.files[0];
+    picker.value = "";
+    if (!file) return;
+    replace(status, notice("Importing your Google Keep notes. With many pictures this takes a minute or two…"));
+    try {
+      const done = await api.importKeep(file);
+      const said = [`Imported ${plural(done.notes, "note")} from Google Keep${done.files ? `, with ${plural(done.files, "file")}` : ""}.`];
+      if (done.already_here) said.push(`${plural(done.already_here, "note")} had been imported before and ${done.already_here === 1 ? "was" : "were"} left alone.`);
+      if (done.trashed) said.push(`${plural(done.trashed, "note")} from Keep's Trash ${done.trashed === 1 ? "was" : "were"} skipped.`);
+      if (done.missing_files || done.unreadable) said.push("Some notes or files in the export could not be read.");
+      replace(status, notice(said.join(" ")), h("p", {}, h("a", { href: "#/notes" }, "Open your notes ›")));
+    } catch (error) {
+      if (error.status === 401) return expired();
+      replace(status, notice(error.status === 413 ? "That export is larger than this Kaal accepts. Ask whoever runs it to import it with kaal import-keep." : error.message, "error"));
+    }
+  });
+  return h("section", { class: "card section" },
+    h("h1", {}, "Import notes"),
+    h("p", { class: "muted" }, "Bring notes over from another app. Notes imported before are skipped, so importing again only adds what is new."),
+    h("ul", { class: "plain" },
+      h("li", { class: "line" },
+        h("span", {}, "Google Keep", h("span", { class: "muted-text" }, " · the .zip from Google Takeout, with only Keep chosen")),
+        h("button", { type: "button", class: "button small", onClick: () => picker.click() }, "Choose the .zip")),
+      h("li", { class: "line" },
+        h("span", {}, "Joplin", h("span", { class: "muted-text" }, " · export as RAW in Joplin, then whoever runs this Kaal runs kaal import-joplin-raw on that folder")))),
+    status,
+    picker);
+}
+
 export function settingsView(container, params, { session, signOut, expired, receipts }) {
   let alive = true;
   // What only matters to medical receipts is shown once the vault holds one.
   let hasReceipts = false;
+  const mayWrite = ((session || {}).scopes || ["write"]).includes("write");
   const status = h("div", {});
   // Back from a sign-in service after pressing Connect.
   if (params.connected) status.append(notice("Connected. You can now sign in that way."));
@@ -191,6 +227,7 @@ export function settingsView(container, params, { session, signOut, expired, rec
             h("p", { class: "muted" }, "To sign in with a password instead, ask whoever runs this Kaal for a setup link."),
             h("p", { class: "muted" }, `Kaal ${appVersion() || ""}`),
             h("button", { type: "button", class: "button", onClick: signOut }, "Sign out")),
+      mayWrite ? importSection(expired) : null,
       forReceipts);
   }
 
