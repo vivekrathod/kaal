@@ -130,37 +130,68 @@ function accountSection(account, { status, attempt, redraw, signOut }) {
 
 // Notes brought over from other apps. Each import skips what it brought before, so running it again is safe.
 function importSection(expired) {
-  const status = h("div", { role: "status" });   // said beside the button, which may be far down the page
   const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
-  const picker = h("input", { type: "file", id: "import-keep", accept: ".zip,application/zip", class: "visually-hidden", tabindex: "-1" });
-  picker.addEventListener("change", async () => {
-    const file = picker.files[0];
-    picker.value = "";
-    if (!file) return;
-    replace(status, notice("Importing your Google Keep notes. With many pictures this takes a minute or two…"));
-    try {
-      const done = await api.importKeep(file);
-      const said = [`Imported ${plural(done.notes, "note")} from Google Keep${done.files ? `, with ${plural(done.files, "file")}` : ""}.`];
-      if (done.already_here) said.push(`${plural(done.already_here, "note")} had been imported before and ${done.already_here === 1 ? "was" : "were"} left alone.`);
-      if (done.trashed) said.push(`${plural(done.trashed, "note")} from Keep's Trash ${done.trashed === 1 ? "was" : "were"} skipped.`);
-      if (done.missing_files || done.unreadable) said.push("Some notes or files in the export could not be read.");
-      replace(status, notice(said.join(" ")), h("p", {}, h("a", { href: "#/notes" }, "Open your notes ›")));
-    } catch (error) {
-      if (error.status === 401) return expired();
-      replace(status, notice(error.status === 413 ? "That export is larger than this Kaal accepts. Ask whoever runs it to import it with kaal import-keep." : error.message, "error"));
-    }
-  });
+  const status = h("div", { role: "status" });   // said beside the buttons, which may be far down the page
+  const bar = h("progress", { max: "1", "aria-label": "Import progress", hidden: true });
+  const pickers = [];
+  const busy = (on) => pickers.forEach(({ button }) => { button.disabled = on; });
+
+  const source = (name, about, label, accept, run, summary) => {
+    const picker = h("input", { type: "file", id: `import-${name.toLowerCase().replace(/\W+/g, "-")}`, accept, class: "visually-hidden", tabindex: "-1" });
+    const button = h("button", { type: "button", class: "button small", onClick: () => picker.click() }, label);
+    pickers.push({ picker, button });
+    picker.addEventListener("change", async () => {
+      const file = picker.files[0];
+      picker.value = "";
+      if (!file) return;
+      busy(true);
+      bar.hidden = false;
+      bar.removeAttribute("value");
+      replace(status, notice(`Sending your ${name} export…`));
+      const told = ({ sent, at, total }) => {
+        if (sent !== undefined) {
+          bar.value = sent;
+          replace(status, notice(sent < 1 ? `Sending your ${name} export… ${Math.floor(sent * 100)}%` : `Sent. Kaal is opening the export…`));
+        } else {
+          bar.value = at / total;
+          replace(status, notice(`Importing note ${at} of ${total}…`));
+        }
+      };
+      try {
+        const done = await run(file, told);
+        replace(status, notice(summary(done)), h("p", {}, h("a", { href: "#/notes" }, "Open your notes ›")));
+      } catch (error) {
+        if (error.status === 401) return expired();
+        replace(status, notice(error.status === 413 ? `That export is larger than this Kaal accepts. Ask whoever runs it to import it from the command line.` : error.message, "error"));
+      } finally {
+        busy(false);
+        bar.hidden = true;
+      }
+    });
+    return h("li", { class: "line" }, h("span", {}, name, h("span", { class: "muted-text" }, ` · ${about}`)), button);
+  };
+
+  const keep = (done) => {
+    const said = [`Imported ${plural(done.notes, "note")} from Google Keep${done.files ? `, with ${plural(done.files, "file")}` : ""}.`];
+    if (done.already_here) said.push(`${plural(done.already_here, "note")} had been imported before and ${done.already_here === 1 ? "was" : "were"} left alone.`);
+    if (done.trashed) said.push(`${plural(done.trashed, "note")} from Keep's Trash ${done.trashed === 1 ? "was" : "were"} skipped.`);
+    if (done.missing_files || done.unreadable) said.push("Some notes or files in the export could not be read.");
+    return said.join(" ");
+  };
+  const joplin = (done) => {
+    const said = [`Imported ${plural(done.imported_notes, "note")} from Joplin${done.imported_attachments ? `, with ${plural(done.imported_attachments, "file")}` : ""}.`];
+    if (done.existing_notes) said.push(`${plural(done.existing_notes, "note")} had been imported before and ${done.existing_notes === 1 ? "was" : "were"} left alone.`);
+    if ((done.warnings || []).length || done.unresolved_resources) said.push("Some notes or files in the export could not be read.");
+    return said.join(" ");
+  };
+
   return h("section", { class: "card section" },
     h("h1", {}, "Import notes"),
     h("p", { class: "muted" }, "Bring notes over from another app. Notes imported before are skipped, so importing again only adds what is new."),
     h("ul", { class: "plain" },
-      h("li", { class: "line" },
-        h("span", {}, "Google Keep", h("span", { class: "muted-text" }, " · the .zip from Google Takeout, with only Keep chosen")),
-        h("button", { type: "button", class: "button small", onClick: () => picker.click() }, "Choose the .zip")),
-      h("li", { class: "line" },
-        h("span", {}, "Joplin", h("span", { class: "muted-text" }, " · export as RAW in Joplin, then whoever runs this Kaal runs kaal import-joplin-raw on that folder")))),
-    status,
-    picker);
+      source("Google Keep", "the .zip from Google Takeout, with only Keep chosen", "Choose the .zip", ".zip,application/zip", api.importKeep, keep),
+      source("Joplin", "in Joplin, File › Export all › JEX", "Choose the .jex", ".jex", api.importJoplin, joplin)),
+    bar, status, pickers.map(({ picker }) => picker));
 }
 
 export function settingsView(container, params, { session, signOut, expired, receipts }) {

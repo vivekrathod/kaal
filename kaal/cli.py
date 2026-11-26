@@ -82,8 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-ocr", action="store_true", help="Do not OCR image attachments")
     sp.set_defaults(func=core.ocr_attachments)
 
-    sp = sub.add_parser("import-joplin-raw", help="Import notes and referenced resources from a Joplin RAW export directory")
-    sp.add_argument("path", help="Joplin RAW export directory")
+    sp = sub.add_parser("import-joplin-raw", help="Import notes and referenced resources from a Joplin export: the .jex file, or a RAW export directory")
+    sp.add_argument("path", help="Joplin .jex file or RAW export directory")
     sp.add_argument("--dry-run", action="store_true", help="Scan and report counts without writing to the Kaal vault")
     sp.add_argument("--incremental", "--repair", action="store_true", help="Repair/import only missing Joplin notes and attachments; skip existing imported notes")
     sp.add_argument("--tags", default="", help="Comma-separated extra tags for imported notes")

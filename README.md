@@ -325,6 +325,12 @@ gives for Keep: text, checklists, labels as tags, pictures and the original
 dates. Notes already imported are skipped, so a later export can be imported
 on top; `--dry-run` only counts.
 
+**Notes from Joplin.** `kaal import-joplin-raw export.jex --incremental` (or
+Settings → Import notes in the web app) reads Joplin's JEX export, or a RAW
+export folder: notes, notebooks and tags as tags, and attached files.
+`--incremental` skips notes already imported. Both imports, from the web app,
+show how far they have got as they go.
+
 **Checks and moving data.** `kaal verify [--deep]` compares the index with the
 files on disk and reports ids only. `kaal export --output FILE.tar` writes the
 vault exactly as stored (the key is not included). `kaal import FILE.tar`

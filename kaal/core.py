@@ -197,6 +197,17 @@ class KaalError(SystemExit):
 _RESULT_SINK: ContextVar[list[tuple[Any, dict[str, Any]]] | None] = ContextVar("kaal_result_sink", default=None)
 
 
+# Who to tell how far a long handler has got (an import, note by note). The server
+# passes it on to the web app; on the command line nobody is told.
+_PROGRESS: ContextVar[Callable[[int, int], None] | None] = ContextVar("kaal_progress", default=None)
+
+
+def progress(at: int, total: int) -> None:
+    told = _PROGRESS.get()
+    if told is not None:
+        told(at, total)
+
+
 def capturing() -> bool:
     return _RESULT_SINK.get() is not None
 
@@ -3709,10 +3720,44 @@ def note_has_resource_attachment(note_meta: dict[str, Any], rid: str, blob: Path
     return False
 
 
+JOPLIN_MAX_BYTES = 4 * 1024**3  # what a .jex may unpack to; a larger one is refused before anything is written
+
+
+def unpack_jex(path: Path, workdir: Path) -> Path:
+    """A Joplin .jex export (a tar of the RAW export) unpacked into ``workdir``: regular files only, none outside it."""
+    import tarfile
+
+    try:
+        archive = tarfile.open(path)
+    except (tarfile.TarError, OSError):
+        die("That file is not a .jex export from Joplin.")
+    with archive:
+        members = [m for m in archive.getmembers() if m.isfile()]
+        if sum(m.size for m in members) > JOPLIN_MAX_BYTES:
+            die("That export unpacks to more than 4 GiB. Unpack it and import the folder with kaal import-joplin-raw.")
+        for member in members:
+            parts = PurePosixPath(member.name).parts
+            if not parts or member.name.startswith("/") or any(part in ("", ".", "..") for part in parts):
+                continue
+            dest = workdir.joinpath(*parts)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with archive.extractfile(member) as source, open(dest, "wb") as out:
+                shutil.copyfileobj(source, out)
+    return workdir
+
+
 @holds_vault_lock
 def import_joplin_raw(args: argparse.Namespace) -> None:
+    src = Path(args.path).expanduser().resolve()
+    if src.is_file():
+        with tempfile.TemporaryDirectory(prefix="joplin-", dir=src.parent) as work:
+            import_joplin_folder(args, unpack_jex(src, Path(work)))
+    else:
+        import_joplin_folder(args, src)
+
+
+def import_joplin_folder(args: argparse.Namespace, export_dir: Path) -> None:
     init_if_needed()
-    export_dir = Path(args.path).expanduser().resolve()
     parsed = load_joplin_raw_export(export_dir)
     referenced_count = sum(len(ids) for ids in parsed["referenced"].values())
     incremental = getattr(args, "incremental", False)
@@ -3769,7 +3814,8 @@ def import_joplin_raw(args: argparse.Namespace) -> None:
     imported_attachments = 0
     skipped_notes = 0
     skipped_attachments = 0
-    for note, existing, tags in plan:
+    for at, (note, existing, tags) in enumerate(plan, 1):
+        progress(at, len(plan))
         props = note["props"]
         note_id = props["id"]
         if existing:
@@ -3903,7 +3949,9 @@ def import_keep(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory(prefix="keep-", dir=src.parent if src.is_file() else None) as work:
         folder = keep_folder(src, Path(work))
         seen = {n.get("source", {}).get("id") for n in load_index().get("notes", []) if n.get("source", {}).get("type") == "keep"}
-        for path in sorted(folder.glob("*.json")):
+        paths = sorted(folder.glob("*.json"))
+        for at, path in enumerate(paths, 1):
+            progress(at, len(paths))
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(data, dict) or not ("textContent" in data or "listContent" in data or "attachments" in data):

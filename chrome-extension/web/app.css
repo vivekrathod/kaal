@@ -145,6 +145,7 @@ label { font-weight: 600; font-size: 0.92rem; }
 /* Settings, Trash and notes */
 h2 { font-size: 1rem; margin: 18px 0 6px; }
 .section { margin-bottom: 14px; }
+.section progress { display: block; width: 100%; margin: 10px 0 4px; accent-color: var(--accent); }
 .plain { list-style: none; margin: 0 0 14px; padding: 0; }
 .line { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); min-height: 48px; overflow-wrap: anywhere; }
 .line:first-child { border-top: 0; }

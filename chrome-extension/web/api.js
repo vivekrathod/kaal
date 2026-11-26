@@ -73,6 +73,49 @@ async function request(method, path, { json, form, params } = {}) {
   return data;
 }
 
+// An import from an export file, telling `told` how far it has got: first { sent } (the share
+// uploaded, 0 to 1), then { at, total } as Kaal goes through the notes. fetch cannot report an
+// upload's progress, so this one request uses XMLHttpRequest.
+function importing(path, file, told) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", server + path);
+    xhr.setRequestHeader("X-Kaal-Request", "1");
+    xhr.setRequestHeader("Accept", "application/x-ndjson");
+    if (bearer) xhr.setRequestHeader("Authorization", `Bearer ${bearer}`);
+    if (inVault) xhr.setRequestHeader("X-Kaal-Vault", inVault);
+    let read = 0;
+    let answer = null;
+    const take = () => {
+      const text = xhr.responseText;
+      for (let end = text.indexOf("\n", read); end !== -1; end = text.indexOf("\n", read)) {
+        const line = JSON.parse(text.slice(read, end));
+        read = end + 1;
+        if ("status" in line) answer = line;
+        else told({ at: line.at, total: line.total });
+      }
+    };
+    xhr.upload.onprogress = (event) => { if (event.lengthComputable) told({ sent: event.loaded / event.total }); };
+    xhr.onprogress = take;
+    xhr.onerror = () => reject(new ApiError(0, "Can't reach Kaal. Check your connection and try again.", "unavailable"));
+    xhr.onload = () => {
+      // Refused before the import began (too large, signed out, not allowed): an ordinary answer.
+      if (!String(xhr.getResponseHeader("Content-Type")).includes("ndjson")) {
+        let data = null;
+        try { data = JSON.parse(xhr.responseText); } catch { data = null; }
+        return reject(new ApiError(xhr.status, (data && data.error) || `Something went wrong (${xhr.status}).`, data && data.kind));
+      }
+      take();
+      if (!answer) return reject(new ApiError(0, "The connection was lost before Kaal finished. It carries on by itself; look at your notes in a minute, and import again to add anything missing.", "unavailable"));
+      if (answer.status !== 200) return reject(new ApiError(answer.status, answer.error, answer.kind));
+      resolve(answer.result);
+    };
+    const form = new FormData();
+    form.append("file", file, file.name || "export");
+    xhr.send(form);
+  });
+}
+
 const id = (value) => encodeURIComponent(value);
 const result = (promise) => promise.then((data) => data.result);
 
@@ -175,11 +218,9 @@ export const api = {
     return result(request("POST", `/v1/library/notes/${id(noteId)}/attachments`, { form })).then((data) => data.attachment);
   },
   // A Google Takeout .zip of Keep; answers with counts: notes, files, already_here, trashed, empty, unreadable, missing_files.
-  importKeep: (file) => {
-    const form = new FormData();
-    form.append("file", file, file.name || "takeout.zip");
-    return result(request("POST", "/v1/library/import/keep", { form }));
-  },
+  importKeep: (file, told = () => {}) => importing("/v1/library/import/keep", file, told),
+  // A Joplin .jex; answers with counts: imported_notes, imported_attachments, existing_notes, notes.
+  importJoplin: (file, told = () => {}) => importing("/v1/library/import/joplin", file, told),
   noteFileText: (noteId, attachmentId) => result(request("GET", `/v1/library/notes/${id(noteId)}/attachments/${id(attachmentId)}/extracted-text`)).then((data) => data.text || ""),
 };
 

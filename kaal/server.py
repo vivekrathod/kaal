@@ -15,6 +15,7 @@ import argparse
 import asyncio
 from datetime import datetime, timezone
 import contextlib
+import contextvars
 import functools
 import gc
 import hashlib
@@ -22,6 +23,7 @@ import ipaddress
 import json
 import logging
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -38,7 +40,7 @@ from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, StringConstraints
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -553,7 +555,7 @@ class ExtensionCorsMiddleware:
         await self.app(scope, receive, named_send)
 
 
-UPLOAD_ROUTE = re.compile(r"/v1/(?:captures|medical/receipts|notes/[^/]+/attachments|library/notes/[^/]+/attachments|library/import/keep)")
+UPLOAD_ROUTE = re.compile(r"/v1/(?:captures|medical/receipts|notes/[^/]+/attachments|library/notes/[^/]+/attachments|library/import/(?:keep|joplin))")
 ONCE_ONLY = (b"content-type", b"content-length", b"authorization", b"transfer-encoding", b"x-kaal-session", b"x-kaal-vault")
 BODY_IDLE_SECONDS = 60.0
 
@@ -1388,6 +1390,38 @@ def _run(state: AppState, handler: Callable[[Any], None], *, exact_note: str | N
             return _error(STATUS_FOR_KIND.get(error.kind, 400), error.message, error.kind, error.details)
     meta = options.pop("meta", None)
     return JSONResponse({"result": result, "format": options, **({"meta": meta} if meta else {})})
+
+
+PROGRESS_TYPE = "application/x-ndjson"
+
+
+def _import(state: AppState, request: Request, upload: UploadFile, handler: Callable[[Any], None], **params: Any) -> Response:
+    """An import from an uploaded export. A client that accepts PROGRESS_TYPE is sent one JSON line
+    per note, {"at": n, "total": m}, and last the answer any other client gets, with its "status"."""
+    if PROGRESS_TYPE not in request.headers.get("accept", ""):
+        with _saved_upload(state, upload) as path:
+            return _run(state, handler, **params, path=str(path))
+    saved = _saved_upload(state, upload)
+    path = saved.__enter__()   # a refused upload (too large) is still answered with its own status
+    lines: queue.Queue[dict[str, Any] | None] = queue.Queue()
+
+    def work() -> None:
+        # The import runs to the end even if the person closes the page, so nothing is left half done.
+        core._PROGRESS.set(lambda at, total: lines.put({"at": at, "total": total}))
+        try:
+            answer = _run(state, handler, **params, path=str(path))
+            lines.put({**json.loads(answer.body), "status": answer.status_code})
+        except HTTPException as error:
+            lines.put({"error": error.detail, "kind": KIND_FOR_STATUS.get(error.status_code, "error"), "status": error.status_code})
+        except Exception:
+            log.exception("import failed")
+            lines.put({"error": "The import stopped with an error. Notes imported so far are kept; importing again adds the rest.", "kind": "error", "status": 500})
+        finally:
+            saved.__exit__(None, None, None)
+            lines.put(None)
+
+    threading.Thread(target=contextvars.copy_context().run, args=(work,), name="kaal-import", daemon=True).start()
+    return StreamingResponse((json.dumps(line) + "\n" for line in iter(lines.get, None)), media_type=PROGRESS_TYPE)
 
 
 META_ATTACHMENT_KEYS = ("id", "name", "size", "storage", "sensitivity", "extracted_markdown", "extracted_at")
@@ -3042,8 +3076,13 @@ def create_app(settings: Settings) -> FastAPI:
     @app.post("/v1/library/import/keep", tags=["library"], dependencies=[require("write", adds=True)])
     def library_import_keep(request: Request, file: UploadFile = File(...), dry_run: bool = Form(False), tags: str = Form("", max_length=1000)):
         """Notes from a Google Keep export: the .zip Google Takeout gives. Notes already imported are left alone."""
-        with _saved_upload(S(request), file) as path:
-            return _run(S(request), core.import_keep, path=str(path), dry_run=dry_run, tags=tags)
+        return _import(S(request), request, file, core.import_keep, dry_run=dry_run, tags=tags)
+
+    @app.post("/v1/library/import/joplin", tags=["library"], dependencies=[require("write", adds=True)])
+    def library_import_joplin(request: Request, file: UploadFile = File(...), dry_run: bool = Form(False), tags: str = Form("", max_length=1000)):
+        """Notes from a Joplin export: the .jex file Joplin makes. Notes already imported are left alone."""
+        # Text in pictures and PDFs is not read here, so a large export is not held up; `kaal ocr-attachments` can do that later.
+        return _import(S(request), request, file, core.import_joplin_raw, dry_run=dry_run, tags=tags, incremental=True, no_ocr=True, no_extract=True)
 
     @app.post("/v1/library/notes/{note_id}/extract", tags=["library"], dependencies=[require("write")])
     def library_extract(request: Request, note_id: str):

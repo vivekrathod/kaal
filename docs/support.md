@@ -92,6 +92,12 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.25.0 or newer.
   notes that are new. A very large export may be over the server's upload
   limit; whoever runs Kaal can import it on the server with
   `kaal import-keep takeout.zip`.
+- **Bringing notes over from Joplin:** in Joplin choose File › Export all ›
+  JEX, then in Kaal open **Settings**, find **Import notes** and press
+  "Choose the .jex". Notes, notebooks and tags (as tags) and attached files
+  come across. Importing again adds only notes that are new. Text inside
+  pictures and PDFs is not read during the import; whoever runs Kaal can do
+  that afterwards with `kaal ocr-attachments`.
 - **A search on Notes does not find a receipt:** receipts are searched on
   their own screen, by provider, person or title. While you search the notes,
   a link under the search box takes what you typed to Receipts; there, both

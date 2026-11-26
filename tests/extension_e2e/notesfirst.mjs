@@ -106,9 +106,12 @@ out.settings = await page.run("[...document.querySelectorAll('main h1, main .gro
 
 // Notes from Google Keep: the Takeout .zip, from Settings, lands in the notes with a word on what came in.
 await page.run("location.hash = '#/settings'; 1");
-await until(() => page.run("Boolean(document.getElementById('import-keep'))"), "the import in Settings");
+await until(() => page.run("Boolean(document.getElementById('import-google-keep'))"), "the import in Settings");
 await page.run(`(() => {
-  const input = document.getElementById("import-keep");
+  window.seen = [];   // every line said while importing, to see the progress go by
+  new MutationObserver((changes) => changes.forEach((change) => change.addedNodes.forEach((node) => node.classList?.contains("notice") && window.seen.push(node.textContent))))
+    .observe(document.querySelector("main"), { childList: true, subtree: true });
+  const input = document.getElementById("import-google-keep");
   const bytes = Uint8Array.from(atob(${JSON.stringify(process.env.E2E_KEEP_ZIP)}), (c) => c.charCodeAt(0));
   const data = new DataTransfer();
   data.items.add(new File([bytes], "takeout.zip", { type: "application/zip" }));
@@ -117,7 +120,7 @@ await page.run(`(() => {
   return 1;
 })()`);
 await until(() => page.run("(document.querySelector('.notice') || {}).textContent?.startsWith('Imported') || false"), "the Keep import");
-out.keep = { said: await page.run("document.querySelector('.notice').textContent") };
+out.keep = { said: await page.run("document.querySelector('.notice').textContent"), seen: await page.run("window.seen") };
 await page.click("main section p a[href='#/notes']");
 await until(() => page.run("document.querySelectorAll('.list .row').length === 2"), "the imported note");
 out.keep.rows = await page.run("[...document.querySelectorAll('.list .row .row-title')].map((r) => r.textContent).sort()");

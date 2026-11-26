@@ -7,6 +7,7 @@ import base64
 import hashlib
 import io
 import json
+import tarfile
 import logging
 import os
 import shutil
@@ -296,6 +297,13 @@ def test_every_route_works_on_the_servers_vault_and_never_on_the_default(tmp_pat
     with zipfile.ZipFile(keep, "w") as archive:
         archive.writestr("Takeout/Keep/Made-up.json", json.dumps({"title": "Made-up Keep note", "textContent": "x", "createdTimestampUsec": 1709287200000000}))
     call("POST", "/v1/library/import/keep", files=upload(keep.getvalue(), "takeout.zip"))
+    jex = io.BytesIO()
+    with tarfile.open(fileobj=jex, mode="w") as archive:
+        item = f"Made-up Joplin note\n\nx\n\nid: {'e' * 32}\ntype_: 1\n".encode()
+        member = tarfile.TarInfo(f"{'e' * 32}.md")
+        member.size = len(item)
+        archive.addfile(member, io.BytesIO(item))
+    call("POST", "/v1/library/import/joplin", files=upload(jex.getvalue(), "export.jex"))
     call("POST", "/v1/captures", files=upload(MINIMAL_PDF, "captured.pdf"), data={"title": "Made-up capture", "source_url": "https://example.com/a"})
     call("POST", "/v1/captures/text", json={"text": "made-up selected text", "title": "Made-up selection", "source_url": "https://example.com/b"})
 

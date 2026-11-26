@@ -1,7 +1,8 @@
-"""Importing Google Keep notes from a Google Takeout .zip, by the API and the command line."""
+"""Importing notes from other apps: Google Keep's Takeout .zip and Joplin's .jex, by the API and the command line."""
 import io
 import json
 import os
+import tarfile
 import zipfile
 from types import SimpleNamespace
 
@@ -50,9 +51,9 @@ def service(tmp_path):
     secrets = {name: store.create(name, scopes)[1] for name, scopes in {"full": ["read", "reveal", "write", "delete"], "reader": ["read"]}.items()}
     client = TestClient(server.create_app(settings))
 
-    def post(content, name="full", **form):
-        return client.post("/v1/library/import/keep", headers={"Authorization": f"Bearer {secrets[name]}"},
-                           files={"file": ("takeout.zip", content, "application/zip")}, data=form)
+    def post(content, name="full", route="keep", accept="application/json", **form):
+        return client.post(f"/v1/library/import/{route}", headers={"Authorization": f"Bearer {secrets[name]}", "Accept": accept},
+                           files={"file": ("export", content, "application/octet-stream")}, data=form)
 
     def notes():
         listed = client.get("/v1/library/notes", headers={"Authorization": f"Bearer {secrets['full']}"}).json()["result"]
@@ -135,3 +136,47 @@ def test_an_export_larger_than_an_ordinary_request_is_accepted(service):
     response = service.post(out.getvalue())
     assert response.status_code == 200, response.text
     assert response.json()["result"]["files"] == 1
+
+
+def test_a_client_that_asks_is_told_note_by_note_and_then_given_the_answer(service):
+    lines = [json.loads(line) for line in service.post(takeout_zip(), accept="application/x-ndjson").text.splitlines()]
+    *steps, last = lines
+    assert steps == [{"at": at, "total": 6} for at in range(1, 7)]
+    assert last["status"] == 200 and last["result"]["notes"] == 4
+    refused = [json.loads(line) for line in service.post(b"not a zip", accept="application/x-ndjson").text.splitlines()]
+    assert refused[-1]["status"] == 400 and "zip" in refused[-1]["error"]
+
+
+def joplin_item(title, body, **props):
+    return f"{title}\n\n{body}\n\n" + "".join(f"{key}: {value}\n" for key, value in props.items())
+
+
+def jex(extra=()):
+    """A .jex as Joplin makes it: a tar of the RAW export, notes and resources at its top."""
+    note, picture, other = "a" * 32, "b" * 32, "c" * 32
+    files = {f"{note}.md": joplin_item("Made-up trip", f"Pack snacks.\n\n![map.png](:/{picture})", id=note, type_=1),
+             f"{other}.md": joplin_item("Made-up list", "Eggs", id=other, type_=1),
+             f"{picture}.md": joplin_item("map.png", "", id=picture, mime="image/png", file_extension="png", type_=4),
+             f"resources/{picture}.png": PICTURE, **dict(extra)}
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w") as archive:
+        for name, content in files.items():
+            data = content.encode() if isinstance(content, str) else content
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+    return out.getvalue()
+
+
+def test_a_joplin_jex_becomes_notes_once_and_nothing_in_it_reaches_outside(service, tmp_path):
+    escape = joplin_item("Escape", "y", id="d" * 32, type_=1)
+    response = service.post(jex({"../../escape.md": escape}), route="joplin")
+    assert response.status_code == 200, response.text
+    done = response.json()["result"]
+    assert done["imported_notes"] == 2 and done["imported_attachments"] == 1
+    notes = service.notes()
+    assert set(notes) == {"Made-up trip", "Made-up list"} and len(notes["Made-up trip"]["attachments"]) == 1
+    assert not (tmp_path.parent / "escape.md").exists()
+    again = service.post(jex(), route="joplin").json()["result"]
+    assert again["imported_notes"] == 0 and again["existing_notes"] == 2 and len(service.notes()) == 2
+    assert service.post(b"not a tar", route="joplin").status_code == 400
