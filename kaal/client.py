@@ -282,6 +282,14 @@ class Commands:
         form = {"sensitivity": getattr(args, "sensitivity", "auto"), "extract": bool(getattr(args, "extract", False)), "ocr": bool(getattr(args, "ocr", False))}
         _print(self.api.call("POST", f"/v1/notes/{note['id']}/attachments", file=src, form=form))
 
+    def import_keep(self, args: Any) -> None:
+        src = Path(args.path).expanduser().resolve()
+        if src.is_dir():
+            core.die("Against a server, give the Takeout .zip itself, not the folder it unpacks to.")
+        src = _local_file(args.path, "Takeout export")
+        form = {"dry_run": bool(getattr(args, "dry_run", False)), "tags": getattr(args, "tags", "") or ""}
+        _print(self.api.call("POST", "/v1/library/import/keep", file=src, form=form))
+
     def export_attachment(self, args: Any) -> None:
         note = self.resolve(args.query)
         att = core.match_attachment(note, args.attachment)

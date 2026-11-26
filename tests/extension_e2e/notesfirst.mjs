@@ -39,7 +39,7 @@ out.noWayYet = await page.run("!document.querySelector('.also')");
 // The arrow beside New note: files first, a medical receipt last.
 await page.click(".add-more");
 out.menu = await page.run("({ open: !document.getElementById('add-menu').hidden, choices: [...document.querySelectorAll('#add-menu [role=menuitem] strong')].map((c) => c.textContent) })");
-// Down moves from the first choice to the second, and round again; Escape closes it.
+// Down and up move between the choices; Escape closes the menu.
 out.arrows = await page.run(`(() => {
   const menu = document.getElementById("add-menu");
   const at = () => document.activeElement.querySelector("strong").textContent;
@@ -62,6 +62,19 @@ await page.run("location.hash = '#/notes'; 1");
 await until(() => page.run("document.querySelectorAll('.list .row').length === 1"), "the note in the list");
 out.afterNote = { rows: await page.run("[...document.querySelectorAll('.list .row .row-title')].map((r) => r.textContent)"), files: await page.run("document.querySelector('.list .row .chip').textContent"), tabs: await tabs() };
 
+// Notes from Google Keep: the Takeout .zip, from the same menu, lands in the list with a word on what came in.
+await page.run(`(() => {
+  const input = document.getElementById("add-keep");
+  const bytes = Uint8Array.from(atob(${JSON.stringify(process.env.E2E_KEEP_ZIP)}), (c) => c.charCodeAt(0));
+  const data = new DataTransfer();
+  data.items.add(new File([bytes], "takeout.zip", { type: "application/zip" }));
+  input.files = data.files;
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  return 1;
+})()`);
+await until(() => page.run("(document.querySelector('.notice') || {}).textContent?.startsWith('Imported') || false"), "the Keep import");
+out.keep = { said: await page.run("document.querySelector('.notice').textContent"), rows: await page.run("[...document.querySelectorAll('.list .row .row-title')].map((r) => r.textContent).sort()") };
+
 // A medical receipt, added from the same menu, is a receipt: it opens to be checked, and its section appears.
 await give("add-receipt", [["Made-up receipt.txt", "text/plain", "LAKESIDE DENTAL GROUP\nPAYMENT RECEIPT\nPatient: Jane Example\nDate of Service: 10/02/2026\nAmount paid: $85.00\n"]]);
 await at("#/receipt/");
@@ -76,7 +89,7 @@ out.totals = { tabs: await tabs(), views: await page.run("[...document.querySele
 
 // The notes are still where one lands, and the receipts do not show among them.
 await page.run("location.hash = ''; 1");
-await until(() => page.run("document.querySelectorAll('.list .row').length === 1"), "the notes again");
+await until(() => page.run("document.querySelectorAll('.list .row').length === 2"), "the notes again");
 out.home = { tabs: await tabs(), rows: await page.run("[...document.querySelectorAll('.list .row .row-title')].map((r) => r.textContent)") };
 
 // Searching the notes finds no receipt, but shows the way to them, and takes the words along.

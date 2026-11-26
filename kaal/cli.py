@@ -92,6 +92,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-ocr", action="store_true", help="Do not OCR image resources; OCR is on by default")
     sp.set_defaults(func=core.import_joplin_raw)
 
+    sp = sub.add_parser("import-keep", help="Import notes, checklists and pictures from a Google Keep export (the Google Takeout .zip, or its unpacked folder)")
+    sp.add_argument("path", help="The Takeout .zip, or the folder it unpacks to")
+    sp.add_argument("--dry-run", action="store_true", help="Count what would be imported without writing anything")
+    sp.add_argument("--tags", default="", help="Comma-separated extra tags for the imported notes")
+    sp.set_defaults(func=core.import_keep)
+
     sp = sub.add_parser("capture", help="Capture a browser artifact as a normal Kaal note and attachment")
     sp.add_argument("file", help="Downloaded browser file or generated page PDF")
     sp.add_argument("--title", default="", help="Capture title; defaults to browser title or filename")

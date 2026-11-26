@@ -16,6 +16,7 @@ import glob
 import hashlib
 import http.server
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -408,21 +409,25 @@ def test_the_web_app_opens_on_notes_and_shows_receipts_once_there_is_one(stage, 
                                    headers={"Content-Type": "application/json", "X-Kaal-Request": "1"})
     assert urllib.request.urlopen(setup, timeout=10).status == 200
 
-    out = drive(stage, "notesfirst.mjs", E2E_LOGIN="sam", E2E_PASSWORD=password)
+    keep = io.BytesIO()
+    with zipfile.ZipFile(keep, "w") as archive:
+        archive.writestr("Takeout/Keep/Made-up.json", json.dumps({"title": "Made-up Keep note", "textContent": "from Keep", "createdTimestampUsec": 1709287200000000}))
+    out = drive(stage, "notesfirst.mjs", E2E_LOGIN="sam", E2E_PASSWORD=password, E2E_KEEP_ZIP=base64.b64encode(keep.getvalue()).decode())
 
     # Notes are the first screen, and a vault without receipts shows no receipts section at all.
     assert out["first"]["hash"] in ("", "#/notes") and out["first"]["tabs"] == ["Notes*", "Settings"]
     assert out["first"]["empty"].startswith("No notes yet") and out["first"]["button"] == "New note"
-    assert out["menu"] == {"open": True, "choices": ["Files as a note", "Medical receipt"]} and out["menuClosed"] is True
-    assert out["arrows"] == ["Files as a note", "Medical receipt", "Files as a note", "Medical receipt"]
+    assert out["menu"] == {"open": True, "choices": ["Files as a note", "Notes from Google Keep", "Medical receipt"]} and out["menuClosed"] is True
+    assert out["arrows"] == ["Files as a note", "Notes from Google Keep", "Medical receipt", "Notes from Google Keep"]
     # Files chosen there become one note, named after the first, each placed in its text.
     assert out["editor"] == {"title": "Made-up lease", "lines": 2}
     assert out["afterNote"] == {"rows": ["Made-up lease"], "files": "2 files", "tabs": ["Notes*", "Settings"]}
+    assert out["keep"] == {"said": "Imported 1 note from Google Keep.", "rows": ["Made-up Keep note", "Made-up lease"]}
     # The first receipt makes its section appear, with the number waiting to be checked.
     assert out["afterReceipt"]["tabs"] == ["Notes", "Receipts1*", "Settings"]
     assert out["totals"] == {"tabs": ["Notes", "Receipts1*", "Settings"], "views": ["To review 1", "Reviewed 0", "Totals*"], "paid": "$85.00"}
     # The receipt is not a note, and the notes are still home.
-    assert out["home"] == {"tabs": ["Notes*", "Receipts1", "Settings"], "rows": ["Made-up lease"]}
+    assert out["home"] == {"tabs": ["Notes*", "Receipts1", "Settings"], "rows": ["Made-up lease", "Made-up Keep note"]}
     assert out["firstSteps"] == ["Write your first note", "Add files"] and out["noWayYet"] is True
     # A search among the notes does not find a receipt, but leads to it, with what was typed.
     assert out["search"]["offer"] == "Search your medical receipts for “up receipt” ›" and out["search"]["notesFound"] == 0

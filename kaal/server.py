@@ -3039,6 +3039,12 @@ def create_app(settings: Settings) -> FastAPI:
         with _saved_upload(S(request), file) as path:
             return _run(S(request), core.library_attach, note_id=note_id, file=str(path))
 
+    @app.post("/v1/library/import/keep", tags=["library"], dependencies=[require("write", adds=True)])
+    def library_import_keep(request: Request, file: UploadFile = File(...), dry_run: bool = Form(False), tags: str = Form("", max_length=1000)):
+        """Notes from a Google Keep export: the .zip Google Takeout gives. Notes already imported are left alone."""
+        with _saved_upload(S(request), file) as path:
+            return _run(S(request), core.import_keep, path=str(path), dry_run=dry_run, tags=tags)
+
     @app.post("/v1/library/notes/{note_id}/extract", tags=["library"], dependencies=[require("write")])
     def library_extract(request: Request, note_id: str):
         return _run(S(request), core.library_extract, note_id=note_id)

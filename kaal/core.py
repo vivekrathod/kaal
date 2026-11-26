@@ -14,6 +14,7 @@ import argparse
 import base64
 import fcntl
 import functools
+import glob
 import hashlib
 import json
 import os
@@ -811,11 +812,12 @@ def redact_text(text: str) -> str:
     return redacted
 
 
-def create_note(title: str, body: str, *, tags: list[str] | None = None, sensitivity: str = "auto", source: dict[str, Any] | None = None) -> dict[str, Any]:
+def create_note(title: str, body: str, *, tags: list[str] | None = None, sensitivity: str = "auto", source: dict[str, Any] | None = None,
+                created: str | None = None, updated: str | None = None) -> dict[str, Any]:
     if not body.strip():
         die("Refusing to create an empty note.")
     note_id = secrets.token_hex(6)
-    ts = now_iso()
+    ts = created or now_iso()
     note_tags = sorted(set(tags or []))
     label = sensitivity_label(sensitivity)
     note_obj = {
@@ -823,7 +825,7 @@ def create_note(title: str, body: str, *, tags: list[str] | None = None, sensiti
         "title": title,
         "tags": note_tags,
         "created": ts,
-        "updated": ts,
+        "updated": updated or ts,
         "body": body,
         "format": "markdown",
         "sensitivity": label,
@@ -838,7 +840,7 @@ def create_note(title: str, body: str, *, tags: list[str] | None = None, sensiti
         "title": title,
         "tags": note_tags,
         "created": ts,
-        "updated": ts,
+        "updated": updated or ts,
         "attachments": [],
         "format": "markdown",
         "sensitivity": label,
@@ -3807,3 +3809,145 @@ def import_joplin_raw(args: argparse.Namespace) -> None:
         summary["skipped_existing_notes"] = skipped_notes
         summary["skipped_existing_attachments"] = skipped_attachments
     emit(summary, indent=2, ensure_ascii=False)
+
+
+# --- Google Keep (a Google Takeout export: one .json per note, files beside it)
+
+KEEP_MAX_BYTES = 4 * 1024**3  # what a Takeout zip may unpack to; a larger one is refused before anything is written
+
+
+def keep_folder(path: Path, workdir: Path) -> Path:
+    """The folder holding a Keep export's .json files: ``path`` itself, or unpacked from a Takeout .zip into ``workdir``."""
+    if path.is_file():
+        import zipfile
+
+        try:
+            archive = zipfile.ZipFile(path)
+        except zipfile.BadZipFile:
+            die("That file is not a .zip from Google Takeout.")
+        with archive:
+            members = [m for m in archive.infolist() if not m.is_dir() and PurePosixPath(m.filename).parent.name == "Keep"]
+            if sum(m.file_size for m in members) > KEEP_MAX_BYTES:
+                die("That Takeout export is too large to import at once.")
+            for member in members:
+                archive.extract(member, workdir)  # extract() drops "..", and absolute parts of a name
+        path = workdir
+    for folder in (path / "Takeout" / "Keep", path / "Keep", path):
+        if folder.is_dir() and any(folder.glob("*.json")):
+            return folder
+    for folder in sorted(path.glob("**/Keep")):
+        if folder.is_dir() and any(folder.glob("*.json")):
+            return folder
+    die("No Google Keep notes were found there. Export Keep from Google Takeout and choose the .zip it gives you.")
+
+
+def keep_time(usec: Any) -> str | None:
+    try:
+        return datetime.fromtimestamp(int(usec) / 1_000_000, timezone.utc).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def keep_note(data: dict[str, Any]) -> dict[str, Any]:
+    """One Keep note as Kaal would keep it: title, Markdown body, tags and times."""
+    text = str(data.get("textContent") or "").strip("\n")
+    items = [f"- [{'x' if item.get('isChecked') else ' '}] {' '.join(str(item.get('text') or '').split())}"
+             for item in data.get("listContent") or [] if isinstance(item, dict)]
+    body = "\n\n".join(part for part in (text, "\n".join(items)) if part.strip())
+    links = []
+    for link in data.get("annotations") or []:
+        url = str(link.get("url") or "") if isinstance(link, dict) else ""
+        if url.startswith(("https://", "http://")) and not re.search(r"[\s<>]", url) and url not in body:
+            label = re.sub(r"[\[\]\n]", "", str(link.get("title") or "").strip()) or url
+            links.append(f"[{label}](<{url}>)")
+    if links:
+        body = "\n\n".join(part for part in (body, "\n".join(links)) if part)
+    title = " ".join(str(data.get("title") or "").split())
+    if not title:
+        first = next((line.strip() for line in (text or "\n".join(str(i.get("text") or "") for i in data.get("listContent") or [] if isinstance(i, dict))).splitlines() if line.strip()), "")
+        title = first if len(first) <= 80 else first[:79].rstrip() + "…"
+    tags = {"imported", "keep"}
+    tags.update(slug_tag(str(label.get("name") or "")) for label in data.get("labels") or [] if isinstance(label, dict) and label.get("name"))
+    if data.get("isArchived"):
+        tags.add("archived")
+    created = keep_time(data.get("createdTimestampUsec"))
+    return {
+        "title": title or "Untitled Keep note",
+        "body": body,
+        "tags": sorted(tag[:MAX_TAG_CHARS] for tag in tags),
+        "created": created,
+        "updated": keep_time(data.get("userEditedTimestampUsec")) or created,
+        "files": [str(a.get("filePath") or "") for a in data.get("attachments") or [] if isinstance(a, dict) and a.get("filePath")],
+    }
+
+
+def keep_file(folder: Path, name: str) -> Path | None:
+    """A note's file, by the plain name the note gives; Takeout sometimes saves it under another extension."""
+    name = PurePosixPath(name.replace("\\", "/")).name
+    if not name or name.startswith("."):
+        return None
+    exact = folder / name
+    if exact.is_file():
+        return exact
+    stem = Path(name).stem
+    return next((p for p in sorted(folder.glob(glob.escape(stem) + ".*")) if p.is_file() and p.suffix.lower() not in {".json", ".html"}), None)
+
+
+@holds_vault_lock
+def import_keep(args: argparse.Namespace) -> None:
+    src = Path(args.path).expanduser().resolve()
+    if not src.exists():
+        die(f"Not found: {src}")
+    extra_tags = parse_tags(getattr(args, "tags", "") or "")
+    counts = {"notes": 0, "files": 0, "already_here": 0, "trashed": 0, "empty": 0, "unreadable": 0, "missing_files": 0}
+    with tempfile.TemporaryDirectory(prefix="keep-", dir=src.parent if src.is_file() else None) as work:
+        folder = keep_folder(src, Path(work))
+        seen = {n.get("source", {}).get("id") for n in load_index().get("notes", []) if n.get("source", {}).get("type") == "keep"}
+        for path in sorted(folder.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict) or not ("textContent" in data or "listContent" in data or "attachments" in data):
+                    raise ValueError
+            except (OSError, ValueError):
+                counts["unreadable"] += 1
+                continue
+            if data.get("isTrashed"):
+                counts["trashed"] += 1
+                continue
+            # A Keep note has no id in the export; the microsecond it was made serves, and stays the same in a later export.
+            source_id = str(data.get("createdTimestampUsec") or path.stem)
+            if source_id in seen:
+                counts["already_here"] += 1
+                continue
+            note = keep_note(data)
+            files = [found for found in (keep_file(folder, name) for name in note["files"]) if found]
+            counts["missing_files"] += len(note["files"]) - len(files)
+            if not note["body"].strip() and not files:
+                if note["title"] == "Untitled Keep note":
+                    counts["empty"] += 1
+                    continue
+                note["body"] = note["title"]  # a Keep note can be a title alone
+            seen.add(source_id)
+            counts["notes"] += 1
+            counts["files"] += len(files)
+            if args.dry_run:
+                continue
+            meta = create_note(note["title"], note["body"] or "(pictures)", tags=sorted({*note["tags"], *extra_tags}),
+                               source={"type": "keep", "id": source_id}, created=note["created"], updated=note["updated"])
+            if not files:
+                continue
+            references = []
+            for found in files:
+                attached = attach_file_to_note(meta, found, attachment_name=found.name, source={"type": "keep"})
+                picture = "!" if found.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic"} else ""
+                label = re.sub(r"[\[\]]", "", found.name)
+                references.append(f"{picture}[{label}](attachment:{attached['id']})")
+            # Attaching moved the note's time to now; put Keep's back, with the pictures shown in the note.
+            index = load_index()
+            stored = next(n for n in index["notes"] if n["id"] == meta["id"])
+            full = load_note(stored)
+            full["body"] = "\n\n".join(part for part in (note["body"], "\n".join(references)) if part)
+            full["updated"] = note["updated"] or full["updated"]
+            write_library_note(stored, full)
+            save_index(index)
+    emit({"status": "dry-run" if args.dry_run else "imported", **counts}, indent=2, ensure_ascii=False)

@@ -83,6 +83,15 @@ Kaal. Kaal for iPhone needs a Kaal server version 0.25.0 or newer.
 - **Adding files without writing anything:** the arrow beside **New note**,
   then "Files as a note". The note opens with the files in it, named after the
   first; save it as it is or write around them.
+- **Bringing notes over from Google Keep:** at takeout.google.com, press
+  "Deselect all", tick only Keep and create the export. Download the .zip
+  Google emails you, then in Kaal press the arrow beside **New note** and pick
+  "Notes from Google Keep". Text, checklists, labels (as tags), pictures and
+  Keep's dates come across; notes in Keep's Trash do not, and archived notes
+  get the tag `archived`. Importing the same or a newer export again adds only
+  notes that are new. A very large export may be over the server's upload
+  limit; whoever runs Kaal can import it on the server with
+  `kaal import-keep takeout.zip`.
 - **A search on Notes does not find a receipt:** receipts are searched on
   their own screen, by provider, person or title. While you search the notes,
   a link under the search box takes what you typed to Receipts; there, both

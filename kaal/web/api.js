@@ -174,6 +174,12 @@ export const api = {
     form.append("file", file, file.name || "file");
     return result(request("POST", `/v1/library/notes/${id(noteId)}/attachments`, { form })).then((data) => data.attachment);
   },
+  // A Google Takeout .zip of Keep; answers with counts: notes, files, already_here, trashed, empty, unreadable, missing_files.
+  importKeep: (file) => {
+    const form = new FormData();
+    form.append("file", file, file.name || "takeout.zip");
+    return result(request("POST", "/v1/library/import/keep", { form }));
+  },
   noteFileText: (noteId, attachmentId) => result(request("GET", `/v1/library/notes/${id(noteId)}/attachments/${id(attachmentId)}/extracted-text`)).then((data) => data.text || ""),
 };
 

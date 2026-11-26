@@ -319,6 +319,12 @@ Files you attach are uploaded, and exports are written on your machine.
 `KAAL_LOCAL=1` forces local mode. The Chrome extension talks to the server
 itself, with a token of its own entered on its settings page.
 
+**Notes from Google Keep.** `kaal import-keep takeout.zip` (or "Notes from
+Google Keep" under the arrow beside New note) reads the .zip Google Takeout
+gives for Keep: text, checklists, labels as tags, pictures and the original
+dates. Notes already imported are skipped, so a later export can be imported
+on top; `--dry-run` only counts.
+
 **Checks and moving data.** `kaal verify [--deep]` compares the index with the
 files on disk and reports ids only. `kaal export --output FILE.tar` writes the
 vault exactly as stored (the key is not included). `kaal import FILE.tar`

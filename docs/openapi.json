@@ -182,6 +182,31 @@
         "title": "Body_library_attach_v1_library_notes__note_id__attachments_post",
         "type": "object"
       },
+      "Body_library_import_keep_v1_library_import_keep_post": {
+        "properties": {
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          },
+          "tags": {
+            "default": "",
+            "maxLength": 1000,
+            "title": "Tags",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_library_import_keep_v1_library_import_keep_post",
+        "type": "object"
+      },
       "Body_medical_capture_v1_medical_receipts_post": {
         "properties": {
           "captured_at": {
@@ -2425,6 +2450,46 @@
         "summary": "Health",
         "tags": [
           "service"
+        ]
+      }
+    },
+    "/v1/library/import/keep": {
+      "post": {
+        "description": "Notes from a Google Keep export: the .zip Google Takeout gives. Notes already imported are left alone.",
+        "operationId": "library_import_keep_v1_library_import_keep_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_library_import_keep_v1_library_import_keep_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Library Import Keep",
+        "tags": [
+          "library"
         ]
       }
     },

@@ -200,6 +200,28 @@ export function notesView(container, params, { expired, go, session, receipts })
       replace(status, notice(error.status === 413 ? "That file is too large to save." : error.message, "error"));
     }
   });
+  const keepPicker = h("input", { type: "file", id: "add-keep", accept: ".zip,application/zip", class: "visually-hidden", tabindex: "-1" });
+  keepPicker.addEventListener("change", async () => {
+    const file = keepPicker.files[0];
+    keepPicker.value = "";
+    if (!file) return;
+    replace(status, notice("Importing your Google Keep notes. With many pictures this takes a minute or two…"));
+    try {
+      const done = await api.importKeep(file);
+      if (!alive) return;
+      const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+      const said = [`Imported ${plural(done.notes, "note")} from Google Keep${done.files ? `, with ${plural(done.files, "file")}` : ""}.`];
+      if (done.already_here) said.push(`${plural(done.already_here, "note")} had been imported before and ${done.already_here === 1 ? "was" : "were"} left alone.`);
+      if (done.trashed) said.push(`${plural(done.trashed, "note")} from Keep's Trash ${done.trashed === 1 ? "was" : "were"} skipped.`);
+      if (done.missing_files || done.unreadable) said.push("Some notes or files in the export could not be read.");
+      await load(true);   // this clears the status line, so the summary goes after it
+      if (alive) replace(status, notice(said.join(" ")));
+    } catch (error) {
+      if (!alive) return;
+      if (error.status === 401) return expired();
+      replace(status, notice(error.status === 413 ? "That export is larger than this Kaal accepts. Ask whoever runs it to import it with kaal import-keep." : error.message, "error"));
+    }
+  });
   const menu = h("div", { class: "add-menu", id: "add-menu", role: "menu", hidden: true });
   const opener = h("button", { type: "button", class: "button primary add-more", "aria-haspopup": "menu", "aria-expanded": "false", "aria-controls": "add-menu", "aria-label": "More to add" }, "▾");
   const open = (on) => {
@@ -210,6 +232,7 @@ export function notesView(container, params, { expired, go, session, receipts })
     h("strong", {}, title), h("span", { class: "muted-text" }, about));
   menu.append(
     choice("Files as a note", "Pictures, PDFs or other files, kept together in a new note.", filesPicker),
+    choice("Notes from Google Keep", "The .zip Google Takeout gives you. Notes already imported are skipped.", keepPicker),
     choice("Medical receipt", "A PDF or a photo. Kaal reads the amount, dates and names for you to check.", receiptPicker));
   opener.addEventListener("click", () => {
     open(menu.hidden);
@@ -236,7 +259,7 @@ export function notesView(container, params, { expired, go, session, receipts })
         h("a", { href: "#/notes?trash=1", class: `segment${trash ? " active" : ""}` }, "Trash")),
       search),
     status, also, list, more,
-    trash || !mayWrite ? null : [filesPicker, receiptPicker, adding]);
+    trash || !mayWrite ? null : [filesPicker, keepPicker, receiptPicker, adding]);
   load(true);
   return () => {
     alive = false;
