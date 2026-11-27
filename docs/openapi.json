@@ -489,6 +489,18 @@
             "title": "Offset",
             "type": "integer"
           },
+          "origin": {
+            "default": "",
+            "enum": [
+              "",
+              "kaal",
+              "browser",
+              "keep",
+              "joplin"
+            ],
+            "title": "Origin",
+            "type": "string"
+          },
           "query": {
             "maxLength": 200,
             "minLength": 1,
@@ -2560,6 +2572,7 @@
     },
     "/v1/library/notes": {
       "get": {
+        "description": "Notes, newest first. ``origin`` keeps those written in Kaal, saved from the web, or imported from Keep or Joplin;\n``meta.origins`` counts the notes from each.",
         "operationId": "library_list_v1_library_notes_get",
         "parameters": [
           {
@@ -2603,6 +2616,23 @@
               "default": "",
               "maxLength": 200,
               "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "origin",
+            "required": false,
+            "schema": {
+              "default": "",
+              "enum": [
+                "",
+                "kaal",
+                "browser",
+                "keep",
+                "joplin"
+              ],
+              "title": "Origin",
               "type": "string"
             }
           }

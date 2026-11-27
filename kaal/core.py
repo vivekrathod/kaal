@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import collections
 import fcntl
 import functools
 import glob
@@ -958,12 +959,26 @@ def library_note_summary(meta: dict[str, Any]) -> dict[str, Any]:
     } | {"attachments": [library_attachment_summary(att) for att in meta.get("attachments", [])]}
 
 
+def note_origin(note: dict[str, Any]) -> str:
+    """Where a note came from, as the Notes filter groups it: written in Kaal, saved from the web, or imported."""
+    kind = str((note.get("source") or {}).get("type") or "")
+    return kind if kind in ("keep", "joplin") else "browser" if kind.startswith("browser") else "kaal"
+
+
+def by_origin(notes: list[dict[str, Any]], args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """The notes from the origin asked for, and how many there are from each, so a filter offers only what is there."""
+    counts = dict(collections.Counter(note_origin(note) for note in notes))
+    origin = getattr(args, "origin", "") or ""
+    return ([note for note in notes if note_origin(note) == origin] if origin else notes), counts
+
+
 def library_list(args: argparse.Namespace) -> None:
     """Emit bounded generic-note metadata for the local dashboard."""
     init_if_needed()
     limit = max(0, min(int(getattr(args, "limit", 100) or 100), 100))
     trash = bool(getattr(args, "trash", False))
     notes = [note for note in load_index().get("notes", []) if not is_medical_receipt(note) and bool(note.get("trashed_at")) == trash]
+    notes, origins = by_origin(notes, args)
     query = (getattr(args, "q", "") or "").strip().casefold()
     if query:
         notes = [
@@ -972,7 +987,7 @@ def library_list(args: argparse.Namespace) -> None:
         ]
     notes.sort(key=lambda note: note.get("updated", note.get("created", "")), reverse=True)
     notes, paging = page_of(notes, SimpleNamespace(offset=getattr(args, "offset", 0), limit=limit))
-    emit([library_note_summary(note) for note in notes], ensure_ascii=False, meta=paging)
+    emit([library_note_summary(note) for note in notes], ensure_ascii=False, meta={**paging, "origins": origins})
 
 
 # --- searching inside notes
@@ -1088,6 +1103,7 @@ def library_search(args: argparse.Namespace) -> None:
     cache = current_vault().text_cache
     for gone in set(cache) - {note["id"] for note in notes}:
         _forget_text(current_vault(), gone)
+    notes, origins = by_origin([note for note in notes if not is_medical_receipt(note) and bool(note.get("trashed_at")) == trash], args)
     patterns = [re.compile(re.escape(term), re.IGNORECASE) for term in terms]
     hits: list[tuple[int, str, dict[str, Any]]] = []
     for note in notes:
@@ -1113,7 +1129,7 @@ def library_search(args: argparse.Namespace) -> None:
     hits.sort(key=lambda hit: hit[1], reverse=True)
     hits.sort(key=lambda hit: hit[0])
     page, paging = page_of([hit[2] for hit in hits], SimpleNamespace(offset=getattr(args, "offset", 0), limit=limit))
-    emit(page, ensure_ascii=False, meta=paging)
+    emit(page, ensure_ascii=False, meta={**paging, "origins": origins})
 
 
 def library_show(args: argparse.Namespace) -> None:
@@ -3666,9 +3682,10 @@ def load_joplin_raw_export(export_dir: Path) -> dict[str, Any]:
 def joplin_import_tags(note: dict[str, Any], parsed: dict[str, Any], extra_tags: list[str]) -> list[str]:
     props = note["props"]
     notebook_path = joplin_notebook_path(props.get("parent_id", ""), parsed["folders"])
-    tags = {"imported", "joplin", *extra_tags}
+    # Where a note came from is kept in its source, not its tags; its notebooks and tags are the person's own.
+    tags = set(extra_tags)
     tags.update(slug_tag(t) for t in parsed["note_tags"].get(props["id"], []))
-    tags.update(f"joplin-notebook-{slug_tag(part)}" for part in notebook_path)
+    tags.update(slug_tag(part) for part in notebook_path)
     return sorted(tags)
 
 
@@ -3857,6 +3874,34 @@ def import_joplin_folder(args: argparse.Namespace, export_dir: Path) -> None:
     emit(summary, indent=2, ensure_ascii=False)
 
 
+OLD_IMPORT_TAGS = {"imported", "keep", "joplin"}
+
+
+@holds_vault_lock
+def tidy_import_tags(args: argparse.Namespace) -> None:
+    """On notes imported from Keep or Joplin, take off the tags imports used to add (imported, keep, joplin)
+    and shorten Joplin's notebook tags (joplin-notebook-travel becomes travel). Where each note came from
+    stays in its source, and no note's time changes."""
+    init_if_needed()
+    index = load_index()
+    changed = 0
+    for meta in index.get("notes", []):
+        if (meta.get("source") or {}).get("type") not in ("keep", "joplin"):
+            continue
+        tags = sorted({tag.removeprefix("joplin-notebook-") for tag in meta.get("tags", []) if tag not in OLD_IMPORT_TAGS} - {""})
+        if tags == sorted(meta.get("tags", [])):
+            continue
+        changed += 1
+        if args.dry_run:
+            continue
+        note = load_note(meta)
+        note["tags"] = tags
+        write_library_note(meta, note)
+    if changed and not args.dry_run:
+        save_index(index)
+    emit({"status": "dry-run" if args.dry_run else "tidied", "notes": changed})
+
+
 # --- Google Keep (a Google Takeout export: one .json per note, files beside it)
 
 KEEP_MAX_BYTES = 4 * 1024**3  # what a Takeout zip may unpack to; a larger one is refused before anything is written
@@ -3912,7 +3957,7 @@ def keep_note(data: dict[str, Any]) -> dict[str, Any]:
     if not title:
         first = next((line.strip() for line in (text or "\n".join(str(i.get("text") or "") for i in data.get("listContent") or [] if isinstance(i, dict))).splitlines() if line.strip()), "")
         title = first if len(first) <= 80 else first[:79].rstrip() + "…"
-    tags = {"imported", "keep"}
+    tags = set()
     tags.update(slug_tag(str(label.get("name") or "")) for label in data.get("labels") or [] if isinstance(label, dict) and label.get("name"))
     if data.get("isArchived"):
         tags.add("archived")

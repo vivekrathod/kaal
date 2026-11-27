@@ -73,7 +73,7 @@ def test_a_takeout_zip_becomes_notes_with_their_checklists_pictures_tags_and_tim
     assert notes["Call the plumber"]["body"].strip() == "Call the plumber"  # a title alone is a note too
     shopping = notes["Shopping"]
     assert shopping["body"].startswith("Milk\nBread") and "[The list](<https://example.com/list>)" in shopping["body"]
-    assert {"imported", "keep", "home-things"} <= set(shopping["tags"])
+    assert shopping["tags"] == ["home-things"] and shopping["source"]["type"] == "keep"   # the label is a tag; where it came from is not
     assert shopping["created"] == "2024-03-01T10:00:00+00:00" and shopping["updated"] == "2024-03-01T11:00:00+00:00"
 
     packing = notes["Passport"]  # no title in Keep: the first line names it
@@ -180,3 +180,27 @@ def test_a_joplin_jex_becomes_notes_once_and_nothing_in_it_reaches_outside(servi
     again = service.post(jex(), route="joplin").json()["result"]
     assert again["imported_notes"] == 0 and again["existing_notes"] == 2 and len(service.notes()) == 2
     assert service.post(b"not a tar", route="joplin").status_code == 400
+
+
+def test_notes_can_be_listed_by_where_they_came_from(service):
+    service.post(takeout_zip())
+    kaal.call_captured(kaal.library_create, SimpleNamespace(title="Made-up own note", tags="", body="written here", source_url="", source_title=""))
+    listed, options = kaal.call_captured(kaal.library_list, SimpleNamespace(trash=False, limit=100, offset=0, q="", origin="keep"))
+    assert {n["title"] for n in listed} == {"Shopping", "Passport", "Garden", "Call the plumber"}
+    assert options["meta"]["origins"] == {"keep": 4, "kaal": 1}
+    found, options = kaal.call_captured(kaal.library_search, SimpleNamespace(query="note", trash=False, limit=50, offset=0, origin="kaal"))
+    assert [n["title"] for n in found] == ["Made-up own note"] and options["meta"]["origins"] == {"keep": 4, "kaal": 1}
+
+
+def test_older_import_tags_come_off_imported_notes_only_and_their_times_stay(service):
+    made = kaal.create_note("Made-up Joplin note", "x", tags=["imported", "joplin", "joplin-notebook-travel", "joplin-notebook-2024", "kept"],
+                            source={"type": "joplin", "id": "f" * 32}, created="2020-01-01T00:00:00+00:00")
+    mine = kaal.create_note("Made-up own note", "y", tags=["imported", "joplin-notebook-travel"])
+    counted, _ = kaal.call_captured(kaal.tidy_import_tags, SimpleNamespace(dry_run=True))
+    assert counted == {"status": "dry-run", "notes": 1}
+    assert kaal.call_captured(kaal.tidy_import_tags, SimpleNamespace(dry_run=False))[0] == {"status": "tidied", "notes": 1}
+    by_id = {n["id"]: n for n in kaal.load_index()["notes"]}
+    assert by_id[made["id"]]["tags"] == ["2024", "kept", "travel"] and by_id[made["id"]]["updated"] == "2020-01-01T00:00:00+00:00"
+    assert kaal.load_note(by_id[made["id"]])["tags"] == ["2024", "kept", "travel"]
+    assert by_id[mine["id"]]["tags"] == ["imported", "joplin-notebook-travel"], "a note written in Kaal keeps its tags"
+    assert kaal.call_captured(kaal.tidy_import_tags, SimpleNamespace(dry_run=False))[0]["notes"] == 0

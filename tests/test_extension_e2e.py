@@ -424,6 +424,8 @@ def test_the_web_app_opens_on_notes_and_shows_receipts_once_there_is_one(stage, 
     assert out["editor"] == {"title": "Made-up lease", "lines": 2}
     assert out["afterNote"] == {"rows": ["Made-up lease"], "files": "2 files", "tabs": ["Notes*", "Settings"]}
     assert out["keep"]["said"] == "Imported 1 note from Google Keep." and out["keep"]["rows"] == ["Made-up Keep note", "Made-up lease"]
+    assert out["origins"] == ["From anywhere", "Written in Kaal (1)", "From Google Keep (1)"]
+    assert out["origin"] == "From Google Keep · written Mar 1, 2024"
     assert out["keep"]["seen"][0].startswith("Sending your Google Keep export") and "Importing note 1 of 1…" in out["keep"]["seen"], out["keep"]["seen"]
     # The first receipt makes its section appear, with the number waiting to be checked.
     assert out["afterReceipt"]["tabs"] == ["Notes", "Receipts1*", "Settings"]

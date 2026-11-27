@@ -613,10 +613,8 @@ class KaalFeatureTests(unittest.TestCase):
         self.assertEqual((by_title["Trip Plan"]["storage"], by_title["Trip Plan"]["sensitivity"]), ("encrypted", "sensitive"))
         self.assertEqual(by_title["Identity"]["storage"], "encrypted")
         self.assertEqual(by_title["Trip Plan"]["source"], {"type": "joplin", "id": "22222222222222222222222222222222"})
-        self.assertIn("joplin", by_title["Trip Plan"]["tags"])
-        self.assertIn("migrated", by_title["Trip Plan"]["tags"])
-        self.assertIn("travel", by_title["Trip Plan"]["tags"])
-        self.assertIn("joplin-notebook-personal", by_title["Trip Plan"]["tags"])
+        # The person's own tags and notebooks become tags; where the note came from is its source, not a tag.
+        self.assertEqual(by_title["Trip Plan"]["tags"], ["migrated", "personal", "travel"])
         self.assertEqual(by_title["Trip Plan"]["attachments"][0]["name"], "receipt.jpg")
         self.assertEqual(by_title["Trip Plan"]["attachments"][0]["source"], {"type": "joplin", "note_id": "22222222222222222222222222222222", "resource_id": "44444444444444444444444444444444"})
         with self.with_fake_crypto():

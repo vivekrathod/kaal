@@ -331,6 +331,13 @@ export folder: notes, notebooks and tags as tags, and attached files.
 `--incremental` skips notes already imported. Both imports, from the web app,
 show how far they have got as they go.
 
+Where an imported note came from is kept with the note, not in its tags: the
+note says "From Google Keep" or "From Joplin", and the notes list can be
+narrowed to them. Older imports also tagged notes `imported`,
+`keep` or `joplin`, and notebooks `joplin-notebook-…`;
+`kaal tidy-import-tags` (with `--dry-run` to count) takes those off and
+shortens the notebook tags, leaving every note's dates alone.
+
 **Checks and moving data.** `kaal verify [--deep]` compares the index with the
 files on disk and reports ids only. `kaal export --output FILE.tar` writes the
 vault exactly as stored (the key is not included). `kaal import FILE.tar`

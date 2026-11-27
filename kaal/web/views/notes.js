@@ -9,6 +9,12 @@ const when = (iso) => {
   const date = new Date(iso || "");
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
 };
+// Where a note came from, as its source records it; notes written in Kaal say nothing.
+const ORIGINS = { kaal: "Written in Kaal", browser: "Saved from the web", keep: "From Google Keep", joplin: "From Joplin" };
+const originOf = (note) => {
+  const kind = String((note.source || {}).type || "");
+  return ["keep", "joplin"].includes(kind) ? kind : kind.startsWith("browser") ? "browser" : "kaal";
+};
 const size = (bytes) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round((bytes || 0) / 1024))} KB`);
 // Kinds the server will show in the browser; anything else is download-only.
 const isPicture = (file) => /\.(png|jpe?g|gif|webp)$/i.test(file.name || "");
@@ -111,6 +117,7 @@ export function notesView(container, params, { expired, go, session, receipts })
   };
   if (receipts) receipts().then((known) => { hasReceipts = Boolean(known && known.any); if (alive) drawAlso(); }, () => {});
   let query = params.q || "";
+  let origin = ORIGINS[params.from] ? params.from : "";
   let shown = [];
   let total = 0;
   let timer = null;
@@ -121,6 +128,16 @@ export function notesView(container, params, { expired, go, session, receipts })
   const status = h("div", {});
   const more = h("div", { class: "footnote" });
   const search = h("input", { type: "search", placeholder: "Search notes and their files", "aria-label": "Search notes", value: query });
+  // Offered only where the notes came from more than one place: written here, saved from the web, imported.
+  const fromPick = h("select", { class: "origin-pick", "aria-label": "Where the notes came from", hidden: true });
+  fromPick.addEventListener("change", () => { origin = fromPick.value; load(true); });
+  const drawOrigins = (counts) => {
+    const present = Object.keys(ORIGINS).filter((key) => counts[key]);
+    fromPick.hidden = present.length < 2 && !origin;
+    fromPick.replaceChildren(h("option", { value: "" }, "From anywhere"),
+      ...present.map((key) => h("option", { value: key }, `${ORIGINS[key]} (${counts[key]})`)));
+    fromPick.value = origin;
+  };
 
   // Where a note was found, with the words around it. Found by title or tag, the title says enough.
   const found = (match) => (!match || match.where === "title" ? null : h("span", { class: "row-snippet" },
@@ -134,16 +151,17 @@ export function notesView(container, params, { expired, go, session, receipts })
     try {
       const offset = reset ? 0 : shown.length;
       const page = query
-        ? await api.searchNotes({ query, trash, limit: PAGE, offset })
-        : await api.notes({ trash, limit: PAGE, offset });
+        ? await api.searchNotes({ query, trash, origin, limit: PAGE, offset })
+        : await api.notes({ trash, origin, limit: PAGE, offset });
       // A slower, older search must not replace the results of a newer one.
       if (!alive || turn !== latest) return;
       shown = reset ? page.result : shown.concat(page.result);
       total = page.meta ? page.meta.total : shown.length;
+      if (page.meta && page.meta.origins) drawOrigins(page.meta.origins);
       status.replaceChildren();
       if (!shown.length) {
-        replace(list, query || trash
-          ? h("p", { class: "empty" }, query ? "Nothing matches that search." : "The Trash is empty.")
+        replace(list, query || trash || origin
+          ? h("p", { class: "empty" }, query ? "Nothing matches that search." : origin ? "No notes came from there." : "The Trash is empty.")
           : h("div", { class: "empty" }, h("p", {}, "No notes yet. A note holds text, and pictures, PDFs or other files beside it."),
             // Someone who may only read is not offered what they cannot do.
             mayWrite ? h("div", { class: "actions centred" },
@@ -234,7 +252,7 @@ export function notesView(container, params, { expired, go, session, receipts })
       h("div", { class: "segments", role: "navigation", "aria-label": "Note lists" },
         h("a", { href: "#/notes", class: `segment${trash ? "" : " active"}` }, "Notes"),
         h("a", { href: "#/notes?trash=1", class: `segment${trash ? " active" : ""}` }, "Trash")),
-      search),
+      h("div", { class: "finding" }, search, fromPick)),
     status, also, list, more,
     trash || !mayWrite ? null : [filesPicker, receiptPicker, adding]);
   load(true);
@@ -326,6 +344,9 @@ export function noteView(container, noteId, { go, expired, session }) {
       h("a", { href: trashed ? "#/notes?trash=1" : "#/notes", class: "back" }, "‹ Notes"),
       h("article", { class: "card section" },
         h("h1", {}, note.title || "Untitled"),
+        originOf(note) === "kaal" ? null : h("p", { class: "muted origin" },
+          h("a", { href: `#/notes?from=${originOf(note)}` }, ORIGINS[originOf(note)]),
+          note.created && originOf(note) !== "browser" ? ` · written ${when(note.created)}` : ""),
         h("p", { class: "muted" }, [when(note.updated) && `Updated ${when(note.updated)}`, ...(note.tags || []).map((tag) => `#${tag}`)].filter(Boolean).join("  "), " ", toggle),
         rendered, source,
         files.length ? h("div", {}, h("h2", {}, pdfs.length + loosePictures.length + others.length === 1 ? "File" : "Files"), files) : null,

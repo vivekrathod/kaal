@@ -124,6 +124,16 @@ out.keep = { said: await page.run("document.querySelector('.notice').textContent
 await page.click("main section p a[href='#/notes']");
 await until(() => page.run("document.querySelectorAll('.list .row').length === 2"), "the imported note");
 out.keep.rows = await page.run("[...document.querySelectorAll('.list .row .row-title')].map((r) => r.textContent).sort()");
+// Notes from two places: the list offers to show those from one, and an imported note says where it came from.
+await until(() => page.run("!document.querySelector('.origin-pick').hidden"), "the filter by origin");
+out.origins = await page.run("[...document.querySelectorAll('.origin-pick option')].map((o) => o.textContent)");
+await page.run("(() => { const pick = document.querySelector('.origin-pick'); pick.value = 'keep'; pick.dispatchEvent(new Event('change')); return 1; })()");
+await until(() => page.run("document.querySelectorAll('.list .row').length === 1"), "only the note from Keep");
+await page.click(".list .row");
+await until(() => page.run("Boolean(document.querySelector('.origin'))"), "the note from Keep");
+out.origin = await page.run("document.querySelector('.origin').textContent");
+await page.run("location.hash = '#/notes'; 1");
+await until(() => page.run("document.querySelectorAll('.list .row').length === 2"), "all the notes again");
 
 
 // Opened afresh, the section is there from the first paint: this browser remembers the vault has receipts.

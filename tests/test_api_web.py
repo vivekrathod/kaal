@@ -171,7 +171,7 @@ def test_note_lists_can_be_searched_and_paged(service):
     for title in ("Boiler manual", "Boiler service log", "Garden plan"):
         service.client.post("/v1/library/notes", headers=service.bearer(), json={"title": title, "body": "text", "tags": ["home"]})
     body = service.client.get("/v1/library/notes", headers=service.bearer(), params={"q": "boiler", "limit": 1, "offset": 1}).json()
-    assert len(body["result"]) == 1 and body["meta"] == {"total": 2, "offset": 1, "limit": 1}
+    assert len(body["result"]) == 1 and body["meta"] == {"total": 2, "offset": 1, "limit": 1, "origins": {"kaal": 3}}
     assert service.client.get("/v1/library/notes", headers=service.bearer(), params={"q": "HOME"}).json()["meta"]["total"] == 3
     assert service.client.get("/v1/library/notes", headers=service.bearer()).json()["meta"]["total"] == 3
 
@@ -200,7 +200,7 @@ def test_notes_are_found_by_their_text_and_by_text_read_from_their_files(service
 
     found = find(service, "PRESSURE")
     assert [note["id"] for note in found["result"]] == [recipe, boiler, garden]  # by title, then own text, then a file
-    assert found["meta"] == {"total": 3, "offset": 0, "limit": 50}
+    assert found["meta"] == {"total": 3, "offset": 0, "limit": 50, "origins": {"kaal": 3}}
     by_id = {note["id"]: note["match"] for note in found["result"]}
     assert by_id[recipe] == {"where": "title"}
     assert by_id[boiler] == {"where": "note", "before": "Bleed the radiators every autumn. The ", "found": "pressure", "after": " should read 1.5 bar when cold."}

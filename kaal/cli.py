@@ -92,6 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-ocr", action="store_true", help="Do not OCR image resources; OCR is on by default")
     sp.set_defaults(func=core.import_joplin_raw)
 
+    sp = sub.add_parser("tidy-import-tags", help="Take the tags older imports added (imported, keep, joplin) off imported notes, and shorten Joplin notebook tags")
+    sp.add_argument("--dry-run", action="store_true", help="Count the notes that would change without changing them")
+    sp.set_defaults(func=core.tidy_import_tags)
+
     sp = sub.add_parser("import-keep", help="Import notes, checklists and pictures from a Google Keep export (the Google Takeout .zip, or its unpacked folder)")
     sp.add_argument("path", help="The Takeout .zip, or the folder it unpacks to")
     sp.add_argument("--dry-run", action="store_true", help="Count what would be imported without writing anything")

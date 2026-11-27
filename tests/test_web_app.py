@@ -149,7 +149,7 @@ def test_search_words_travel_in_the_request_body_and_results_are_shown_as_text()
     api = (WEB / "api.js").read_text()
     assert 'request("POST", "/v1/library/search", { json: search })' in api
     notes = (WEB / "views" / "notes.js").read_text()
-    assert "api.searchNotes({ query, trash" in notes and "api.notes({ trash, limit" in notes
+    assert "api.searchNotes({ query, trash, origin" in notes and "api.notes({ trash, origin, limit" in notes
     assert 'h("mark", {}, match.found)' in notes and "turn !== latest" in notes
 
 
